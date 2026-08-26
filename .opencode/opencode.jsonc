@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    ".agent-profile-kit/opencode/context.md"
+  ],
+  "permission": {
+    "skill": {
+      "grill-with-docs": "deny",
+      "setup-project-skills": "deny",
+      "to-spec": "deny",
+      "to-tickets": "deny"
+    }
+  }
+}

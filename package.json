@@ -1,0 +1,17 @@
+{
+  "name": "thumbforge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "thumb": "bun run src/cli.ts"
+  },
+  "dependencies": {
+    "ai": "^7.0.82",
+    "playwright": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
+  }
+}

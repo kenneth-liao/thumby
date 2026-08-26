@@ -1,0 +1,11 @@
+---
+name: grill-with-docs
+description: A relentless interview to sharpen a plan or design, which also
+  creates docs (ADR's and glossary) as we go.
+metadata:
+  agent-profile-kit.model-invocation: disabled
+# Agent Profile Kit: keep Skill invocation explicit.
+disable-model-invocation: true
+---
+
+Run a `/grilling` session, using the `/domain-modeling` skill.

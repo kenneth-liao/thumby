@@ -1,0 +1,5 @@
+node_modules/
+out/
+test-plate.png
+.env
+.env.local

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "additionalContextLimit": 0,
+            "command": "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; cat \"$root/.agent-profile-kit/codex/context.md\"",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

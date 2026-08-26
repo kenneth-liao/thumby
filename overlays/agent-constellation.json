@@ -1,0 +1,86 @@
+{
+  "connectorColor": "#F2F2F2",
+  "cards": [
+    {
+      "id": "claude",
+      "x": 32.0,
+      "y": 19.5,
+      "w": 10.8,
+      "label": "Claude",
+      "mark": {
+        "type": "claude"
+      },
+      "markColor": "#E8724C",
+      "behind": true
+    },
+    {
+      "id": "chatgpt",
+      "x": 72.8,
+      "y": 17.2,
+      "w": 11.2,
+      "label": "ChatGPT",
+      "mark": {
+        "type": "svg",
+        "file": "/Users/kennethliao/projects/business/theailaunchpad/ai-launchpad-content/youtube/assets/icons_logos/openai.svg"
+      },
+      "markColor": "#4FC3A1"
+    },
+    {
+      "id": "codex",
+      "x": 88.7,
+      "y": 45.6,
+      "w": 9.8,
+      "label": "Codex",
+      "mark": {
+        "type": "text",
+        "text": ">_"
+      },
+      "markColor": "#5AA9FF",
+      "labelColor": "#7FC0FF"
+    },
+    {
+      "id": "pi",
+      "x": 85.1,
+      "y": 73.0,
+      "w": 9.8,
+      "label": "Pi",
+      "mark": {
+        "type": "text",
+        "text": "Pi"
+      },
+      "markColor": "#35C15E"
+    },
+    {
+      "id": "choice",
+      "x": 74.5,
+      "y": 47.3,
+      "w": 11.6,
+      "label": "YOUR\nBEST CHOICE",
+      "mark": {
+        "type": "text",
+        "text": "{:-}"
+      },
+      "markColor": "#FFC21A",
+      "labelColor": "#FFC21A",
+      "highlight": "#FFC21A"
+    }
+  ],
+  "connectors": [
+    {
+      "from": "choice",
+      "to": "chatgpt"
+    },
+    {
+      "from": "choice",
+      "to": "codex"
+    },
+    {
+      "from": "choice",
+      "to": "pi"
+    },
+    {
+      "from": "choice",
+      "to": "claude"
+    }
+  ]
+}
