@@ -106,6 +106,9 @@ Nano Banana models return bytes from `generateText().files`; Flux/Imagen/
 Recraft/GPT Image return base64 from `generateImage().images`. `generate.ts`
 hides that split behind one function.
 
+Compositing order (matters — it has already caused one bug):
+`plate → scrim → connectors → cards[behind] → cutout → cards → text`.
+
 ## Putting yourself in it
 
 Rather than asking a model to render your likeness — which drifts, and burns
@@ -220,6 +223,13 @@ subject into the new record, flagged `promptInheritedFromPlate`. So a plate
 you liked six weeks ago still knows how it was made, and you can regenerate
 variations of it without having kept the original command.
 
+Two traps when reading provenance:
+- Copy reruns out of `rerun.sh`, never out of raw `run.json` — JSON escapes
+  the backslash in a `\n` headline, so a copied command silently loses its
+  line break.
+- `rerun.sh` records absolute paths. They break if the project moves.
+  Making them relative is a known improvement.
+
 Finding an old prompt:
 
 ```bash
@@ -241,6 +251,14 @@ tables were misleading here: GPT Image 2 bills by token and emits only ~130
 output tokens per image, while the Gemini image models emit 1120 and bill off
 a per-dimension table — a 15x difference the list prices do not telegraph.
 
+### Adding a model
+
+- **Verify the id against `GET /v1/models` before adding it.**
+  `google/imagen-4.0-generate-001` appeared in Vercel's own docs but does not
+  exist on the Gateway; it sat in the registry as a dead id until caught.
+- **When you add a model, run it once and read the billing page before writing
+  a cost into the registry.**
+
 ## Notes
 
 - `--zone` does double duty: it places the text *and* tells the model which
@@ -257,3 +275,7 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
   both dimensions divisible by 16, which it requires.
 - `--eyebrow` is where the humanist sans does its work. Without it the pairing
   is carrying only one voice.
+- **Fonts are macOS system fonts.** On Linux/CI every pairing silently falls
+  back to a default sans with no error — output looks wrong. Productionising
+  requires bundled font files + a startup assertion that the family resolved
+  (#1).

@@ -51,9 +51,29 @@ target — accept it only when nothing larger exists.
 - **Record the source** in `meta.json` (`"source"` field): URL and date. If
   a logo ever renders wrong we need to know where it came from.
 - **Verify before adopting**: add it, render one test thumbnail with the
-  logo on a card, and *look at the image* (per HANDOFF.md — rendering bugs
+  logo on a card, and *look at the image* (per AGENTS.md "Rendering gotchas"
+  — rendering bugs
   are invisible in logs). A corrupt file like the old `openai-color.svg`
   (a 94-byte JSON error blob) must die here, not in a render.
+
+### External creator assets
+
+Content repo: `~/projects/business/theailaunchpad/ai-launchpad-content`
+
+- Approved creator cutouts (transparent PNGs):
+  `youtube/assets/creator-cutouts/approved/`
+- Brand logos: `youtube/assets/icons_logos/`
+- Reference thumbnail being matched:
+  `trials/Sruthi Poonthiyll/Thumbnail 0.png`
+
+Known asset caveats:
+
+- `icons_logos/openai-color.svg` is **corrupt** — a 94-byte JSON error blob,
+  not an SVG. Use `openai.svg` (clean single path, recolourable).
+- The Claude logo asset is a *white* asterisk on a coral tile; the
+  constellation look needs a *coral* asterisk on a dark tile, and one cannot
+  be derived from the other. `overlay.ts` draws an SVG approximation
+  (`claudeMark`) — replace it if a transparent coral mark turns up.
 
 ## Plates
 
@@ -133,7 +153,8 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
   then `bun run library add-cutout <file> --id <id> --tags <pose facets>
   --derived-from <approved id> --edit-prompt "…"`.
 - New cutouts enter as `trial`; **only Kenny's approval promotes to
-  `approved`**. Reuse-first: scan `bun run library list` before generating.
+  `approved`** (`--source` points at the provenance record in the content
+  repo). Reuse-first: scan `bun run library list` before generating.
 
 ## Naming and metadata
 

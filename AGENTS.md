@@ -16,3 +16,37 @@ See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 Single-context repo: `CONTEXT.md` and `docs/adr/` at the root. See `docs/agents/domain.md`.
+
+## Conventions
+
+- `bun`, not npm. `uv`, not pip.
+- Model costs: measure from real Gateway billing (`✓` figures only) — never copy from price tables.
+- The tool must keep working offline for everything except plate generation.
+- Core design decision (model paints background only, text is local CSS —
+  ADR-0001): do not move text rendering onto the model.
+
+## Rendering gotchas
+
+If you change `src/compose.ts` rendering, **look at the output image** — the
+following bugs were invisible in logs:
+
+- Nested double quotes inside an HTML `style="..."` attribute truncate
+  silently — emit a `<style>` block (compose.ts does).
+- A block element's `getBoundingClientRect().width` is the container width;
+  to detect font fallback, measure an inline element.
+- CSS selectors aimed at one path group can hit SVG marker paths too (the
+  dashed-arrowhead bug). Scope selectors precisely.
+- `vector-effect: non-scaling-stroke` makes `stroke-width` mean CSS pixels —
+  fractional widths go sub-pixel and vanish. Connectors use pixel-space SVG.
+- A background-clip gradient on `.headline.fill` overrides child `.accent`
+  colours unless `-webkit-text-fill-color` is restated on the child.
+- In batch sweeps, check the output file list, not just timing — a silenced
+  stdout once hid 3 of 4 variants failing to render.
+
+## Assets and provenance
+
+- Asset requirements for logos, plates, and cutouts (including Kenny's
+  likeness rules): `docs/asset-requirements.md` — canonical.
+- Creator cutouts must be composited or derived via a single edit pass from
+  the identity kit; **never generate his likeness from text alone**.
+- Design decisions and their rationale: `docs/adr/`.
