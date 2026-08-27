@@ -129,6 +129,51 @@ sideways and `--text-width` to keep the headline clear of your face. `\n` in
 `--headline` forces a line break, which is how you get a two-line lockup with
 only the second line in the accent color.
 
+## The asset library
+
+Reusable assets — plates you liked and official logos — live in one place,
+`assets/`, and are searchable:
+
+```bash
+bun run library list                # everything
+bun run library list neon           # filter by id, name, tag, or alias
+bun run library list --sheet        # also write assets/index.html contact sheet
+```
+
+The filesystem is the registry — there is no index file. Each asset is one
+directory with an image plus `meta.json`:
+
+| kind | directory | contents |
+|---|---|---|
+| logo | `assets/logos/<id>/` | `logo.svg` or `logo.png` + `meta.json` |
+| plate | `assets/plates/<id>/` | `plate.png` + `meta.json` |
+
+Logo `meta.json`: `{ "kind":"logo", "id":"openai", "name":"OpenAI",
+"tags":["ai"], "defaultColor":"#4FC3A1", "aliases":["chatgpt"] }`.
+
+Add a logo once (SVGs recolour freely in cards; raster marks show as-is):
+
+```bash
+bun run library add-logo ~/downloads/openai.svg --id openai \
+  --name OpenAI --tags ai --color "#4FC3A1" --alias chatgpt
+```
+
+Adopt a generated plate so it outlives its run folder — provenance
+(prompt, model) is carried forward from the `run.json` beside it:
+
+```bash
+bun run library adopt out/punchy/plate-1.png --id neon-terminal --tags neon,dark
+```
+
+Overlay specs reference library logos by id, so no absolute paths:
+
+```json
+{ "mark": { "type": "logo", "id": "openai" }, "markColor": "#4FC3A1" }
+```
+
+(`markColor` overrides; without one the logo's `defaultColor` applies.) The
+library's bytes are gitignored — creator cutouts and brand logos stay local.
+
 ## Overlay cards
 
 `--overlay <spec.json>` draws floating glass tiles joined by dashed connectors

@@ -1,10 +1,11 @@
 {
   "name": "thumbforge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "thumb": "bun run src/cli.ts"
+    "thumb": "bun run src/cli.ts",
+    "library": "bun run src/library-cli.ts"
   },
   "dependencies": {
     "ai": "^7.0.82",

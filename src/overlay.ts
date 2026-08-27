@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { scanLibrary, resolveLogo, LIBRARY_ROOT, type Library, type LibraryEntry, type LogoMeta } from "./assets.js";
 
 /**
  * A floating-card layer: rounded glass tiles with a logo and label, joined by
@@ -15,9 +16,10 @@ export interface OverlayCard {
   /** Card width as a percentage of frame width. */
   w: number;
   label?: string;
-  /** Inline SVG file, a built-in mark, or literal text as the glyph. */
+  /** Inline SVG file, a library logo, a built-in mark, or literal text as the glyph. */
   mark?:
     | { type: "svg"; file: string }
+    | { type: "logo"; id: string }
     | { type: "text"; text: string }
     | { type: "claude" };
   markColor?: string;
@@ -73,10 +75,36 @@ async function inlineSvg(file: string, color?: string): Promise<string> {
   return svg;
 }
 
+let library: Promise<Library> | null = null;
+
+/** The library is scanned once per process and cached; it is small. */
+function loadLibrary(): Promise<Library> {
+  library ??= scanLibrary(LIBRARY_ROOT);
+  return library;
+}
+
+async function renderRaster(file: string): Promise<string> {
+  const bytes = await readFile(path.resolve(file));
+  const ext = path.extname(file).slice(1).toLowerCase();
+  const mediaType = ext === "jpg" ? "jpeg" : ext;
+  return `<img src="data:image/${mediaType};base64,${Buffer.from(bytes).toString("base64")}">`;
+}
+
 async function renderMark(card: OverlayCard): Promise<string> {
-  const color = card.markColor ?? "#FFFFFF";
   if (!card.mark) return "";
+  const color = card.markColor ?? "#FFFFFF";
   if (card.mark.type === "claude") return claudeMark(color);
+  if (card.mark.type === "logo") {
+    let entry: LibraryEntry<LogoMeta>;
+    try {
+      entry = resolveLogo(await loadLibrary(), card.mark.id);
+    } catch (err) {
+      throw new Error(`overlay card "${card.id}": ${(err as Error).message}`);
+    }
+    const markColor = card.markColor ?? entry.meta.defaultColor ?? "#FFFFFF";
+    if (entry.kind === "svg") return inlineSvg(entry.imagePath, markColor);
+    return renderRaster(entry.imagePath);
+  }
   if (card.mark.type === "svg") return inlineSvg(card.mark.file, color);
   return `<span class="glyph" style="color:${color}">${card.mark.text
     .replace(/&/g, "&amp;")
@@ -163,6 +191,7 @@ export async function renderOverlay(
                       inset 0 1px 0 rgba(255,255,255,.09); }
   .omark { width:52%; height:52%; display:flex; align-items:center; justify-content:center; }
   .omark svg { width:100%; height:100%; display:block; }
+  .omark img { width:100%; height:100%; object-fit:contain; display:block; }
   .glyph { font-family:${"ui-monospace, SFMono-Regular, Menlo, monospace"}; font-weight:800;
            font-size:2.7vw; line-height:1; white-space:nowrap; }
   .olabel { font-family:var(--font-sans); font-weight:700; color:#fff; width:118%;

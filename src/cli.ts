@@ -30,8 +30,10 @@ Cutout
   --cutout-scale     Height as a fraction of the frame (default: 0.95)
   --cutout-glow      Rim glow color behind the cutout, e.g. "#FFB020"
   --cutout-x         Nudge the cutout sideways, in % of frame width
-  --overlay  <path>  JSON describing floating logo cards and dashed connectors
-                     laid over the plate. See overlays/ for an example.
+   --overlay  <path>  JSON describing floating logo cards and dashed connectors
+                      laid over the plate. See overlays/ for an example. A card
+                      mark can be {type:"logo", id} (from the asset library,
+                      bun run library --help), {type:"svg", file}, or text.
   --text-width       Width of the text column, e.g. "38%". Narrow this when a
                      centered cutout would otherwise collide with the headline.
   --sub      <str>   Kicker line under the headline.
