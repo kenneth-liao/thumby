@@ -6,3 +6,4 @@ test-plate.png
 # Personal + third-party-licensed assets stay local (creator cutouts, brand logos).
 assets/
 overlays/*.local.json
+.worktrees/
