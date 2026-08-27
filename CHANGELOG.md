@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-26
+
+### Fixed
+
+- `add-logo` now normalizes SVGs on ingestion (strips `width`/`height`/`style` sizing hints and XML declarations) so files size from their `viewBox` in every viewer; existing library SVGs cleaned in place
+
 ## [0.2.1] - 2026-08-26
 
 ### Added

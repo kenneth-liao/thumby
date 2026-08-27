@@ -170,7 +170,17 @@ try {
     const src = path.resolve(positionals[1] ?? "");
     if (!src || !/\.(svg|png|jpe?g|webp)$/i.test(src)) fail("add-logo needs a logo image file");
     const destFile = path.join(dir, `${id}${path.extname(src).toLowerCase()}`);
-    await copyFile(src, destFile);
+    if (destFile.endsWith(".svg")) {
+      // Normalize on the way in: drop fixed sizing hints so every viewer
+      // (VS Code, Finder) sizes from the viewBox, like the composer does.
+      const raw = await readFile(src, "utf8");
+      const normalized = raw
+        .replace(/<\?xml[^>]*\?>/g, "")
+        .replace(/\s(width|height|style)="[^"]*"/g, "");
+      await writeFile(destFile, normalized.trimStart());
+    } else {
+      await copyFile(src, destFile);
+    }
     await writeFile(
       path.join(dir, "meta.json"),
       JSON.stringify(
