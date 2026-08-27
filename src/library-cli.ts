@@ -22,6 +22,7 @@ Options
   --tags <csv>     Comma-separated tags, e.g. "ai,coding"
   --color <hex>    Logo: default mark colour when recolourable
   --alias <csv>    Logo: extra ids it answers to, e.g. "chatgpt,gpt"
+  --source <url>   Logo: where it came from (URL + date), per docs/asset-requirements.md
   --sheet          list only: also write assets/index.html contact sheet
 
 Library lives at ${LIBRARY_ROOT}. One directory per asset:
@@ -43,6 +44,7 @@ const parse = () =>
       tags: { type: "string", default: "" },
       color: { type: "string" },
       alias: { type: "string", default: "" },
+      source: { type: "string" },
       sheet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -179,6 +181,7 @@ try {
           tags: csv(values.tags!),
           ...(values.color ? { defaultColor: values.color } : {}),
           ...((csv(values.alias!) || []).length ? { aliases: csv(values.alias!) } : {}),
+          ...(values.source ? { source: values.source } : {}),
         },
         null,
         2,
