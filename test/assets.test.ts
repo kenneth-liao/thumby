@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   scanLibrary,
   resolveLogo,
+  resolveCutout,
   searchLibrary,
 } from "../src/assets.js";
 
@@ -44,8 +45,16 @@ async function seedLogo(id: string, opts?: { svg?: boolean; extra?: string }) {
 
 describe("scanLibrary", () => {
   it("returns empty on a missing or empty library without erroring", async () => {
-    expect(await scanLibrary(path.join(root, "nope"))).toEqual({ logos: [], plates: [] });
-    expect(await scanLibrary(root)).toEqual({ logos: [], plates: [] });
+    expect(await scanLibrary(path.join(root, "nope"))).toEqual({
+      logos: [],
+      plates: [],
+      cutouts: [],
+    });
+    expect(await scanLibrary(root)).toEqual({
+      logos: [],
+      plates: [],
+      cutouts: [],
+    });
   });
 
   it("finds logos and derives the image path", async () => {
@@ -110,6 +119,26 @@ describe("scanLibrary", () => {
     expect(lib.plates[0]!.imagePath).toBe(path.resolve(root, "plates/neon-terminal/plate.png"));
     expect(lib.plates[0]!.meta.subject).toContain("burnt-out");
   });
+
+  it("scans a cutout with role tags and approval", async () => {
+    await put(
+      `cutouts/deadpan/meta.json`,
+      JSON.stringify({
+        kind: "cutout",
+        id: "deadpan",
+        name: "Deadpan",
+        tags: ["deadpan", "chest-up"],
+        approval: "trial",
+        derivedFrom: "/somewhere/approved/original.png",
+      }),
+    );
+    await put(`cutouts/deadpan/cutout.png`, "PNGBYTES");
+    const lib = await scanLibrary(root);
+    expect(lib.cutouts).toHaveLength(1);
+    expect(lib.cutouts[0]!.meta.id).toBe("deadpan");
+    expect(lib.cutouts[0]!.kind).toBe("raster");
+    expect(lib.cutouts[0]!.meta.approval).toBe("trial");
+  });
 });
 
 describe("searchLibrary", () => {
@@ -133,6 +162,25 @@ describe("searchLibrary", () => {
     expect((await searchLibrary(await scanLibrary(root), "chatgpt")).logos).toHaveLength(1);
     expect((await searchLibrary(await scanLibrary(root), "neon")).plates).toHaveLength(1);
     expect((await searchLibrary(await scanLibrary(root), "zzz")).logos).toHaveLength(0);
+  });
+
+  it("matches cutouts by role tag", async () => {
+    await put(
+      `cutouts/deadpan/meta.json`,
+      JSON.stringify({
+        kind: "cutout",
+        id: "deadpan",
+        name: "Deadpan",
+        tags: ["deadpan", "chest-up"],
+        approval: "trial",
+      }),
+    );
+    await put(`cutouts/deadpan/cutout.png`, "PNGBYTES");
+    const lib = await scanLibrary(root);
+    expect((await searchLibrary(lib, "deadpan")).cutouts).toHaveLength(1);
+    expect((await searchLibrary(lib, "zzz")).cutouts).toHaveLength(0);
+    expect(resolveCutout(lib, "deadpan").meta.id).toBe("deadpan");
+    expect(() => resolveCutout(lib, "nope")).toThrow(/Unknown cutout/);
   });
 
   it("empty query returns everything", async () => {

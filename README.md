@@ -1,4 +1,4 @@
-# thumbforge
+# thumby
 
 YouTube thumbnails, hybrid approach: an AI model paints the background plate,
 the text layer is rendered locally in CSS and screenshotted at exactly

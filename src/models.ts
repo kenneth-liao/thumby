@@ -80,8 +80,8 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "image",
     approxCost: 0.035,
     costMeasured: false,
-    supportsRef: false,
-    note: "Seedream 5.0 Pro — photoreal, strong composition",
+    supportsRef: true,
+    note: "Seedream 5.0 Pro — flat per-image rate (no 4K penalty), takes reference images; identity strength unproven here",
   },
   recraft: {
     id: "recraft/recraft-v4.1",

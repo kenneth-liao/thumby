@@ -59,6 +59,11 @@ async function refParts(refs: string[]) {
   );
 }
 
+/** Image models take raw bytes in GenerateImagePrompt.images, not file parts. */
+async function refBytes(refs: string[]) {
+  return Promise.all(refs.map((p) => readFile(path.resolve(p))));
+}
+
 export interface GenerateOptions {
   subject: string;
   model: string;
@@ -67,6 +72,11 @@ export interface GenerateOptions {
   count: number;
   /** A cutout supplies the subject, so the plate must stay a bare backdrop. */
   subjectless: boolean;
+  /**
+   * Multimodal models only — lowers creative drift for likeness work.
+   * Image-kind models have no such knob; a value here is rejected loudly.
+   */
+  temperature?: number;
 }
 
 /**
@@ -101,6 +111,12 @@ export async function generatePlates(
     );
   }
 
+  if (opts.temperature != null && spec.kind !== "multimodal") {
+    throw new Error(
+      `--temperature only applies to multimodal models (Gemini); "${opts.model}" is an image model.`,
+    );
+  }
+
   const runs = Array.from({ length: opts.count }, (_, i) => i);
 
   const plates = await Promise.all(
@@ -108,6 +124,7 @@ export async function generatePlates(
       if (spec.kind === "multimodal") {
         const result = await generateText({
           model: spec.id,
+          ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
           ...(opts.refs.length
             ? {
                 messages: [
@@ -138,7 +155,9 @@ export async function generatePlates(
 
       const result = await generateImage({
         model: spec.id,
-        prompt,
+        ...(opts.refs.length
+          ? { prompt: { text: prompt, images: await refBytes(opts.refs) } }
+          : { prompt }),
         ...(spec.sizing === "size"
           ? { size: LANDSCAPE_SIZE }
           : { aspectRatio: "16:9" as const }),

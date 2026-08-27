@@ -23,6 +23,8 @@ export interface ComposeSpec {
   textWidth?: string;
   /** Horizontal nudge for the cutout, in percent of frame width. */
   cutoutX: number;
+  /** Mirror the cutout horizontally, e.g. to reverse which way it points. */
+  cutoutFlip?: boolean;
   /** Second colour for a gradient headline fill. */
   fillTo?: string;
   /** Floating logo cards and connectors drawn over the plate. */
@@ -88,8 +90,9 @@ function page(
                 ? `left:${2 + spec.cutoutX}%;`
                 : spec.cutoutSide === "right"
                   ? `right:${2 - spec.cutoutX}%;`
-                  : `left:${50 + spec.cutoutX}%; transform:translateX(-50%);`
+                  : `left:${50 + spec.cutoutX}%;`
             }
+            transform:${spec.cutoutFlip ? "scaleX(-1)" : "none"}${spec.cutoutSide === "center" ? " translateX(-50%)" : ""};
             ${spec.cutoutGlow ? `filter: drop-shadow(0 0 18px ${spec.cutoutGlow}) drop-shadow(0 0 54px ${spec.cutoutGlow});` : ""} }
   .layer { position:absolute; inset:0; display:flex; flex-direction:column;
            padding: 52px 56px; ${zonePad[spec.zone]} }

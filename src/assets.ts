@@ -41,7 +41,30 @@ export interface PlateMeta {
   adoptedFrom?: string;
 }
 
-export type AssetMeta = LogoMeta | PlateMeta;
+/**
+ * A transparent-PNG subject for compositing. Its identity is the *role* it can
+ * play — pose, expression, outfit, framing — because everything else in the
+ * final thumbnail (background, text, colour) is applied at compose time.
+ */
+export interface CutoutMeta {
+  kind: "cutout";
+  id: string;
+  name: string;
+  /** Role facets: pose, expression, outfit, framing. The reuse search space. */
+  tags: string[];
+  /** trials are working assets; approved ones are human-gated. */
+  approval: "trial" | "approved";
+  /** Governance home when approved (e.g. a content-repo provenance record). */
+  source?: string;
+  /** The cutout this one was edited from — always an approved original. */
+  derivedFrom?: string;
+  /** The edit instruction that produced it from derivedFrom. */
+  editPrompt?: string;
+  model?: string;
+  adoptedFrom?: string;
+}
+
+export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta;
 
 export interface LibraryEntry<M extends AssetMeta = AssetMeta> {
   meta: M;
@@ -53,7 +76,11 @@ export interface LibraryEntry<M extends AssetMeta = AssetMeta> {
 export interface Library {
   logos: LibraryEntry<LogoMeta>[];
   plates: LibraryEntry<PlateMeta>[];
+  cutouts: LibraryEntry<CutoutMeta>[];
 }
+
+const KIND_DIRS = ["logos", "plates", "cutouts"] as const;
+type KindDir = (typeof KIND_DIRS)[number];
 
 const IMAGE_EXTENSIONS = new Set([".svg", ".png", ".jpg", ".jpeg", ".webp"]);
 
@@ -84,7 +111,7 @@ async function findImage(dir: string): Promise<string | { error: string }> {
   return path.resolve(dir, files[0]!);
 }
 
-function scanKindDir(root: string, subdir: "logos" | "plates"): Promise<LibraryEntry[]> {
+function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
   const base = path.join(root, subdir);
   return (async () => {
     let names: string[];
@@ -102,7 +129,7 @@ function scanKindDir(root: string, subdir: "logos" | "plates"): Promise<LibraryE
       const imgResult = await findImage(dir);
       if (typeof imgResult !== "string") throw new Error(imgResult.error);
       const meta = metaResult.meta as AssetMeta;
-      if (meta.kind !== "logo" && meta.kind !== "plate")
+      if (meta.kind !== "logo" && meta.kind !== "plate" && meta.kind !== "cutout")
         throw new Error(`${dir}/meta.json: unknown kind "${(meta as any).kind}"`);
       if (meta.id !== d)
         throw new Error(
@@ -119,15 +146,17 @@ function scanKindDir(root: string, subdir: "logos" | "plates"): Promise<LibraryE
 }
 
 export async function scanLibrary(root: string): Promise<Library> {
-  const [logos, plates] = await Promise.all([
+  const [logos, plates, cutouts] = await Promise.all([
     scanKindDir(root, "logos"),
     scanKindDir(root, "plates"),
+    scanKindDir(root, "cutouts"),
   ]);
   // An id is the vocabulary every reader uses; it must be unambiguous library-wide.
   const seen = new Map<string, string>();
   for (const [kind, entries] of [
     ["logos", logos],
     ["plates", plates],
+    ["cutouts", cutouts],
   ] as const) {
     for (const e of entries) {
       const owner = seen.get(e.meta.id);
@@ -141,6 +170,7 @@ export async function scanLibrary(root: string): Promise<Library> {
   return {
     logos: logos as LibraryEntry<LogoMeta>[],
     plates: plates as LibraryEntry<PlateMeta>[],
+    cutouts: cutouts as LibraryEntry<CutoutMeta>[],
   };
 }
 
@@ -158,6 +188,7 @@ export async function searchLibrary(lib: Library, query: string): Promise<Librar
   return {
     logos: lib.logos.filter((e) => matches(e, q)),
     plates: lib.plates.filter((e) => matches(e, q)),
+    cutouts: lib.cutouts.filter((e) => matches(e, q)),
   };
 }
 
@@ -177,6 +208,21 @@ export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoM
   throw new Error(
     `Unknown logo "${idOrAlias}". In library: ${
       lib.logos.map((l) => l.meta.id).join(", ") || "(none — add one with bun run library add-logo)"
+    }`,
+  );
+}
+
+/**
+ * Resolve a cutout id to its entry. Throws with the available options when
+ * nothing matches, so a typo'd --cutout fails loudly before compose.
+ */
+export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta> {
+  const hit = lib.cutouts.find((c) => c.meta.id === id);
+  if (hit) return hit;
+  throw new Error(
+    `Unknown cutout "${id}". In library: ${
+      lib.cutouts.map((c) => c.meta.id).join(", ") ||
+      "(none — add one with bun run library add-cutout <file> --id <name>)"
     }`,
   );
 }

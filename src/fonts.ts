@@ -62,6 +62,15 @@ export const PAIRINGS: Record<string, Pairing> = {
     strokeScale: 1.2,
     description: "Phosphate Solid + Gill Sans — condensed with more character",
   },
+  script: {
+    display: "Brush Script MT",
+    displayWeight: 400,
+    ...GILL,
+    tracking: "0.01em",
+    textCase: "style",
+    strokeScale: 0.5,
+    description: "Brush Script MT + Gill Sans — hand-painted brush lettering",
+  },
 
   // --- cartographic serif --------------------------------------------------
   clarendon: {

@@ -148,8 +148,35 @@ Content repo: `~/projects/business/theailaunchpad/ai-launchpad-content`
 - Reference thumbnail being matched:
   `trials/Sruthi Poonthiyll/Thumbnail 0.png`
 
-**Never generate his likeness with a model.** Composite the approved cutout.
-It is pixel-identical every run, and keeps the job on the cheap model.
+**Never generate his likeness from scratch.** The one exception is a
+**single edit pass derived from his real headshots** (pose/expression/outfit/
+framing change). The tested recipe — 4-anchor identity kit + role-assigned
+pose ref, prompt wording, model ranking (nano-2 workhorse, nano-pro for hard
+cases, Seedream disqualified: drift + watermark), and the chroma-key step —
+lives in **`docs/asset-requirements.md` § Cutouts**, which is the canonical
+home for cutout practice going forward. Evidence A/Bs:
+`out/trial-cutouts/ab/` (2026-08-26), `out/trial-cutouts/seedream-ab/`
+(2026-08-27 three-way).
+
+**Never generate his likeness with a model from text alone.** Composite the
+approved cutout. It is pixel-identical every run, and keeps the job on the cheap
+model.
+
+### Cutout assets and the reuse rule
+
+Cutouts live in the asset library (`assets/cutouts/<id>/`) alongside logos and
+plates: `bun run library add-cutout <file.png> --id <id> --tags <role facets>`.
+`--cutout` accepts a library id or a path; an id keeps compositions portable.
+Tag facets are pose, expression, outfit, framing — the reuse search space.
+
+**Reuse vs generate:** scan `bun run library list` for an existing cutout whose
+tags match the thumbnail's needed role. Reuse when the desired pose, expression,
+outfit, and framing already exist as an asset (cost: $0, instant, zero drift).
+Generate a new derived cutout only when a facet is genuinely missing — edit an
+approved original once, key it, then `add-cutout` it with lineage
+(`--derived-from`, `--edit-prompt`) so the next search can find it. Trials stay
+`trial`; human approval promotes them to `approved` (with `--source` pointing at
+the provenance record in the content repo).
 
 Two asset caveats:
 - `icons_logos/openai-color.svg` is **corrupt** — a 94-byte JSON error blob

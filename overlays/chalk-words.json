@@ -1,0 +1,32 @@
+{
+  "cards": [
+    { "id": "w-agentic", "x": 16, "y": 12, "w": 24, "bare": true,
+      "mark": { "type": "text", "text": "agentic\nengineering" }, "font": "Chalkduster", "textSize": 2.6, "markColor": "#E8E8E4" },
+    { "id": "w-loops", "x": 37, "y": 10, "w": 12, "bare": true,
+      "mark": { "type": "text", "text": "loops" }, "font": "Chalkduster", "textSize": 2.2, "markColor": "#D8D8D4" },
+    { "id": "w-skills", "x": 12, "y": 31, "w": 18, "bare": true, "rotate": -4,
+      "mark": { "type": "text", "text": "skills" }, "font": "Chalkduster", "textSize": 4.2, "markColor": "#F2F2EE" },
+    { "id": "w-memory", "x": 30, "y": 26, "w": 13, "bare": true, "rotate": 3,
+      "mark": { "type": "text", "text": "memory" }, "font": "Chalkduster", "textSize": 2.3, "markColor": "#DEDEDA" },
+    { "id": "w-plan", "x": 27, "y": 42, "w": 10, "bare": true, "rotate": -3,
+      "mark": { "type": "text", "text": "plan" }, "font": "Chalkduster", "textSize": 2.8, "markColor": "#E4E4E0" },
+    { "id": "w-tmux", "x": 10, "y": 52, "w": 13, "bare": true, "rotate": 2,
+      "mark": { "type": "text", "text": "tmux" }, "font": "Chalkduster", "textSize": 3.4, "markColor": "#EFEFEA" },
+    { "id": "w-whisper", "x": 15, "y": 66, "w": 14, "bare": true, "rotate": -2,
+      "mark": { "type": "text", "text": "whisper" }, "font": "Chalkduster", "textSize": 2.4, "markColor": "#DCDCD8" },
+    { "id": "w-worktree", "x": 76, "y": 12, "w": 22, "bare": true, "rotate": 2,
+      "mark": { "type": "text", "text": "worktree" }, "font": "Chalkduster", "textSize": 3.8, "markColor": "#F0F0EC" },
+    { "id": "w-validation", "x": 86, "y": 23, "w": 17, "bare": true,
+      "mark": { "type": "text", "text": "validation" }, "font": "Chalkduster", "textSize": 2.2, "markColor": "#D6D6D2" },
+    { "id": "w-review", "x": 69, "y": 30, "w": 12, "bare": true, "rotate": -3,
+      "mark": { "type": "text", "text": "review" }, "font": "Chalkduster", "textSize": 2.4, "markColor": "#E0E0DC" },
+    { "id": "w-parallel", "x": 81, "y": 39, "w": 17, "bare": true, "rotate": 3,
+      "mark": { "type": "text", "text": "parallel" }, "font": "Chalkduster", "textSize": 3.4, "markColor": "#ECECE8" },
+    { "id": "w-workflow", "x": 74, "y": 53, "w": 16, "bare": true, "rotate": -2,
+      "mark": { "type": "text", "text": "workflow" }, "font": "Chalkduster", "textSize": 3.0, "markColor": "#E6E6E2" },
+    { "id": "w-html", "x": 92, "y": 51, "w": 9, "bare": true,
+      "mark": { "type": "text", "text": "html" }, "font": "Chalkduster", "textSize": 2.1, "markColor": "#D2D2CE" },
+    { "id": "w-orchestration", "x": 81, "y": 65, "w": 20, "bare": true, "rotate": 2,
+      "mark": { "type": "text", "text": "orchestration" }, "font": "Chalkduster", "textSize": 2.3, "markColor": "#DADAD6" }
+  ]
+}

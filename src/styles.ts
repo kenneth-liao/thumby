@@ -91,6 +91,22 @@ export const STYLES: Record<string, StylePreset> = {
              letter-spacing: .12em; padding: 8px 20px; margin-top: 24px; }
     `,
   },
+  chalk: {
+    name: "chalk",
+    description: "Centre-bottom headline, no stroke, soft shadow — for busy textured plates",
+    strokeRatio: 0,
+    maxHeightRatio: 0.5,
+    textCase: "none",
+    css: `
+      .layer { justify-content: flex-end; align-items: center; text-align: center; padding-bottom: 10px; }
+      .textbox { align-items: center; }
+      .headline { color: var(--fill); line-height: 1.0;
+                  filter: drop-shadow(0 3px 7px rgba(0,0,0,.6)) drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+      .headline .accent { color: var(--accent); }
+      .eyebrow { color: var(--accent); font-size: 24px; letter-spacing: .3em; margin-bottom: 16px; }
+      .sub { color: rgba(255,255,255,.72); font-size: 27px; margin-top: 18px; }
+    `,
+  },
 };
 
 export const DEFAULT_STYLE = "punch";

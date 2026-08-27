@@ -3,7 +3,7 @@
 (globalThis as any).AI_SDK_LOG_WARNINGS = false;
 
 import { parseArgs } from "node:util";
-import { mkdir, writeFile, readFile, appendFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, appendFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { generatePlates, type TextZone } from "./generate.js";
 import { compose, closeBrowser, WIDTH, HEIGHT } from "./compose.js";
@@ -11,9 +11,11 @@ import type { OverlaySpec } from "./overlay.js";
 import { MODELS, DEFAULT_MODEL, resolveModel } from "./models.js";
 import { STYLES, DEFAULT_STYLE } from "./styles.js";
 import { PAIRINGS, DEFAULT_PAIRING } from "./fonts.js";
+import { loadLibrary } from "./overlay.js";
+import { resolveCutout } from "./assets.js";
 
 const HELP = `
-thumbforge — YouTube thumbnails: AI background + code-rendered text
+thumby — YouTube thumbnails: AI background + code-rendered text
 
   bun run thumb --prompt "<scene>" --headline "<text>" [options]
 
@@ -24,12 +26,14 @@ Core
   --eyebrow  <str>   Small humanist-sans line above the headline.
 
 Cutout
-  --cutout   <path>  Transparent PNG (you, cut out) laid over the background
-                     and under the text. Use \n in --headline for line breaks.
+  --cutout   <path|id>  Transparent PNG (you, cut out) laid over the background
+                      and under the text — a filesystem path or a library id
+                      (bun run library list). Use \n in --headline for breaks.
   --cutout-side      left | center | right  (default: opposite --zone)
   --cutout-scale     Height as a fraction of the frame (default: 0.95)
   --cutout-glow      Rim glow color behind the cutout, e.g. "#FFB020"
   --cutout-x         Nudge the cutout sideways, in % of frame width
+  --cutout-flip      Mirror the cutout horizontally (e.g. reverse pointing)
    --overlay  <path>  JSON describing floating logo cards and dashed connectors
                       laid over the plate. See overlays/ for an example. A card
                       mark can be {type:"logo", id} (from the asset library,
@@ -131,6 +135,7 @@ function parse(args: string[]) {
     "cutout-scale": { type: "string", default: "0.95" },
     "cutout-glow": { type: "string" },
     "cutout-x": { type: "string", default: "0" },
+    "cutout-flip": { type: "boolean", default: false },
     "text-width": { type: "string" },
     overlay: { type: "string" },
     "fill-to": { type: "string" },
@@ -143,6 +148,7 @@ function parse(args: string[]) {
     stroke: { type: "string", default: "#000000" },
     model: { type: "string", default: DEFAULT_MODEL },
     plates: { type: "string", default: "1" },
+    temperature: { type: "string" },
     ref: { type: "string", multiple: true, default: [] },
     out: { type: "string", default: "out" },
     list: { type: "boolean", default: false },
@@ -258,6 +264,9 @@ if (values.bg) {
       refs: values.ref as string[],
       count: plateCount,
       subjectless: Boolean(values.cutout),
+      ...(values.temperature != null
+        ? { temperature: parseFloat(values.temperature) }
+        : {}),
     });
     plates = gen.plates;
     genWarnings = gen.warnings;
@@ -273,13 +282,28 @@ if (values.bg) {
 
 for (const w of genWarnings) console.log(`  warn     ${w}`);
 
-// 2 — cutout, loaded once and reused across every variant
-const cutout = values.cutout
-  ? {
-      bytes: await readFile(path.resolve(values.cutout)),
-      mediaType: `image/${path.extname(values.cutout).slice(1).toLowerCase() || "png"}`,
-    }
-  : undefined;
+// 2 — cutout, loaded once and reused across every variant.
+// A library id keeps compositions portable; a path still works for one-offs.
+let cutoutLibraryId: string | undefined;
+const cutout = await (async () => {
+  if (!values.cutout) return undefined;
+  const asPath = path.resolve(values.cutout);
+  if (await stat(asPath).then(
+    (s) => s.isFile(),
+    () => false,
+  )) {
+    return {
+      bytes: await readFile(asPath),
+      mediaType: `image/${path.extname(asPath).slice(1).toLowerCase() || "png"}`,
+    };
+  }
+  const entry = resolveCutout(await loadLibrary(), values.cutout);
+  cutoutLibraryId = entry.meta.id;
+  return {
+    bytes: await readFile(entry.imagePath),
+    mediaType: `image/${path.extname(entry.imagePath).slice(1).toLowerCase() || "png"}`,
+  };
+})();
 const cutoutSide = (values["cutout-side"] ??
   (zone === "left" ? "right" : zone === "right" ? "left" : "center")) as
   "left" | "center" | "right";
@@ -304,6 +328,7 @@ for (const [pi, plate] of plates.entries()) {
       cutoutScale: parseFloat(values["cutout-scale"]!) || 0.95,
       cutoutGlow: values["cutout-glow"],
       cutoutX: parseFloat(values["cutout-x"]!) || 0,
+      cutoutFlip: values["cutout-flip"],
       textWidth: values["text-width"],
       overlay,
       sub: values.sub,
@@ -323,7 +348,7 @@ for (const [pi, plate] of plates.entries()) {
 await closeBrowser();
 
 // 3 — contact sheet for picking a winner
-const sheet = `<!doctype html><meta charset="utf-8"><title>thumbforge — ${headlines.length * plates.length} variants</title>
+const sheet = `<!doctype html><meta charset="utf-8"><title>thumby — ${headlines.length * plates.length} variants</title>
 <style>body{background:#0b0b0d;color:#e7e7ea;font:14px/1.5 -apple-system,sans-serif;margin:0;padding:32px}
 h1{font-size:15px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#8a8a94;margin:0 0 24px}
 .g{display:grid;gap:28px;grid-template-columns:repeat(auto-fill,minmax(420px,1fr))}
@@ -347,6 +372,7 @@ const record = {
   promptInheritedFromPlate: !values.prompt && Boolean(platePrompt),
   background: values.bg ? path.resolve(values.bg) : null,
   model: values.bg ? (plateModel ?? null) : resolveModel(values.model!).id,
+  temperature: values.temperature != null ? parseFloat(values.temperature) : null,
   plates: plates.map((_, i) => `plate-${i + 1}.png`),
   headlines,
   eyebrow: values.eyebrow ?? null,
@@ -359,10 +385,12 @@ const record = {
   overlay: values.overlay ? path.resolve(values.overlay) : null,
   cutout: values.cutout
     ? {
-        path: path.resolve(values.cutout),
+        path: cutoutLibraryId ? null : path.resolve(values.cutout!),
+        libraryId: cutoutLibraryId ?? null,
         side: cutoutSide,
         scale: parseFloat(values["cutout-scale"]!) || 0.95,
         x: parseFloat(values["cutout-x"]!) || 0,
+        flip: values["cutout-flip"] ?? false,
         glow: values["cutout-glow"] ?? null,
       }
     : null,

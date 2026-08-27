@@ -8,25 +8,32 @@ import {
   scanLibrary,
   searchLibrary,
   type Library,
+  type CutoutMeta,
 } from "./assets.js";
 
 const HELP = `
-library — the reusable asset library (plates + logos)
+library — the reusable asset library (plates + logos + cutouts)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
   bun run library add-logo <file> --id <id>   Add a logo image to the library.
   bun run library adopt <plate.png> --id <id> Adopt a generated plate (with its provenance).
+  bun run library add-cutout <file> --id <id> Add a transparent-PNG cutout.
 
 Options
   --name <str>     Display name (defaults to the id)
-  --tags <csv>     Comma-separated tags, e.g. "ai,coding"
+  --tags <csv>     Comma-separated tags. Cutouts: role facets — pose,
+                   expression, outfit, framing — e.g. "deadpan,plaid,chest-up"
   --color <hex>    Logo: default mark colour when recolourable
   --alias <csv>    Logo: extra ids it answers to, e.g. "chatgpt,gpt"
-  --source <url>   Logo: where it came from (URL + date), per docs/asset-requirements.md
+  --source <url>   Logo/cutout: where it came from (URL + date)
+  --approval <s>   Cutout: trial | approved  (default: trial)
+  --derived-from <path>  Cutout: the approved original this was edited from
+  --edit-prompt <str>    Cutout: the edit instruction that produced it
   --sheet          list only: also write assets/index.html contact sheet
 
 Library lives at ${LIBRARY_ROOT}. One directory per asset:
-logos/<id>/ holds logo.svg|png + meta.json; plates/<id>/ holds plate.png + meta.json.
+logos/<id>/ holds logo.svg|png + meta.json; plates/<id>/ holds plate.png +
+meta.json; cutouts/<id>/ holds cutout.png + meta.json.
 `;
 
 function fail(msg: string): never {
@@ -45,6 +52,9 @@ const parse = () =>
       color: { type: "string" },
       alias: { type: "string", default: "" },
       source: { type: "string" },
+      approval: { type: "string" },
+      "derived-from": { type: "string" },
+      "edit-prompt": { type: "string" },
       sheet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -57,8 +67,8 @@ if (values.help || positionals.length === 0) {
 }
 
 const command = positionals[0]!;
-if (!["list", "add-logo", "adopt"].includes(command)) {
-  fail(`Unknown command "${command}". Options: list | add-logo | adopt`);
+if (!["list", "add-logo", "adopt", "add-cutout"].includes(command)) {
+  fail(`Unknown command "${command}". Options: list | add-logo | adopt | add-cutout`);
 }
 const csv = (s: string) => s.split(",").map((t) => t.trim()).filter(Boolean);
 
@@ -81,9 +91,9 @@ async function scanOrDie(): Promise<Library> {
 
 /** Write an HTML contact sheet of everything in the library. */
 async function writeSheet(lib: Library) {
-  if (lib.logos.length === 0 && lib.plates.length === 0) return;
+  if (lib.logos.length === 0 && lib.plates.length === 0 && lib.cutouts.length === 0) return;
   const figure = (kind: string, id: string, file: string, caption: string) =>
-    `<figure><a href="file://${path.join(LIBRARY_ROOT, kind, id, file)}"><img class="${kind === "plates" ? "plate-img" : ""}" src="file://${path.join(LIBRARY_ROOT, kind, id, file)}"></a><figcaption>${caption}</figcaption></figure>`;
+    `<figure><a href="file://${path.join(LIBRARY_ROOT, kind, id, file)}"><img class="${kind === "plates" ? "plate-img" : kind === "cutouts" ? "cutout-img" : ""}" src="file://${path.join(LIBRARY_ROOT, kind, id, file)}"></a><figcaption>${caption}</figcaption></figure>`;
   const section = (
     title: string,
     html: string,
@@ -102,8 +112,9 @@ figure{margin:0;background:linear-gradient(160deg,#16181d,#0e1013);border:1px so
 img{max-width:96px;max-height:96px;border-radius:4px}
 figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-align:center}
 img.plate-img{max-width:100%;max-height:none;width:100%}
+img.cutout-img{max-width:180px;max-height:180px;object-fit:contain}
 .empty{color:#5c5c64;font-size:12px;margin:8px 4px}
-</style><h1>Asset library · ${lib.logos.length + lib.plates.length}</h1>
+</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length}</h1>
 ${section(
   "logos",
   lib.logos
@@ -126,6 +137,15 @@ ${section(
     )
     .join("\n"),
   "(none — adopt one with bun run library adopt <plate.png> --id <name>)",
+)}
+${section(
+  "cutouts",
+  lib.cutouts
+    .map((c) =>
+      figure("cutouts", c.meta.id, path.basename(c.imagePath), `${c.meta.id} [${c.meta.tags.join(", ")}] ${c.meta.approval}`),
+    )
+    .join("\n"),
+  "(none — add one with bun run library add-cutout <cutout.png> --id <name>)",
 )}
 </body>`;
   await writeFile(path.join(LIBRARY_ROOT, "index.html"), html);
@@ -151,16 +171,32 @@ if (command === "list") {
     const subject = p.meta.subject ? `  "${p.meta.subject.slice(0, 60)}${p.meta.subject.length > 60 ? "…" : ""}"` : "";
     console.log(`    ${p.meta.id.padEnd(22)} [${p.meta.tags.join(", ")}]${subject}`);
   }
-  if (values.sheet && (found.logos.length || found.plates.length))
+  console.log(`\n  Cutouts (${found.cutouts.length})`);
+  if (found.cutouts.length === 0) console.log(`    (none — add one with: bun run library add-cutout <cutout.png> --id <name> --tags <role facets>)`);
+  for (const c of found.cutouts) {
+    console.log(
+      `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}`,
+    );
+  }
+  if (values.sheet && (found.logos.length || found.plates.length || found.cutouts.length))
     console.log(`\n  sheet    ${path.relative(process.cwd(), path.join(LIBRARY_ROOT, "index.html"))}`);
   console.log("");
   process.exit(0);
 }
 
+const KIND_OF: Record<string, "logos" | "plates" | "cutouts"> = {
+  "add-logo": "logos",
+  adopt: "plates",
+  "add-cutout": "cutouts",
+};
 const id = requireId();
-const dir = path.join(LIBRARY_ROOT, command === "adopt" ? "plates" : "logos", id);
+const dir = path.join(LIBRARY_ROOT, KIND_OF[command]!, id);
 const existing = await scanOrDie();
-if (existing.logos.some((l) => l.meta.id === id) || existing.plates.some((p) => p.meta.id === id)) {
+if (
+  existing.logos.some((l) => l.meta.id === id) ||
+  existing.plates.some((p) => p.meta.id === id) ||
+  existing.cutouts.some((c) => c.meta.id === id)
+) {
   fail(`"${id}" already exists in the library.`);
 }
 
@@ -198,7 +234,7 @@ try {
       ),
     );
     console.log(`  logo     ${id} → ${path.relative(process.cwd(), destFile)}`);
-  } else {
+  } else if (command === "adopt") {
     // Adopt a generated plate, carrying its provenance forward from run.json.
     const src = path.resolve(positionals[1] ?? "");
     if (!src) fail("adopt needs a plate PNG path");
@@ -228,8 +264,41 @@ try {
       ),
     );
     console.log(`  plate    ${id} → ${path.relative(process.cwd(), destFile)}`);
-    if (prior.subject) console.log(`  from     "${prior.subject.slice(0, 68)}${prior.subject.length > 68 ? "…" : ""}"`);
-    else console.log(`  note     no sibling run.json — provenance not carried`);
+    if (prior.subject) {
+      console.log(`  from     "${prior.subject.slice(0, 68)}${prior.subject.length > 68 ? "…" : ""}"`);
+    } else {
+      console.log(`  note     no sibling run.json — provenance not carried`);
+    }
+  } else {
+    // Add a cutout: a transparent PNG whose reuse value is its role — the
+    // pose/expression/outfit facets its tags name.
+    const src = path.resolve(positionals[1] ?? "");
+    if (!src || !/\.(png)$/i.test(src)) fail("add-cutout needs a transparent PNG");
+    const approval = (values.approval ?? "trial") as CutoutMeta["approval"];
+    if (!["trial", "approved"].includes(approval)) fail(`--approval must be trial | approved`);
+    if (approval === "approved" && !values.source)
+      fail(`--approval approved needs --source pointing at its provenance record`);
+    const destFile = path.join(dir, "cutout.png");
+    await copyFile(src, destFile);
+    await writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify(
+        {
+          kind: "cutout",
+          id,
+          name: values.name ?? values.id!,
+          tags: csv(values.tags!),
+          approval,
+          ...(values.source ? { source: values.source } : {}),
+          ...(values["derived-from"] ? { derivedFrom: path.resolve(values["derived-from"]!) } : {}),
+          ...(values["edit-prompt"] ? { editPrompt: values["edit-prompt"] } : {}),
+          adoptedFrom: src,
+        } satisfies CutoutMeta,
+        null,
+        2,
+      ),
+    );
+    console.log(`  cutout   ${id} → ${path.relative(process.cwd(), destFile)}  (${approval})`);
   }
 } catch (err) {
   fail((err as Error).message);

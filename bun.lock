@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "thumbforge",
+      "name": "thumby",
       "dependencies": {
         "ai": "^7.0.82",
         "playwright": "^1.62.1",

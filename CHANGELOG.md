@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-27
+
+### Added
+
+- Cutout asset class in the library: `bun run library add-cutout` with role-facet tags, `trial`/`approved` approval state, and lineage (`--derived-from`, `--edit-prompt`) so reuse search can find derivatives
+- `--cutout` accepts a library id as well as a path — ids keep compositions portable
+- `--cutout-flip` mirrors the cutout horizontally (e.g. reverse which way it points)
+- `--temperature` for multimodal models (Gemini) — lowers creative drift in likeness work; rejected loudly on image models
+- `script` font pairing (Brush Script MT + Gill Sans) and `chalk` layout style; `overlays/chalk-words.json`
+- `src/chromakey.ts` — chroma-key step for deriving transparent cutouts from the identity kit
+
+### Changed
+
+- Renamed the project to `thumby`
+- `seedream-5.0-pro` registry entry corrected: it does take reference images (identity strength still unproven here — disqualified on drift/watermark in the 2026-08-27 A/B)
+
 ## [0.2.2] - 2026-08-26
 
 ### Fixed

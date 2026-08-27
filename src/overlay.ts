@@ -16,14 +16,19 @@ export interface OverlayCard {
   /** Card width as a percentage of frame width. */
   w: number;
   label?: string;
-  /** Inline SVG file, a library logo, a built-in mark, or literal text as the glyph. */
+  /** Inline SVG file, a library logo, or literal text as the glyph. */
   mark?:
     | { type: "svg"; file: string }
     | { type: "logo"; id: string }
-    | { type: "text"; text: string }
-    | { type: "claude" };
+    | { type: "text"; text: string };
   markColor?: string;
   labelColor?: string;
+  /** Strip the glass tile: text/mark floats directly on the plate. */
+  bare?: boolean;
+  /** Font family for a text mark, e.g. "Chalkduster". */
+  font?: string;
+  /** Font size for a text mark, in % of frame width (e.g. 4 ≈ 4vw). */
+  textSize?: number;
   /** Turns the card into the glowing focal tile. */
   highlight?: string;
   rotate?: number;
@@ -44,24 +49,6 @@ export interface OverlaySpec {
   connectorColor?: string;
 }
 
-/**
- * The Claude spark: tapered blades radiating from centre. Drawn rather than
- * imported because the available asset is a white mark on a coral tile, and
- * the composition needs a coral mark on a dark tile.
- */
-function claudeMark(color: string): string {
-  const blades = 11;
-  const petals = Array.from({ length: blades }, (_, i) => {
-    const angle = (360 / blades) * i;
-    // Alternate blade length, as the real mark does.
-    const len = i % 2 === 0 ? 48 : 40;
-    const halfWidth = 5.4;
-    return `<path d="M 50 50 L ${50 - halfWidth} ${50 - len * 0.72} Q 50 ${50 - len} ${50 + halfWidth} ${50 - len * 0.72} Z"
-      transform="rotate(${angle} 50 50)" fill="${color}" stroke="${color}" stroke-width="2.8" stroke-linejoin="round"/>`;
-  }).join("");
-  return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${petals}</svg>`;
-}
-
 async function inlineSvg(file: string, color?: string): Promise<string> {
   let svg = await readFile(path.resolve(file), "utf8");
   svg = svg.replace(/<\?xml[^>]*\?>/g, "").replace(/<!--[\s\S]*?-->/g, "");
@@ -78,7 +65,7 @@ async function inlineSvg(file: string, color?: string): Promise<string> {
 let library: Promise<Library> | null = null;
 
 /** The library is scanned once per process and cached; it is small. */
-function loadLibrary(): Promise<Library> {
+export function loadLibrary(): Promise<Library> {
   library ??= scanLibrary(LIBRARY_ROOT);
   return library;
 }
@@ -93,7 +80,6 @@ async function renderRaster(file: string): Promise<string> {
 async function renderMark(card: OverlayCard): Promise<string> {
   if (!card.mark) return "";
   const color = card.markColor ?? "#FFFFFF";
-  if (card.mark.type === "claude") return claudeMark(color);
   if (card.mark.type === "logo") {
     let entry: LibraryEntry<LogoMeta>;
     try {
@@ -106,7 +92,14 @@ async function renderMark(card: OverlayCard): Promise<string> {
     return renderRaster(entry.imagePath);
   }
   if (card.mark.type === "svg") return inlineSvg(card.mark.file, color);
-  return `<span class="glyph" style="color:${color}">${card.mark.text
+  const style = [
+    `color:${color}`,
+    card.font ? `font-family:'${card.font}'` : "",
+    card.textSize ? `font-size:${card.textSize}vw` : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+  return `<span class="glyph" style="${style}">${card.mark.text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")}</span>`;
 }
@@ -126,7 +119,7 @@ export async function renderOverlay(
         const glow = c.highlight
           ? `border-color:${c.highlight}; box-shadow:0 0 0 1px ${c.highlight}55, 0 0 34px ${c.highlight}88, 0 0 90px ${c.highlight}55; background:linear-gradient(160deg, ${c.highlight}22, rgba(12,10,6,.9));`
           : "";
-        return [c.behind ?? false, `<div class="ocard" style="left:${c.x}%; top:${c.y}%; width:${c.w}%; ${glow} ${
+        return [c.behind ?? false, `<div class="ocard${c.bare ? " bare" : ""}" style="left:${c.x}%; top:${c.y}%; width:${c.w}%; ${glow} ${
           c.rotate ? `--rot:${c.rotate}deg;` : ""
         }">
           <div class="omark">${mark}</div>
@@ -189,6 +182,7 @@ export async function renderOverlay(
            border:1px solid rgba(255,255,255,.16);
            box-shadow:0 0 0 1px rgba(255,255,255,.05), 0 10px 40px rgba(0,0,0,.7),
                       inset 0 1px 0 rgba(255,255,255,.09); }
+  .ocard.bare { aspect-ratio:auto; background:none; border:none; box-shadow:none; }
   .omark { width:52%; height:52%; display:flex; align-items:center; justify-content:center; }
   .omark svg { width:100%; height:100%; display:block; }
   .omark img { width:100%; height:100%; object-fit:contain; display:block; }

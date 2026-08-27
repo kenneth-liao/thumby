@@ -8,7 +8,8 @@
       "w": 10.8,
       "label": "Claude",
       "mark": {
-        "type": "claude"
+        "type": "logo",
+        "id": "claude"
       },
       "markColor": "#E8724C",
       "behind": true
@@ -20,8 +21,8 @@
       "w": 11.2,
       "label": "ChatGPT",
       "mark": {
-        "type": "svg",
-        "file": "/Users/kennethliao/projects/business/theailaunchpad/ai-launchpad-content/youtube/assets/icons_logos/openai.svg"
+        "type": "logo",
+        "id": "openai"
       },
       "markColor": "#4FC3A1"
     },
@@ -32,8 +33,8 @@
       "w": 9.8,
       "label": "Codex",
       "mark": {
-        "type": "text",
-        "text": ">_"
+        "type": "logo",
+        "id": "codex"
       },
       "markColor": "#5AA9FF",
       "labelColor": "#7FC0FF"
@@ -45,8 +46,8 @@
       "w": 9.8,
       "label": "Pi",
       "mark": {
-        "type": "text",
-        "text": "Pi"
+        "type": "logo",
+        "id": "pi"
       },
       "markColor": "#35C15E"
     },

@@ -67,6 +67,74 @@ the output canvas — adopt freely. Requirements when adopting:
 - Prefer adopting plates that used `--zone`, so their calm half is known
   and searchable (`subject` field).
 
+## Cutouts
+
+Creator cutouts are the one asset class where the subject is a real person
+whose likeness must survive. Everything here is a tested rule, not a
+preference — each carries its evidence.
+
+### The identity recipe (tested 2026-08-26, re-tested 2026-08-27)
+
+Derived cutouts are generated through **`nano-2` / `nano-pro`** with a
+single edit pass from the identity kit (`assets/identity/kenny-headshots/`):
+
+- **Pass 4 headshot anchors first**, then **one
+  pose-only reference last**. Role-assign every ref in the prompt
+  ("images 1–4 = identity, image 5 = pose"). Unassigned refs make the model
+  average faces — the chubby-drift failure mode.
+- **Pick anchors by tag from `index.json`** (verified per-image at ~1028px,
+  2026-08-27): e.g. `frontal` + `teeth-smile` for a bright opener, `thinking`
+  for explainers. **Exclude `wide-eyes`/`shocked` anchors for calm
+  expressions** — they drag the expression wide-eyed.
+- The prompt must say **"copy his face exactly — do not widen, round, or
+  blend"**.
+- Background: **"one single solid #00FF00 edge to edge — no gradient, no
+  vignette, no corners"**, then key it with `src/chromakey.ts`.
+- **One edit pass per cutout, always from the identity kit.** Stacked edits
+  compound drift. **Never generate the likeness from text alone.**
+
+### Model ranking for likeness (measured, 2026-08-27 three-way, same 5 refs)
+
+| model | verdict | published cost |
+|---|---|---|
+| `nano-2` | workhorse — likeness nearly equal to pro at half price | $0.067 |
+| `nano-pro` | hard poses/expressions only — marginal detail edge | $0.134 |
+| `seedream-5.0-pro` | **disqualified** — face drift + baked-in "Generated" watermark on the shirt; flat rate and 2K source don't compensate | $0.035 |
+| `gpt-image-2` | cannot take reference images | — |
+
+Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
+`out/trial-cutouts/ab/` (original 4-anchor vs 1-ref A/B).
+
+### Known edges and future work
+
+- **Variance is real (2026-08-27):** byte-identical nano-2 runs produce visibly
+  different faces — expression, apparent age, face width, and crop all drift
+  (`out/trial-cutouts/regen-deadpan/`, copies A/B/C). Single generations are a
+  lottery; generate several and choose, never accept the first.
+- **Temperature does not fix variance (2026-08-27):** 3 runs at temp 0.2 vs 3
+  at default showed no visible spread reduction and one framing break
+  (same evidence folder, `nano2-temp02-*`). The noise lives in image sampling,
+  not the text knob. `--temperature` stays wired (multimodal only, recorded in
+  `run.json`) for future experiments, but best-of-N is the variance mechanism.
+
+- **Chroma keying leaves green fringe on hair** for every model (RGB-distance
+  band, not a real matte). A segmentation matte (BiRefNet / BEN2 / RMBG-2.0)
+  would produce true alpha — the planned upgrade.
+- **Generative likeness ceiling:** every generated face is synthesized, so
+  drift can shrink but never reach zero. The only pixel-exact path is
+  matting real photos (one session covering the pose × expression × outfit
+  matrix the library tags already model).
+- Best-of-N with an ArcFace/insightface similarity check against the anchor
+  kit is the candidate quality gate if generated cutouts stay in use.
+
+### Provenance and approval
+
+- Generate via `bun run thumb` (writes `run.json` + `rerun.sh`), key,
+  then `bun run library add-cutout <file> --id <id> --tags <pose facets>
+  --derived-from <approved id> --edit-prompt "…"`.
+- New cutouts enter as `trial`; **only Kenny's approval promotes to
+  `approved`**. Reuse-first: scan `bun run library list` before generating.
+
 ## Naming and metadata
 
 - **id**: lowercase, digits, hyphens (`openai`, `neon-terminal`). The
