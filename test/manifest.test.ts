@@ -411,6 +411,21 @@ describe("scene rerender — manifest-backed, portable, fail-loud", () => {
     expect(errors[0]!.path).toBe("scene.path");
   }, 20000);
 
+  it("a recorded output escaping the scene directory fails containment and writes nothing", async () => {
+    const dest = await copiedProject("escape-output");
+    const manifestFile = path.join(dest, "out", "show.manifest.json");
+    const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+    manifest.outputs[0]!.output = "../../outside.png";
+    await writeFile(manifestFile, JSON.stringify(manifest));
+    const escapeTarget = path.resolve(dest, "out", "../../outside.png");
+    const { exitCode, output } = await rerenderManifest(manifestFile);
+    expect(exitCode).toBe(1);
+    const errors = (output as { errors: { path: string; message: string }[] }).errors;
+    expect(errors[0]!.path).toBe("outputs[0].output");
+    expect(errors[0]!.message).toMatch(/escapes the scene's directory/);
+    expect(existsSync(escapeTarget)).toBe(false);
+  }, 20000);
+
   it("a corrupt manifest fails with field-specific errors, exit 1", async () => {
     const dest = await copiedProject("corrupt-manifest");
     const manifestFile = path.join(dest, "out", "show.manifest.json");
