@@ -4,6 +4,12 @@
 
 ### Added
 
+- Named sparse Scene Variants — a `variants` map on the Scene stores only the fields each name changes, addressed to stable layer ids at any depth; the base Scene stays canonical and unchanged facts are never duplicated (#4)
+- Variant patches cover text/style, transforms/visibility, Asset swaps, and effect/color properties — validated at the load gate against the target layer's own schema branch, so unknown targets and invalid patched values fail with field-specific paths like `variants["alt"].changes[0].set.opacity`; `id`/`type` are identity and not patchable (#4)
+- `bun run scene render --variant <name[,name...]>` renders one Variant (`<scene>.<variant>.png`) or a batch plus a contact sheet (`<scene>.contact.png`) showing every output at 168px wide with its name; resolution and rendering stay fully offline (#4)
+- `bun run scene inspect --variant <name>` returns the Variant's stored changes verbatim beside the resolved layers, proving what the Variant stores and what the base Scene contributes (#4)
+- `bun run scene validate` now also validates every Variant's targets and patched values at the gate (#4)
+
 - Connector/path layers between stable top-layer or Group targets — `from`/`to` name layer ids, and dangling targets, self-targets, connector-to-connector targets, and connectors nested in groups all fail validation naming the field, before any browser starts (#12)
 - Connector styling in frame coordinates: `width` (px, default 3), `color` (default `#000`), `dash` (SVG stroke-dasharray pattern, absent is solid), `bow` (perpendicular midpoint offset, positive curves clockwise from from→to), and `arrow` (auto-oriented arrowhead at the `to` end, colored with the line, sized off the stroke width); the path runs between target box centers, trimmed to the box edges, and renders as pixel-space full-canvas SVG (#12)
 - Connectors composite at their array position like any layer — z-order around the Creator Asset is explicit scene order, replacing the overlay's fixed connectors-below-cards rule (#12)

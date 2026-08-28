@@ -12,8 +12,11 @@
  *   2. Semantic pass — everything JSON Schema can't say: duplicate layer ids
  *      and crop sums.
  *   2b. Theme pass — verify the Scene's theme pin (content-derived revision,
- *      src/themes.ts) and apply the theme's defaults: explicit layer value >
- *      theme default > renderer built-in default (LAYER_DEFAULTS).
+ *       src/themes.ts) and apply the theme's defaults: explicit layer value >
+ *       theme default > renderer built-in default (LAYER_DEFAULTS).
+ *   2c. Variant pass — every Variant's targets and patched values against the
+ *       target layer's schema branch (src/variants.ts); a broken Variant fails
+ *       the whole document at the gate, never at render time.
  *   3. Resolution pass — assets through the one contract in src/assets.ts
  *      (exact bytes, hash pins), text fonts against the bundled-face registry.
  *
@@ -33,6 +36,7 @@ import {
 } from "./assets.js";
 import { resolveFace } from "./fonts.js";
 import { applyThemeToLayer, getTheme, themeRevision } from "./themes.js";
+import { variantErrors, type SceneVariant } from "./variants.js";
 
 export { SCENE_SCHEMA };
 export const SCHEMA_VERSION = 1;
@@ -177,6 +181,8 @@ export interface Scene {
   canvas: { width: number; height: number };
   /** Named theme defaults, pinned to an exact revision. */
   theme?: { name: string; revision: string };
+  /** Named sparse changes over this base Scene (src/variants.ts). */
+  variants?: Record<string, SceneVariant>;
   layers: SceneLayer[];
 }
 
@@ -417,6 +423,22 @@ function jsonPointerToPath(pointer: string, leaf?: string): string {
 function describeSchemaError(err: AjvError): SceneError {
   const data = JSON.stringify(err.data);
   const leaf = err.params?.missingProperty as string | undefined;
+  // Variant fields keep the quoted form variants.ts uses everywhere else:
+  // /variants/alt/changes/0/set → variants["alt"].changes[0].set
+  if (err.keyword === "propertyNames" && err.instancePath === "/variants") {
+    const bad = err.params.propertyName as string;
+    const pattern = SCENE_SCHEMA.properties.variants.propertyNames.pattern;
+    return {
+      path: `variants["${bad}"]`,
+      message: `invalid variant name "${bad}" — variant names must match ${pattern} because they become render output file names`,
+    };
+  }
+  if (err.instancePath.startsWith("/variants/")) {
+    const m = /^\/variants\/([^/]+)(\/.*)?$/.exec(err.instancePath)!;
+    const at = `variants["${m[1]!}"]${m[2] ? jsonPointerToPath(m[2]) : ""}`;
+    if (leaf) return { path: `${at}.${leaf}`, message: `"${leaf}" is required on every variant change` };
+    return { path: at, message: err.message ?? "is invalid" };
+  }
   if (leaf) {
     return err.instancePath === ""
       ? { path: leaf, message: `the scene requires "${leaf}"` }
@@ -666,6 +688,7 @@ export async function loadScene(
   // only themed copy.
   const scene = structuredClone(raw) as Scene;
   const errors = semanticErrors(scene);
+  if (errors.length === 0) errors.push(...variantErrors(scene));
   if (errors.length === 0) errors.push(...themeErrorsAndApply(scene));
   const assets = new Map<string, ResolvedAsset>();
   if (errors.length === 0)

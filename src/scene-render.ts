@@ -672,3 +672,60 @@ export async function renderScene(
     await ctx?.close();
   }
 }
+
+// --- contact sheet ---------------------------------------------------------------
+
+/** One reviewed output: its label (variant name) and rendered full-size PNG. */
+export interface ContactSheetEntry {
+  label: string;
+  png: Buffer;
+}
+
+/**
+ * Batch-review sheet: every rendered output side by side at 168px wide —
+ * YouTube's review size — with its label underneath, on one white canvas.
+ * The PNGs arrive as data URIs; the sheet never touches the network. The
+ * cell width is the review contract: 168px per output, 8px padding and gaps.
+ */
+export const CONTACT_CELL = 168;
+const CONTACT_PAD = 8;
+const CONTACT_GAP = 8;
+
+export async function renderContactSheet(entries: ContactSheetEntry[]): Promise<{
+  png: Buffer;
+  width: number;
+  height: number;
+}> {
+  if (entries.length === 0) throw new Error("a contact sheet needs at least one rendered output");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#fff; padding:${CONTACT_PAD}px; display:flex; gap:${CONTACT_GAP}px; width:max-content; }
+  .cell { width:${CONTACT_CELL}px; }
+  .cell img { width:${CONTACT_CELL}px; display:block; }
+  .cell .label { height:22px; line-height:22px; font:12px/22px sans-serif; color:#333;
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  </style></head><body>
+  ${entries
+    .map(
+      (e) =>
+        `<div class="cell"><img src="data:image/png;base64,${e.png.toString("base64")}">` +
+        `<div class="label">${esc(e.label)}</div></div>`,
+    )
+    .join("\n")}
+  </body></html>`;
+  const ctx = await (await getBrowser()).newContext({ deviceScaleFactor: 1 });
+  try {
+    const page = await ctx.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    const png = await page.locator("body").screenshot({ type: "png" });
+    const box = await page.locator("body").boundingBox();
+    if (!box) throw new Error("contact sheet body did not render a measurable box");
+    return {
+      png,
+      width: CONTACT_PAD + entries.length * CONTACT_CELL + (entries.length - 1) * CONTACT_GAP + CONTACT_PAD,
+      height: Math.round(box.height),
+    };
+  } finally {
+    await ctx.close();
+  }
+}
