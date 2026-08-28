@@ -18,21 +18,37 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { LIBRARY_ROOT, scanLibrary, type ResolvedAsset } from "./assets.js";
-import { SCENE_SCHEMA, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
+import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
+import { resolveFace } from "./fonts.js";
 import { renderScene, countLayers } from "./scene-render.js";
+import { THEMES, themeRevision } from "./themes.js";
+import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
 thumby scene — versioned, locally rendered thumbnail compositions
 
   bun run scene schema                  Print the Scene JSON Schema document
-  bun run scene inspect  <scene.json>   Structured layer summary (with resolved asset hashes)
+  bun run scene themes                  List bundled themes (name, description, revision)
+  bun run scene templates               List bundled scene templates
+  bun run scene init     <template>     Initialize a Scene from a template
+  bun run scene inspect  <scene.json>   Structured layer summary (resolved asset hashes,
+                                        theme-pinned identity, effective values)
   bun run scene validate <scene.json>   Validate: field-specific errors before any render
   bun run scene render   <scene.json>   Render to PNG (1280×720)
 
 Options
-  --out <path>   Render output path inside the scene's directory
+  --out <path>   init: where to write the Scene (default: print as "scene")
+                 render: output path inside the scene's directory
                  (default: <scene-dir>/out/<scene-basename>.png)
+
+Themes and templates
+  A Scene may pin a bundled theme: "theme": { "name", "revision" }. Precedence
+  is one rule — explicit layer value, then theme default, then the renderer's
+  built-in default. The revision is the sha-256 of the theme's content;
+  loading re-derives it and fails loudly on drift, so old Scenes never render
+  with silently changed theme content. "scene init" bakes a template's layers
+  into a plain Scene (no runtime template reference) with the theme pin set.
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
 Successful renders carry a "warnings" array (e.g. an auto-fit layer that
@@ -79,11 +95,13 @@ function summarizeLayer(
   layer: Record<string, unknown>,
   assets?: Map<string, ResolvedAsset>,
 ): Record<string, unknown> {
+  // Effective values: authored + theme-resolved (the load gate filled theme
+  // defaults in) + the renderer's built-in defaults — what a render will use.
   const summary: Record<string, unknown> = {
     id: layer.id,
     type: layer.type,
-    visible: layer.visible ?? true,
-    opacity: layer.opacity ?? 1,
+    visible: layer.visible ?? LAYER_DEFAULTS.visible,
+    opacity: layer.opacity ?? LAYER_DEFAULTS.opacity,
     position: layer.position,
     size: layer.size,
   };
@@ -92,7 +110,7 @@ function summarizeLayer(
   if (layer.effects !== undefined) summary.effects = layer.effects;
   if (layer.type === "image") {
     summary.asset = layer.asset;
-    if (layer.fit !== undefined) summary.fit = layer.fit;
+    summary.fit = layer.fit ?? LAYER_DEFAULTS.fit;
     if (layer.crop !== undefined) summary.crop = layer.crop;
     // Fail fast like the old `.get(id)!`: a validated image layer's asset is
     // always resolved, so a miss here is a contract bug, not an empty field.
@@ -100,8 +118,8 @@ function summarizeLayer(
   } else if (layer.type === "shape") {
     summary.shape = layer.shape;
     if (layer.radius !== undefined) summary.radius = layer.radius;
-    if (layer.color !== undefined) summary.color = layer.color;
-    if (layer.fill !== undefined) summary.fill = layer.fill;
+    if (layer.fill !== undefined) summary.fill = withAngle(layer.fill);
+    else summary.color = layer.color ?? LAYER_DEFAULTS.color;
     if (layer.border !== undefined) summary.border = layer.border;
   } else if (layer.type === "group") {
     if (layer.scale !== undefined) summary.scale = layer.scale;
@@ -114,17 +132,24 @@ function summarizeLayer(
     summary.font = layer.font;
     if (layer.fontSize !== undefined) summary.fontSize = layer.fontSize;
     if (layer.autoFit !== undefined) summary.autoFit = layer.autoFit;
-    if (layer.weight !== undefined) summary.weight = layer.weight;
+    // The face's natural weight is the effective weight fallback.
+    summary.weight = layer.weight ?? resolveFace(layer.font as string).weight;
     if (layer.tracking !== undefined) summary.tracking = layer.tracking;
     if (layer.casing !== undefined) summary.casing = layer.casing;
-    if (layer.color !== undefined) summary.color = layer.color;
-    if (layer.fill !== undefined) summary.fill = layer.fill;
+    if (layer.fill !== undefined) summary.fill = withAngle(layer.fill);
+    else summary.color = layer.color ?? LAYER_DEFAULTS.color;
     if (layer.stroke !== undefined) summary.stroke = layer.stroke;
     if (layer.shadows !== undefined) summary.shadows = layer.shadows;
-    if (layer.align !== undefined) summary.align = layer.align;
-    if (layer.lineHeight !== undefined) summary.lineHeight = layer.lineHeight;
+    summary.align = layer.align ?? LAYER_DEFAULTS.align;
+    summary.lineHeight = layer.lineHeight ?? LAYER_DEFAULTS.lineHeight;
   }
   return summary;
+}
+
+/** Effective gradient fill for display: the angle default surfaced. */
+function withAngle(fill: unknown): Record<string, unknown> {
+  const { angle, ...rest } = fill as { angle?: number };
+  return { ...rest, angle: angle ?? LAYER_DEFAULTS.fillAngle };
 }
 
 function resolvedAssetSummary(resolved: {
@@ -150,6 +175,59 @@ async function dispatch(args: string[]): Promise<CliResult> {
 
   if (cmd === "schema" && file === undefined) return ok(SCENE_SCHEMA);
   if (cmd === "schema" && file) return usageError(`"scene schema" takes no arguments`);
+
+  if (cmd === "themes" && file === undefined)
+    return ok({
+      ok: true,
+      themes: THEMES.map((t) => ({
+        name: t.name,
+        description: t.description,
+        revision: themeRevision(t),
+      })),
+    });
+  if (cmd === "templates" && file === undefined)
+    return ok({
+      ok: true,
+      templates: TEMPLATES.map((t) => ({
+        name: t.name,
+        description: t.description,
+        ...(t.themeName ? { theme: t.themeName } : {}),
+      })),
+    });
+  if ((cmd === "themes" || cmd === "templates") && file)
+    return usageError(`"scene ${cmd}" takes no arguments`);
+
+  if (cmd === "init" && file) {
+    let outArg: string | undefined;
+    if (rest.length === 2 && rest[0] === "--out") outArg = rest[1];
+    else if (rest.length !== 0) return usageError("init accepts at most one --out <path>");
+    let template;
+    try {
+      template = getTemplate(file);
+    } catch (err) {
+      return usageError((err as Error).message);
+    }
+    const scene = buildScene(template);
+    // Bundled data still goes through the one gate — a broken template fails
+    // loudly here instead of shipping an invalid Scene to an agent.
+    const result = await loadScene(
+      outArg ? path.dirname(path.resolve(outArg)) : process.cwd(),
+      () => scanLibrary(LIBRARY_ROOT),
+      scene,
+    );
+    if (!result.ok) return invalid(result.errors);
+    if (!outArg) return ok({ ok: true, scene });
+    const output = path.resolve(outArg);
+    await mkdir(path.dirname(output), { recursive: true });
+    await writeFile(output, JSON.stringify(scene, null, 2) + "\n");
+    return ok({
+      ok: true,
+      output,
+      schemaVersion: SCHEMA_VERSION,
+      layerCount: countLayers(scene.layers),
+      ...(scene.theme ? { theme: scene.theme } : {}),
+    });
+  }
 
   if ((cmd === "validate" || cmd === "inspect" || cmd === "render") && file) {
     if (cmd !== "render" && rest.length)
@@ -185,6 +263,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         canvas: resolved.scene.canvas,
+        ...(resolved.scene.theme ? { theme: resolved.scene.theme } : {}),
         layerCount: countLayers(resolved.scene.layers),
         layers: resolved.scene.layers.map((layer) =>
           summarizeLayer(layer as unknown as Record<string, unknown>, resolved.assets),
@@ -214,8 +293,8 @@ async function dispatch(args: string[]): Promise<CliResult> {
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, inspect, validate, or render"
-      : `unknown command "${cmd}" — expected schema, inspect, validate, or render`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, or render"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, or render`,
   );
 }
 

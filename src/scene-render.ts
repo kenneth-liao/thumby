@@ -26,6 +26,7 @@ import type {
   SceneLayer,
   Effects,
 } from "./scene.js";
+import { LAYER_DEFAULTS } from "./scene.js";
 
 export interface SceneRenderResult {
   png: Buffer;
@@ -148,7 +149,7 @@ function imageMarkup(
   uri: string,
   natural: ImageSize | undefined,
 ): string {
-  const fit = layer.fit ?? "cover";
+  const fit = layer.fit ?? LAYER_DEFAULTS.fit;
   if (!layer.crop) {
     return `<img src="${uri}" style="width:100%;height:100%;object-fit:${fit};display:block;">`;
   }
@@ -171,7 +172,7 @@ function textMarkup(layer: TextLayer): string {
   // The family comes from the bundled-face registry, not the raw scene field —
   // the validated scene can only name fonts whose bytes the renderer ships.
   const face = resolveFace(layer.font);
-  const lineHeight = layer.lineHeight ?? 1.1;
+  const lineHeight = layer.lineHeight ?? LAYER_DEFAULTS.lineHeight;
   // Auto-fit layers start markup at their max; renderScene shrinks to fit
   // after fonts resolve, so the shipped markup is deterministic either way.
   const startSize = layer.fontSize ?? layer.autoFit!.max;
@@ -179,7 +180,7 @@ function textMarkup(layer: TextLayer): string {
     `font-family:'${face.family}'`,
     `font-weight:${layer.weight ?? face.weight}`,
     `font-size:${startSize}px`,
-    `text-align:${layer.align ?? "left"}`,
+    `text-align:${layer.align ?? LAYER_DEFAULTS.align}`,
     `line-height:${lineHeight}`,
     "white-space:pre-line",
     "overflow-wrap:break-word",
@@ -194,13 +195,13 @@ function textMarkup(layer: TextLayer): string {
     // colors must restate the fill color or the clip would hide them.
     styles.push(
       "color:transparent",
-      `background:linear-gradient(${layer.fill.angle ?? 90}deg,${layer.fill.from},${layer.fill.to})`,
+      `background:linear-gradient(${layer.fill.angle ?? LAYER_DEFAULTS.fillAngle}deg,${layer.fill.from},${layer.fill.to})`,
       "-webkit-background-clip:text",
       "background-clip:text",
       "-webkit-text-fill-color:transparent",
     );
   } else {
-    styles.push(`color:${layer.color ?? "#000"}`);
+    styles.push(`color:${layer.color ?? LAYER_DEFAULTS.color}`);
   }
   if (layer.stroke)
     styles.push(
@@ -265,7 +266,7 @@ function gradientFactory(): (
   let next = 0;
   return (fill) => {
     const id = `grad-${++next}`;
-    const a = ((fill.angle ?? 90) * Math.PI) / 180;
+    const a = ((fill.angle ?? LAYER_DEFAULTS.fillAngle) * Math.PI) / 180;
     const dx = Math.sin(a) / 2;
     const dy = -Math.cos(a) / 2;
     return {
@@ -292,7 +293,7 @@ function shapeMarkup(
 ): string {
   const W = n(layer.size.width);
   const H = n(layer.size.height);
-  let fill = layer.color ?? "#000";
+  let fill = layer.color ?? LAYER_DEFAULTS.color;
   let defs = "";
   if (layer.fill) {
     const g = gradient(layer.fill);

@@ -213,6 +213,9 @@ Scenes, layers, and assets are the vocabulary the design spec (#7) builds on.
 
 ```bash
 bun run scene schema                       # the Scene JSON Schema (machine-readable)
+bun run scene themes                       # bundled themes (name, description, revision)
+bun run scene templates                    # bundled scene templates
+bun run scene init scene-template [--out p] # initialize a Scene from a template
 bun run scene validate scene.json          # field-specific errors before any render
 bun run scene inspect scene.json           # layer summary + resolved asset hashes
 bun run scene render scene.json [--out p]  # render to PNG (1280×720)
@@ -335,6 +338,42 @@ its bounding box:
 
 A worked grouped component lives at
 `test/fixtures/shape-group/logo-card.json` — render it and inspect the PNG.
+
+### Themes and templates
+
+**Themes** are bundled named defaults for style properties — `text` (weight,
+tracking, casing, color, fill, stroke, shadows, align, lineHeight), `image`
+(fit, effects), `shape` (color, fill, border, radius), and `group` (scale,
+effects). They never default layout facts (`id`, `position`, `size`) or
+schema-required fields, so a themed Scene stays schema-valid standalone.
+`bun run scene themes` lists them with their revisions.
+
+```json
+{ "schemaVersion": 1, "canvas": { "width": 1280, "height": 720 },
+  "theme": { "name": "midnight", "revision": "9c1f…full-or-8-char-prefix" },
+  "layers": [ "…" ] }
+```
+
+**One precedence rule**: an explicit layer value wins, then the theme default,
+then the renderer's built-in default (`visible: true`, `opacity: 1`, `fit:
+"cover"`, `align: "left"`, `lineHeight: 1.1`, `color: "#000"`, gradient
+`angle: 90`). A theme default never fights the fill contracts — a theme color
+applies only where a layer sets neither `color` nor `fill`, and a theme
+`radius` only to rects. `bun run scene inspect` reports the effective values a
+render will use, plus the locked `theme` identity.
+
+**Revision locking**: a theme's revision is the sha-256 of its content,
+derived never stored (the same identity shape as Assets — ADR-0002). Loading
+re-derives the hash and fails loudly on drift, so later theme edits can never
+silently change an old Scene's render — re-pin or accept the new content.
+
+**Templates** are bundled Scene skeletons (`bun run scene templates`,
+`bun run scene init <template> [--out <path>]`). Init bakes the template's
+layers into a plain Scene with stable ids — no runtime template reference
+remains, so template edits cannot drift an initialized Scene — pins its
+named theme to the current revision, and validates the result through the
+load gate before handing it over. Templates carry no asset references, so a
+freshly initialized Scene is valid offline.
 
 A Scene is an externally authored document, so its project scope is a trust
 boundary: path references resolve relative to the scene file *and are contained
