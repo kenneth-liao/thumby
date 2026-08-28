@@ -1,33 +1,39 @@
 #!/usr/bin/env bun
 /**
  * The Generation Job CLI — the agent-facing interface to the Generation Job
- * lifecycle (REQ-013/REQ-014): typed request → candidates → immutable Asset
- * adoption.
+ * lifecycle (REQ-013/REQ-014/REQ-015): typed request → candidates →
+ * immutable Asset adoption.
  *
  * Same contract as the Scene CLI: every command prints machine-readable JSON
  * on stdout ({ok: true, ...} or {ok: false, errors: [...]}), exit codes
  * 0 ok / 1 failure / 2 usage error. run() is the error boundary — an
  * unexpected failure (gateway error, I/O) lands in the same structured shape.
  *
- * This is the only place that talks to the network: `jobs plates` and
- * `jobs rerun` start Generation Jobs; every other command is offline. Jobs
- * live under <cwd>/out/jobs/<jobId>/ — the record (job.json), content-addressed
- * candidates, and the run lineage. Nothing here edits a Scene or an existing
- * asset; adoption goes through writePlateAsset, which cannot overwrite.
+ * This is the only place that talks to the network: `jobs plates`, `jobs
+ * objects`, and `jobs rerun` start Generation Jobs; every other command is
+ * offline. Jobs live under <cwd>/out/jobs/<jobId>/ — the record (job.json),
+ * content-addressed candidates, and the run lineage. Nothing here edits a
+ * Scene or an existing asset; adoption goes through the kind's write path,
+ * which cannot overwrite (and verifies true alpha for objects).
  */
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   parseTypedRef,
   runPlateJob,
-  rerunPlateJob,
+  runObjectJob,
+  rerunJob,
+  lift,
   loadJob,
   listJobs,
   adoptCandidate,
   type PlateGenerator,
+  type ObjectGenerator,
+  type JobGenerator,
   type PlateJobRequest,
+  type ObjectJobRequest,
 } from "./jobs.js";
-import { generatePlates, type GenerateOptions } from "./generate.js";
+import { generatePlates, generateObjects, type GenerateOptions } from "./generate.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
@@ -36,14 +42,17 @@ const HELP = `
 thumby jobs — the Generation Job lifecycle (request → candidates → adoption)
 
   bun run jobs plates <subject> [options]   Start a plate Generation Job
+  bun run jobs objects <subject> [options]  Start an object Generation Job —
+                                            one isolated non-text object
   bun run jobs rerun <jobId>                Rerun a job's recorded request — appends
                                             candidates under the lineage, replaces nothing
   bun run jobs show <jobId>                 Full job record: request, typed references, runs
   bun run jobs list                         Summarize recorded jobs
   bun run jobs adopt <jobId> <hash> --id <assetId>
                                             Adopt a candidate (exact hash or unique prefix)
-                                            as a new immutable Plate Asset. Adoption never
-                                            overwrites an existing asset.
+                                            as a new immutable Asset of the job's kind.
+                                            Adoption never overwrites an existing asset;
+                                            object candidates must carry true alpha.
 
 plates options
   --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
@@ -56,19 +65,26 @@ plates options
                         --ref style:refs/palette.png (repeatable)
   --job <id>            Explicit job id (default: auto plate-<date>-<suffix>)
 
+objects options
+  Same as plates minus --zone. The subject must name an isolated non-text
+  object — official logos and final text are rejected as targets (logos come
+  from sourced Assets, text is rendered locally; ADR-0001). Adopted Object
+  Assets carry a verified true-alpha matte; an opaque candidate is refused.
+
 A plate job is a bare backdrop by definition (REQ-014): no person, product,
 device, or independently editable foreground object is baked in — subjects
 enter Scenes as their own layers, never inside the plate.
 
 adopt options
-  --id <assetId>        Library id for the adopted Plate Asset (required)
+  --id <assetId>        Library id for the adopted Asset (required)
   --name <str>          Display name (default: the id)
   --tags <csv>          Comma-separated tags
 
-Every command prints JSON: { "ok": true, ... } or { "ok": false, "errors": [...] }.
+Every command prints JSON: { "ok": true, ... } or { "ok": false, "errors": [...]}.
 Plate candidates are background ambience only — final text, logos, and
 independently editable foreground elements are excluded by the plate request
-contract and rendered locally (ADR-0001, DEC-005, DEC-006).
+contract and rendered locally (ADR-0001, DEC-005, DEC-006). Object candidates
+are isolated non-text Assets (REQ-015), never the final composite.
 `;
 
 interface CliResult {
@@ -103,11 +119,27 @@ export function generateOptionsFor(request: PlateJobRequest): GenerateOptions {
   };
 }
 
-/** The real generation path: map the recorded request onto the AI SDK call. */
+/** The real generation paths: map the recorded request onto the AI SDK call. */
 export const PRODUCTION_GENERATOR: PlateGenerator = async (request: PlateJobRequest) => {
   const result = await generatePlates(generateOptionsFor(request));
   return {
-    plates: result.plates.map((p) => ({ bytes: p.bytes, mediaType: p.mediaType })),
+    candidates: result.plates.map((p) => ({ bytes: p.bytes, mediaType: p.mediaType })),
+    warnings: result.warnings,
+    fullPrompt: result.fullPrompt,
+  };
+};
+
+/** The object request→generateObjects mapping (REQ-015). */
+export const PRODUCTION_OBJECT_GENERATOR: ObjectGenerator = async (request: ObjectJobRequest) => {
+  const result = await generateObjects({
+    subject: request.subject,
+    model: request.model,
+    refs: request.refs.map((r) => r.path),
+    count: request.count,
+    ...(request.temperature != null ? { temperature: request.temperature } : {}),
+  });
+  return {
+    candidates: result.plates.map((p) => ({ bytes: p.bytes, mediaType: p.mediaType })),
     warnings: result.warnings,
     fullPrompt: result.fullPrompt,
   };
@@ -115,6 +147,7 @@ export const PRODUCTION_GENERATOR: PlateGenerator = async (request: PlateJobRequ
 
 export interface JobCliDeps {
   generate: PlateGenerator;
+  generateObject: ObjectGenerator;
   /** Where job records live (default: <cwd>/out/jobs). */
   jobsRoot: string;
   /** Library root for adoption (default: the repo asset library). */
@@ -123,10 +156,10 @@ export interface JobCliDeps {
 
 const ZONES: TextZone[] = ["left", "right", "bottom", "none"];
 
-function autoJobId(): string {
+function autoJobId(kind: "plate" | "object"): string {
   const day = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const suffix = crypto.randomUUID().slice(0, 8);
-  return `plate-${day}-${suffix}`;
+  return `${kind}-${day}-${suffix}`;
 }
 
 /**
@@ -160,34 +193,38 @@ function parseFlags(
   return { flags };
 }
 
-async function platesCommand(
-  deps: JobCliDeps,
-  subject: string | undefined,
+/** Flags shared by every job-starting command (model, count, refs, job id). */
+async function collectGenerationFlags(
   rest: string[],
-): Promise<CliResult> {
-  if (!subject?.trim()) return usageError('"jobs plates" needs a subject describing the background');
-  const parsed = parseFlags(rest, [], [
-    "model", "zone", "count", "temperature", "ref", "job",
-  ], ["ref"]);
-  if ("error" in parsed) return usageError(`unexpected argument "${parsed.error}"`);
+  usage: (message: string) => CliResult,
+  opts?: { extraFlags?: string[] },
+): Promise<{ fields: {
+    model: string;
+    count: number;
+    temperature?: number;
+    refs: Awaited<ReturnType<typeof parseTypedRef>>[];
+    jobId: string;
+    extra: Map<string, string | string[] | true>;
+  } } | { error: CliResult }> {
+  const allowed = ["model", "count", "temperature", "ref", "job", ...(opts?.extraFlags ?? [])];
+  const parsed = parseFlags(rest, [], allowed, ["ref"]);
+  if ("error" in parsed) return { error: usage(`unexpected argument "${parsed.error}"`) };
   const flags = parsed.flags;
 
-  const zone = (flags.get("zone") ?? "left") as TextZone;
-  if (!ZONES.includes(zone)) return usageError(`--zone must be one of ${ZONES.join(" | ")}`);
   const model = (flags.get("model") as string) ?? DEFAULT_MODEL;
 
   let count = 1;
   if (flags.has("count")) {
     count = Number(flags.get("count"));
     if (!Number.isInteger(count) || count < 1 || count > 8)
-      return usageError("--count must be an integer between 1 and 8");
+      return { error: usage("--count must be an integer between 1 and 8") };
   }
 
   let temperature: number | undefined;
   if (flags.has("temperature")) {
     temperature = Number(flags.get("temperature"));
     if (!Number.isFinite(temperature))
-      return usageError("--temperature must be a number");
+      return { error: usage("--temperature must be a number") };
   }
 
   const refs: Awaited<ReturnType<typeof parseTypedRef>>[] = [];
@@ -195,25 +232,89 @@ async function platesCommand(
     try {
       refs.push(await parseTypedRef(spec));
     } catch (err) {
-      return usageError((err as Error).message);
+      return { error: usage((err as Error).message) };
     }
   }
 
-  const jobId = (flags.get("job") as string | undefined) ?? autoJobId();
-  const request: PlateJobRequest = {
-    kind: "plate",
-    subject,
-    zone,
-    model,
-    count,
-    ...(temperature !== undefined ? { temperature } : {}),
-    refs,
+  return {
+    fields: {
+      model,
+      count,
+      ...(temperature !== undefined ? { temperature } : {}),
+      refs,
+      jobId: (flags.get("job") as string | undefined) ?? "",
+      extra: flags,
+    },
   };
-  const job = await runPlateJob(deps.jobsRoot, jobId, request, deps.generate);
+}
+
+async function platesCommand(
+  deps: JobCliDeps,
+  subject: string | undefined,
+  rest: string[],
+): Promise<CliResult> {
+  if (!subject?.trim()) return usageError('"jobs plates" needs a subject describing the background');
+  const collected = await collectGenerationFlags(rest, usageError, { extraFlags: ["zone"] });
+  if ("error" in collected) return collected.error;
+
+  // --zone is plate-only: objects have no reserved text region.
+  const zone = (collected.fields.extra.get("zone") ?? "left") as TextZone;
+  if (!ZONES.includes(zone)) return usageError(`--zone must be one of ${ZONES.join(" | ")}`);
+
+  return startJob(deps, "plate", subject, { ...collected.fields, zone });
+}
+
+async function objectsCommand(
+  deps: JobCliDeps,
+  subject: string | undefined,
+  rest: string[],
+): Promise<CliResult> {
+  if (!subject?.trim())
+    return usageError('"jobs objects" needs a subject naming the object to generate');
+  const collected = await collectGenerationFlags(rest, usageError);
+  if ("error" in collected) return collected.error;
+  return startJob(deps, "object", subject, { ...collected.fields });
+}
+
+/** Build the request, run the job, and print the run record. */
+async function startJob(
+  deps: JobCliDeps,
+  kind: "plate" | "object",
+  subject: string,
+  fields: {
+    model: string;
+    count: number;
+    temperature?: number;
+    refs: Awaited<ReturnType<typeof parseTypedRef>>[];
+    jobId: string;
+    zone?: TextZone;
+  },
+): Promise<CliResult> {
+  const jobId = fields.jobId || autoJobId(kind);
+  const job =
+    kind === "plate"
+      ? await runPlateJob(deps.jobsRoot, jobId, {
+          kind,
+          subject,
+          zone: fields.zone ?? "left",
+          model: fields.model,
+          count: fields.count,
+          ...(fields.temperature !== undefined ? { temperature: fields.temperature } : {}),
+          refs: fields.refs,
+        }, deps.generate)
+      : await runObjectJob(deps.jobsRoot, jobId, {
+          kind,
+          subject,
+          model: fields.model,
+          count: fields.count,
+          ...(fields.temperature !== undefined ? { temperature: fields.temperature } : {}),
+          refs: fields.refs,
+        }, deps.generateObject);
   const runIndex = job.runs.length - 1;
   return ok({
     ok: true,
     jobId: job.jobId,
+    kind: job.kind,
     jobDir: path.join(deps.jobsRoot, job.jobId),
     runIndex,
     run: job.runs[runIndex],
@@ -231,7 +332,7 @@ async function adoptCommand(
   const parsed = parseFlags(rest, [], ["id", "name", "tags"]);
   if ("error" in parsed) return usageError(`unexpected argument "${parsed.error}"`);
   const assetId = parsed.flags.get("id") as string | undefined;
-  if (!assetId) return usageError("adopt requires --id <assetId> for the new Plate Asset");
+  if (!assetId) return usageError("adopt requires --id <assetId> for the new Asset");
   if (!/^[a-z0-9][a-z0-9-]*$/.test(assetId))
     return usageError(`--id must be lowercase letters/digits/hyphens (got "${assetId}")`);
 
@@ -253,15 +354,26 @@ async function adoptCommand(
 async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
   const [cmd, first, second, ...rest] = args;
 
-  if (cmd === "plates") return platesCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
+  if (cmd === "plates")
+    return platesCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
+
+  if (cmd === "objects")
+    return objectsCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
 
   if (cmd === "rerun") {
     if (!first || second !== undefined) return usageError('"jobs rerun" takes exactly one <jobId>');
-    const job = await rerunPlateJob(deps.jobsRoot, first, deps.generate);
+    // The generator follows the loaded job's kind — a recorded lineage is
+    // always rerun with the request contract it was created under, and a
+    // lifted generator refuses the other kind outright.
+    const recorded = await loadJob(deps.jobsRoot, first);
+    const generator: JobGenerator =
+      recorded.request.kind === "object" ? lift("object", deps.generateObject) : lift("plate", deps.generate);
+    const job = await rerunJob(deps.jobsRoot, first, generator);
     const runIndex = job.runs.length - 1;
     return ok({
       ok: true,
       jobId: job.jobId,
+      kind: job.kind,
       jobDir: path.join(deps.jobsRoot, job.jobId),
       runIndex,
       run: job.runs[runIndex],
@@ -284,8 +396,8 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected plates, rerun, show, list, or adopt"
-      : `unknown command "${cmd}" — expected plates, rerun, show, list, or adopt`,
+      ? "missing command — expected plates, objects, rerun, show, list, or adopt"
+      : `unknown command "${cmd}" — expected plates, objects, rerun, show, list, or adopt`,
   );
 }
 
@@ -299,6 +411,7 @@ export async function run(
 ): Promise<CliResult> {
   const resolved: JobCliDeps = {
     generate: deps?.generate ?? PRODUCTION_GENERATOR,
+    generateObject: deps?.generateObject ?? PRODUCTION_OBJECT_GENERATOR,
     jobsRoot: deps?.jobsRoot ?? path.resolve("out", "jobs"),
     libraryRoot: deps?.libraryRoot ?? LIBRARY_ROOT,
   };

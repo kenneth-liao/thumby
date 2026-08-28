@@ -2,9 +2,10 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, readFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { PlateGenerator } from "../src/jobs.js";
+import type { PlateGenerator, ObjectGenerator } from "../src/jobs.js";
 import { scanLibrary } from "../src/assets.js";
 import { run as cliRun, PRODUCTION_GENERATOR, generateOptionsFor } from "../src/job-cli.js";
+import { encodePng } from "./png.js";
 
 let root: string;
 let jobsRoot: string;
@@ -23,7 +24,7 @@ afterEach(async () => {
 
 let n = 0;
 const fakeGen: PlateGenerator = async (req) => ({
-  plates: Array.from({ length: req.count }, (_, i) => ({
+  candidates: Array.from({ length: req.count }, (_, i) => ({
     bytes: Buffer.from(`cli-fake-${req.subject}-${n++}-${i}`),
     mediaType: "image/png",
   })),
@@ -31,9 +32,13 @@ const fakeGen: PlateGenerator = async (req) => ({
   fullPrompt: `PROMPT<${req.subject}>`,
 });
 
-/** Invoke the CLI with test roots and the fake generator. */
-function run(args: string[], generate: PlateGenerator = fakeGen) {
-  return cliRun(args, { generate, jobsRoot, libraryRoot });
+/** Invoke the CLI with test roots and the fake generators. */
+function run(
+  args: string[],
+  generate: PlateGenerator = fakeGen,
+  generateObject: ObjectGenerator = fakeObjectGen,
+) {
+  return cliRun(args, { generate, generateObject, jobsRoot, libraryRoot });
 }
 
 const PLATES_ARGS = ["plates", "neon server room", "--zone", "left", "--count", "2"];
@@ -201,8 +206,79 @@ describe("jobs adopt", () => {
   });
 });
 
-describe("production generator wiring", () => {
-  test("maps a job request onto generatePlates options — backdrop contract included", () => {
+/** True-alpha PNG: a 4×4 opaque red subject in a 16×16 transparent frame. */
+const ALPHA_PNG = encodePng(16, 16, (x, y) =>
+  x < 4 && y < 4 ? [255, 0, 0, 255] : [0, 0, 0, 0],
+);
+
+let objN = 0;
+const fakeObjectGen: ObjectGenerator = async (req) => ({
+  candidates: Array.from({ length: req.count }, () => ({
+    bytes: Buffer.concat([ALPHA_PNG, Buffer.from(`-${objN++}`)]),
+    mediaType: "image/png",
+  })),
+  warnings: [],
+  fullPrompt: `OBJECT<${req.subject}>`,
+});
+
+describe("jobs objects", () => {
+  test("creates an object job and returns the run with kind in the output", async () => {
+    const res = await run(["objects", "a retro desk lamp", "--job", "obj-cli", "--count", "2"]);
+    expect(res.exitCode).toBe(0);
+    const out = res.output as Record<string, any>;
+    expect(out.ok).toBe(true);
+    expect(out.kind).toBe("object");
+    expect(out.run.candidates).toHaveLength(2);
+    const record = JSON.parse(await readFile(path.join(out.jobDir, "job.json"), "utf8"));
+    expect(record.kind).toBe("object");
+    expect(record.request.subject).toBe("a retro desk lamp");
+    expect(record.request).not.toHaveProperty("zone");
+  });
+
+  test("auto job ids are object-prefixed", async () => {
+    const res = await run(["objects", "a potted monstera"]);
+    const out = res.output as Record<string, any>;
+    expect(out.jobId).toMatch(/^object-[a-z0-9-]+$/);
+  });
+
+  test("a logo or text subject is a structured failure before any generation call", async () => {
+    let calls = 0;
+    const spy: ObjectGenerator = async (req) => {
+      calls++;
+      return fakeObjectGen(req);
+    };
+    const res = await run(["objects", "the OpenAI logo", "--job", "obj-logo"], undefined, spy);
+    expect(res.exitCode).toBe(1);
+    const out = res.output as Record<string, any>;
+    expect(out.ok).toBe(false);
+    expect(out.errors[0].message).toMatch(/logo/i);
+    expect(calls).toBe(0);
+  });
+
+  test("rerun dispatches by the recorded job kind", async () => {
+    await run(["objects", "a floating terminal", "--job", "obj-lineage"]);
+    const second = await run(["rerun", "obj-lineage"], undefined, fakeObjectGen);
+    expect(second.exitCode).toBe(0);
+    const out = second.output as Record<string, any>;
+    expect(out.kind).toBe("object");
+    expect(out.job.runs).toHaveLength(2);
+  });
+
+  test("adopt dispatches to the alpha-gated object path", async () => {
+    await run(["objects", "a retro desk lamp", "--job", "obj-adopt-cli"]);
+    const shown = ((await run(["show", "obj-adopt-cli"])).output as Record<string, any>).job;
+    const hash: string = shown.runs[0].candidates[0].contentHash;
+
+    const res = await run(["adopt", "obj-adopt-cli", hash.slice(0, 12), "--id", "lamp"]);
+    expect(res.exitCode).toBe(0);
+    const lib = await scanLibrary(libraryRoot);
+    const asset = lib.objects.find((o) => o.meta.id === "lamp")!;
+    expect(asset.hash).toBe(hash);
+    expect(asset.meta.matting).toBe("true-alpha");
+  });
+});
+
+describe("production generator wiring", () => {  test("maps a job request onto generatePlates options — backdrop contract included", () => {
     // The REQ-014 load-bearing fact: a Plate Job is always a bare backdrop,
     // and the full request (zone, count, typed-ref paths, temperature) maps through.
     expect(

@@ -35,7 +35,7 @@ afterEach(async () => {
 /** Distinct bytes per call so every candidate has a unique content identity. */
 let genCounter = 0;
 const fakeGen: PlateGenerator = async (req) => ({
-  plates: Array.from({ length: req.count }, (_, i) => ({
+  candidates: Array.from({ length: req.count }, (_, i) => ({
     bytes: Buffer.from(`fake-${req.subject}-${req.zone}-${genCounter++}-${i}`),
     mediaType: "image/png",
   })),
@@ -240,7 +240,7 @@ describe("adoptCandidate", () => {
 
   test("adopts a content identity that recurs across runs — ambiguity is about distinct hashes", async () => {
     const dupGen: PlateGenerator = async () => ({
-      plates: [{ bytes: Buffer.from("same-bytes-every-run"), mediaType: "image/png" }],
+      candidates: [{ bytes: Buffer.from("same-bytes-every-run"), mediaType: "image/png" }],
       warnings: [],
       fullPrompt: "identical output",
     });
@@ -269,7 +269,7 @@ describe("adoptCandidate", () => {
 
   test("adopts a non-PNG candidate under its real media type", async () => {
     const jpegGen: PlateGenerator = async () => ({
-      plates: [{ bytes: Buffer.from("jpeg-candidate-bytes"), mediaType: "image/jpeg" }],
+      candidates: [{ bytes: Buffer.from("jpeg-candidate-bytes"), mediaType: "image/jpeg" }],
       warnings: [],
       fullPrompt: "p",
     });

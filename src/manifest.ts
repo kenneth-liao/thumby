@@ -79,7 +79,7 @@ export interface ManifestAsset {
   /** Library scope: the resolved asset id (post-alias). */
   id?: string;
   /** Library scope: the asset kind. */
-  kind?: "logo" | "plate" | "cutout";
+  kind?: "logo" | "plate" | "cutout" | "object";
   /** Project scope: the path relative to the scene's directory, as resolved. */
   path?: string;
   hash: string;
@@ -229,8 +229,8 @@ function checkAsset(at: string, v: unknown, errs: ManifestErrors): void {
   if (!isHex64(v.hash)) errs.at(`${at}.hash`, `"hash" must be a full sha-256 hex digest`);
   if (typeof v.mediaType !== "string" || !v.mediaType) errs.at(`${at}.mediaType`, `"mediaType" must be a string`);
   if (v.id !== undefined && (typeof v.id !== "string" || !v.id)) errs.at(`${at}.id`, `"id" must be a string`);
-  if (v.kind !== undefined && v.kind !== "logo" && v.kind !== "plate" && v.kind !== "cutout")
-    errs.at(`${at}.kind`, `"kind" must be "logo", "plate", or "cutout"`);
+  if (v.kind !== undefined && v.kind !== "logo" && v.kind !== "plate" && v.kind !== "cutout" && v.kind !== "object")
+    errs.at(`${at}.kind`, `"kind" must be "logo", "plate", "cutout", or "object"`);
   if (v.path !== undefined && !isRelPath(v.path)) errs.at(`${at}.path`, `"path" must be a relative path`);
   if (v.scope === "library" && typeof v.id !== "string")
     errs.at(`${at}.id`, `a library asset identity needs the resolved asset "id"`);

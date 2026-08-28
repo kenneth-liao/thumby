@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,7 +73,25 @@ export interface CutoutMeta {
   adoptedFrom?: string;
 }
 
-export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta;
+/**
+ * An isolated non-text object (REQ-015) — a lamp, terminal, device — with a
+ * verified true-alpha matte, positioned independently as an Image layer.
+ */
+export interface ObjectMeta {
+  kind: "object";
+  id: string;
+  name: string;
+  tags: string[];
+  /** The object subject the generating job recorded. */
+  subject?: string;
+  fullPrompt?: string;
+  model?: string;
+  adoptedFrom?: string;
+  /** How the object was isolated — adoption only accepts verified true alpha. */
+  matting: "true-alpha";
+}
+
+export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta | ObjectMeta;
 
 /** Structural base every library meta satisfies — lets `matches` be generic. */
 interface BaseMeta {
@@ -96,6 +114,7 @@ export interface Library {
   logos: LibraryEntry<LogoMeta>[];
   plates: LibraryEntry<PlateMeta>[];
   cutouts: LibraryEntry<CutoutMeta>[];
+  objects: LibraryEntry<ObjectMeta>[];
   /** Identity-kit sources (REQ-016) — searchable, not scene-resolvable. */
   identity: IdentityKit;
 }
@@ -105,10 +124,11 @@ export const EMPTY_LIBRARY: Library = {
   logos: [],
   plates: [],
   cutouts: [],
+  objects: [],
   identity: EMPTY_IDENTITY_KIT,
 };
 
-const KIND_DIRS = ["logos", "plates", "cutouts"] as const;
+const KIND_DIRS = ["logos", "plates", "cutouts", "objects"] as const;
 type KindDir = (typeof KIND_DIRS)[number];
 
 const IMAGE_EXTENSIONS = new Set([".svg", ".png", ".jpg", ".jpeg", ".webp"]);
@@ -158,7 +178,12 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
       const imgResult = await findImage(dir);
       if (typeof imgResult !== "string") throw new Error(imgResult.error);
       const meta = metaResult.meta as AssetMeta;
-      if (meta.kind !== "logo" && meta.kind !== "plate" && meta.kind !== "cutout")
+      if (
+        meta.kind !== "logo" &&
+        meta.kind !== "plate" &&
+        meta.kind !== "cutout" &&
+        meta.kind !== "object"
+      )
         throw new Error(`${dir}/meta.json: unknown kind "${(meta as any).kind}"`);
       if (meta.id !== d)
         throw new Error(
@@ -181,10 +206,11 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
 }
 
 export async function scanLibrary(root: string): Promise<Library> {
-  const [logos, plates, cutouts, kit] = await Promise.all([
+  const [logos, plates, cutouts, objects, kit] = await Promise.all([
     scanKindDir(root, "logos"),
     scanKindDir(root, "plates"),
     scanKindDir(root, "cutouts"),
+    scanKindDir(root, "objects"),
     scanIdentityKit(root),
   ]);
   // An id is the vocabulary every reader uses; it must be unambiguous library-wide.
@@ -193,6 +219,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     ["logos", logos],
     ["plates", plates],
     ["cutouts", cutouts],
+    ["objects", objects],
     ["identity", kit.entries],
   ] as const) {
     for (const e of entries) {
@@ -208,6 +235,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     logos: logos as LibraryEntry<LogoMeta>[],
     plates: plates as LibraryEntry<PlateMeta>[],
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
+    objects: objects as LibraryEntry<ObjectMeta>[],
     identity: kit,
   };
 }
@@ -221,11 +249,68 @@ export function extensionFor(mediaType: string): string {
 }
 
 /**
- * Write a new plate asset into the library. This is the one canonical write
- * path for adoption: the id must be valid, and the asset directory is created
- * exclusively (mkdir fails on an existing id), so overwriting an adopted
- * asset is unrepresentable — not merely detected. Returns the image path.
+ * Atomically reserve an asset id library-wide. The exclusive mkdir is the
+ * claim: either this process owns the id for the duration of its write or the
+ * id is taken. Held across the collision check and the kind-directory create
+ * (which are themselves check-then-act), so concurrent adoptions of the same
+ * id — across kinds — have exactly one winner.
  */
+async function reserveAssetId(root: string, id: string): Promise<string> {
+  const lockDir = path.join(root, ".reservations", id);
+  await mkdir(path.dirname(lockDir), { recursive: true });
+  try {
+    await mkdir(lockDir);
+  } catch {
+    throw new Error(
+      `"${id}" is reserved right now — another adoption holds it, or a crashed adoption left a stale reservation at ${lockDir} (remove it if no adoption is running)`,
+    );
+  }
+  return lockDir;
+}
+
+/**
+ * The one canonical adoption write path, shared by every generated-asset kind:
+ * the id must be valid, the id is reserved atomically library-wide, and the
+ * asset directory is created exclusively (mkdir fails on an existing id), so
+ * overwriting an adopted asset is unrepresentable — not merely detected.
+ * Returns the image path.
+ */
+async function writeKindAsset(
+  root: string,
+  kindDir: "plates" | "objects",
+  fileBase: string,
+  id: string,
+  bytes: Uint8Array,
+  meta: AssetMeta,
+  mediaType: string,
+): Promise<string> {
+  if (!ASSET_ID_PATTERN.test(id))
+    throw new Error(`Invalid asset id "${id}" — use lowercase letters/digits/hyphens`);
+  const reservation = await reserveAssetId(root, id);
+  try {
+    // An id is library-wide vocabulary: no asset of any kind may share it.
+    // Re-checked under the reservation — the reservation is what makes this
+    // check-then-act pair atomic against concurrent adoptions.
+    for (const kind of KIND_DIRS) {
+      if (existsSync(path.join(root, kind, id)))
+        throw new Error(`"${id}" already exists in the library — adoption never overwrites an asset`);
+    }
+    const kindRoot = path.join(root, kindDir);
+    await mkdir(kindRoot, { recursive: true });
+    // Exclusive create: a second adoption of the same id throws here instead of
+    // clobbering the first asset's bytes.
+    const dir = path.join(kindRoot, id);
+    await mkdir(dir);
+    const imagePath = path.join(dir, `${fileBase}.${extensionFor(mediaType)}`);
+    await writeFile(imagePath, bytes);
+    await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+    return imagePath;
+  } finally {
+    await rm(reservation, { recursive: true, force: true });
+  }
+}
+
+/** Write a new plate asset into the library (the plate-kind write path). */
 export async function writePlateAsset(
   root: string,
   id: string,
@@ -233,23 +318,24 @@ export async function writePlateAsset(
   meta: PlateMeta,
   mediaType = "image/png",
 ): Promise<string> {
-  if (!ASSET_ID_PATTERN.test(id))
-    throw new Error(`Invalid asset id "${id}" — use lowercase letters/digits/hyphens`);
-  // An id is library-wide vocabulary: no asset of any kind may share it.
-  for (const kind of ["logos", "plates", "cutouts"]) {
-    if (existsSync(path.join(root, kind, id)))
-      throw new Error(`"${id}" already exists in the library — adoption never overwrites an asset`);
-  }
-  const kindDir = path.join(root, "plates");
-  await mkdir(kindDir, { recursive: true });
-  // Exclusive create: a second adoption of the same id throws here instead of
-  // clobbering the first asset's bytes.
-  const dir = path.join(kindDir, id);
-  await mkdir(dir);
-  const imagePath = path.join(dir, `plate.${extensionFor(mediaType)}`);
-  await writeFile(imagePath, bytes);
-  await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
-  return imagePath;
+  return writeKindAsset(root, "plates", "plate", id, bytes, meta, mediaType);
+}
+
+/**
+ * Write a new object asset into the library (the object-kind write path).
+ * Callers must have verified true alpha first — this function records the
+ * matting claim, it does not re-check the pixels. The media type is not a
+ * parameter: adoption verifies the bytes are PNG, so the contract's
+ * `object.png` is hardcoded here and a mislabeled candidate cannot produce a
+ * differently-named asset.
+ */
+export async function writeObjectAsset(
+  root: string,
+  id: string,
+  bytes: Uint8Array,
+  meta: ObjectMeta,
+): Promise<string> {
+  return writeKindAsset(root, "objects", "object", id, bytes, meta, "image/png");
 }
 
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {
@@ -275,6 +361,7 @@ export async function searchLibrary(
     logos: text(lib.logos),
     plates: text(lib.plates),
     cutouts: text(lib.cutouts),
+    objects: text(lib.objects),
     identity: { ...lib.identity, entries: text(identity) },
   };
 }
@@ -339,7 +426,7 @@ export interface AssetRef {
 }
 
 /** Restricts library-scope resolution to one asset kind. */
-export type AssetKind = "logo" | "plate" | "cutout";
+export type AssetKind = "logo" | "plate" | "cutout" | "object";
 
 /** Match a logo by id, display name, or alias against a lowercased `want`. */
 function matchesLogo(entry: LibraryEntry<LogoMeta>, want: string): boolean {
@@ -410,7 +497,7 @@ export interface ResolvedAsset {
   /** Library scope: the resolved asset id (post-alias). */
   id?: string;
   /** Library scope: the asset kind. */
-  kind?: "logo" | "plate" | "cutout";
+  kind?: AssetKind;
   /** Project scope: the path relative to the project root, in portable `/` form. */
   path?: string;
   bytes: Uint8Array;
@@ -458,12 +545,16 @@ export async function resolveAsset(
     } else if (opts?.kind === "cutout") {
       entry = lib.cutouts.find(byId(want));
       pool = lib.cutouts;
+    } else if (opts?.kind === "object") {
+      entry = lib.objects.find(byId(want));
+      pool = lib.objects;
     } else {
       entry =
         lib.logos.find((l) => matchesLogo(l, want)) ??
         lib.plates.find(byId(want)) ??
-        lib.cutouts.find(byId(want));
-      pool = [...lib.logos, ...lib.plates, ...lib.cutouts];
+        lib.cutouts.find(byId(want)) ??
+        lib.objects.find(byId(want));
+      pool = [...lib.logos, ...lib.plates, ...lib.cutouts, ...lib.objects];
     }
     if (!entry) {
       throw new Error(

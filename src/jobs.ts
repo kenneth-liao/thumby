@@ -17,9 +17,17 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TextZone } from "./generate.js";
 import { resolveModel } from "./models.js";
-import { extensionFor, writePlateAsset } from "./assets.js";
+import { extensionFor, writePlateAsset, writeObjectAsset } from "./assets.js";
+import { verifyTrueAlpha } from "./alpha.js";
 
-export const JOB_SCHEMA_VERSION = 1 as const;
+/**
+ * Job record schema versions. v1 is plate-only; object-capable jobs are v2.
+ * The bump is the rollback boundary: a 0.15.1 binary rejects a v2 record
+ * outright instead of rerunning or adopting an object job through its
+ * plate-only path (where no alpha gate exists).
+ */
+export const PLATE_JOB_SCHEMA_VERSION = 1 as const;
+export const OBJECT_JOB_SCHEMA_VERSION = 2 as const;
 
 /** A generation reference with an explicit role and exact content identity. */
 export interface TypedRef {
@@ -38,6 +46,22 @@ export interface PlateJobRequest {
   temperature?: number;
   refs: TypedRef[];
 }
+
+/**
+ * An isolated non-text object request (REQ-015): one standalone object, no
+ * scene, no composite. Official logos and final text are rejected as targets
+ * at the request boundary — `validateObjectSubject`.
+ */
+export interface ObjectJobRequest {
+  kind: "object";
+  subject: string;
+  model: string;
+  count: number;
+  temperature?: number;
+  refs: TypedRef[];
+}
+
+export type JobRequest = PlateJobRequest | ObjectJobRequest;
 
 export interface JobCandidate {
   contentHash: string;
@@ -59,17 +83,17 @@ export interface JobRun {
 }
 
 export interface GenerationJob {
-  schemaVersion: typeof JOB_SCHEMA_VERSION;
+  schemaVersion: typeof PLATE_JOB_SCHEMA_VERSION | typeof OBJECT_JOB_SCHEMA_VERSION;
   jobId: string;
-  kind: "plate";
+  kind: "plate" | "object";
   createdAt: string;
-  request: PlateJobRequest;
+  request: JobRequest;
   runs: JobRun[];
 }
 
 export interface JobSummary {
   jobId: string;
-  kind: "plate";
+  kind: "plate" | "object";
   subject: string;
   createdAt: string;
   runs: number;
@@ -78,11 +102,35 @@ export interface JobSummary {
 
 /** The injectable generation seam — the AI SDK boundary lives behind this. */
 export interface GeneratedBatch {
-  plates: { bytes: Uint8Array; mediaType: string }[];
+  candidates: { bytes: Uint8Array; mediaType: string }[];
   warnings: string[];
   fullPrompt: string;
 }
 export type PlateGenerator = (request: PlateJobRequest) => Promise<GeneratedBatch>;
+export type ObjectGenerator = (request: ObjectJobRequest) => Promise<GeneratedBatch>;
+export type JobGenerator = (request: JobRequest) => Promise<GeneratedBatch>;
+
+/**
+ * Subjects that ask the model to paint an official logo or readable text are
+ * rejected before any generation call: logos come from sourced Assets
+ * (`library add-logo`) and final text is rendered locally (ADR-0001,
+ * DEC-005/DEC-006). The guard is a deterministic denylist — it errs toward
+ * refusing, and a refused subject can always be reworded to name the object
+ * itself rather than its lettering.
+ */
+const OBJECT_SUBJECT_BAN =
+  /\b(logos?|logotypes?|logomarks?|wordmarks?|brand ?marks?|trademarks?|text|headline|headlines|title|subtitle|captions?|lettering|typography|letters?|words?|watermarks?|slogans?|taglines?|numbers?|fonts?)\b/i;
+
+export function validateObjectSubject(subject: string): void {
+  if (!subject.trim()) throw new Error(`An object job needs a subject naming the object to generate`);
+  const hit = OBJECT_SUBJECT_BAN.exec(subject);
+  if (hit)
+    throw new Error(
+      `"${subject}" asks for ${hit[0]} — object generation targets must be isolated non-text objects. ` +
+        `Official logos come from sourced Assets (bun run library add-logo) and final text is rendered locally (ADR-0001); ` +
+        `reword the subject to name the object itself, not its lettering.`,
+    );
+}
 
 const JOB_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const ROLE_PATTERN = /^[a-z][a-z0-9-]*$/;
@@ -120,15 +168,32 @@ function sha256(bytes: Uint8Array): string {
 }
 
 /**
- * Execute a plate request as a new Generation Job and record the run.
- * Creating over an existing job id is refused — `rerunPlateJob` is the only
+ * Adapt a kind-specific generator to the joint seam, refusing to run a
+ * request of the other kind — a plate generator must never execute an object
+ * request (their prompts and contracts differ).
+ */
+/** Wrap a kind-specific generator as a JobGenerator that refuses other kinds. */
+export function lift<K extends JobRequest["kind"]>(
+  kind: K,
+  generate: (request: Extract<JobRequest, { kind: K }>) => Promise<GeneratedBatch>,
+): JobGenerator {
+  return (request) => {
+    if (request.kind !== kind)
+      throw new Error(`a ${kind} generator cannot run a "${request.kind}" job request`);
+    return generate(request as Extract<JobRequest, { kind: K }>);
+  };
+}
+
+/**
+ * Execute a request as a new Generation Job and record the run.
+ * Creating over an existing job id is refused — rerun is the only
  * way to add candidates, so a lineage can never be silently mixed.
  */
-export async function runPlateJob(
+async function runJob(
   jobRoot: string,
   jobId: string,
-  request: PlateJobRequest,
-  generate: PlateGenerator,
+  request: JobRequest,
+  generate: JobGenerator,
 ): Promise<GenerationJob> {
   if (!JOB_ID_PATTERN.test(jobId))
     throw new Error(`Invalid job id "${jobId}" — use lowercase letters/digits/hyphens`);
@@ -138,9 +203,9 @@ export async function runPlateJob(
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
-    schemaVersion: JOB_SCHEMA_VERSION,
+    schemaVersion: request.kind === "object" ? OBJECT_JOB_SCHEMA_VERSION : PLATE_JOB_SCHEMA_VERSION,
     jobId,
-    kind: "plate",
+    kind: request.kind,
     createdAt: now,
     request,
     runs: [],
@@ -151,16 +216,35 @@ export async function runPlateJob(
   return job;
 }
 
+export function runPlateJob(
+  jobRoot: string,
+  jobId: string,
+  request: PlateJobRequest,
+  generate: PlateGenerator,
+): Promise<GenerationJob> {
+  return runJob(jobRoot, jobId, request, lift("plate", generate));
+}
+
+export async function runObjectJob(
+  jobRoot: string,
+  jobId: string,
+  request: ObjectJobRequest,
+  generate: ObjectGenerator,
+): Promise<GenerationJob> {
+  validateObjectSubject(request.subject);
+  return runJob(jobRoot, jobId, request, lift("object", generate));
+}
+
 /**
  * Re-execute a job's recorded request and append the run to its lineage.
  * Reference identities are re-derived and compared first — drifted or
  * missing references fail loudly, because a rerun with different reference
  * content would be a different job wearing the same id.
  */
-export async function rerunPlateJob(
+export async function rerunJob(
   jobRoot: string,
   jobId: string,
-  generate: PlateGenerator,
+  generate: JobGenerator,
 ): Promise<GenerationJob> {
   const job = await loadJob(jobRoot, jobId);
   for (const ref of job.request.refs) {
@@ -184,40 +268,64 @@ export async function rerunPlateJob(
   return job;
 }
 
+export function rerunPlateJob(
+  jobRoot: string,
+  jobId: string,
+  generate: PlateGenerator,
+): Promise<GenerationJob> {
+  return rerunJob(jobRoot, jobId, lift("plate", generate));
+}
+
+export function rerunObjectJob(
+  jobRoot: string,
+  jobId: string,
+  generate: ObjectGenerator,
+): Promise<GenerationJob> {
+  return rerunJob(jobRoot, jobId, lift("object", generate));
+}
+
 /** Call the generator, persist the candidates, and build the run record. */
 async function recordRun(
   jobRoot: string,
   job: GenerationJob,
-  request: PlateJobRequest,
+  request: JobRequest,
   batch: GeneratedBatch,
   ranAt: string,
 ): Promise<JobRun> {
-  if (batch.plates.length === 0) throw new Error("Generation returned no candidates");
+  if (batch.candidates.length === 0) throw new Error("Generation returned no candidates");
   const spec = resolveModel(request.model);
   const dir = jobDir(jobRoot, job.jobId);
   const candidatesDir = path.join(dir, "candidates");
   await mkdir(candidatesDir, { recursive: true });
 
   const candidates: JobCandidate[] = [];
-  for (const plate of batch.plates) {
-    const contentHash = sha256(plate.bytes);
-    const file = path.join("candidates", `${contentHash}.${extensionFor(plate.mediaType)}`);
-    await writeFile(path.join(dir, file), plate.bytes);
-    candidates.push({ contentHash, file, mediaType: plate.mediaType });
+  for (const candidate of batch.candidates) {
+    const contentHash = sha256(candidate.bytes);
+    const file = path.join("candidates", `${contentHash}.${extensionFor(candidate.mediaType)}`);
+    await writeFile(path.join(dir, file), candidate.bytes);
+    candidates.push({ contentHash, file, mediaType: candidate.mediaType });
   }
 
   return {
     ranAt,
     model: spec.id,
     fullPrompt: batch.fullPrompt,
-    costUsd: spec.approxCost * batch.plates.length,
+    costUsd: spec.approxCost * batch.candidates.length,
     costMeasured: spec.costMeasured,
     warnings: batch.warnings,
     candidates,
   };
 }
 
-/** Load a job record; missing or corrupt records fail loudly. */
+/**
+ * Load a job record; missing, corrupt, or contradictory records fail loudly.
+ * The record's `kind` mirrors `request.kind`, but a hand-edited or tampered
+ * file could disagree — rerun dispatches on the request and adoption on the
+ * record, so an unvalidated contradiction would let one job rerun under one
+ * contract and adopt under another (bypassing the object alpha gate). Both
+ * are validated equal here, the single ingestion point, and v1 records are
+ * pinned to plate jobs (v2 introduced object jobs).
+ */
 export async function loadJob(jobRoot: string, jobId: string): Promise<GenerationJob> {
   if (!JOB_ID_PATTERN.test(jobId))
     throw new Error(`Invalid job id "${jobId}" — use lowercase letters/digits/hyphens`);
@@ -229,8 +337,18 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
   }
   try {
     const job = JSON.parse(raw) as GenerationJob;
-    if (job.schemaVersion !== JOB_SCHEMA_VERSION)
-      throw new Error(`unsupported job schemaVersion ${job.schemaVersion}`);
+    if (job.schemaVersion !== PLATE_JOB_SCHEMA_VERSION && job.schemaVersion !== OBJECT_JOB_SCHEMA_VERSION)
+      throw new Error(
+        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${PLATE_JOB_SCHEMA_VERSION} and ${OBJECT_JOB_SCHEMA_VERSION} only`,
+      );
+    if (job.kind !== job.request.kind)
+      throw new Error(
+        `Job "${jobId}" is contradictory: record kind ${JSON.stringify(job.kind)} does not match request kind ${JSON.stringify(job.request?.kind)} — it cannot be trusted and will not run`,
+      );
+    if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, which is plate-only, but its kind is ${JSON.stringify(job.kind)} — object jobs require schemaVersion ${OBJECT_JOB_SCHEMA_VERSION}`,
+      );
     return job;
   } catch (err) {
     throw new Error(`Job "${jobId}" has an unreadable record: ${(err as Error).message}`);
@@ -264,11 +382,13 @@ export async function listJobs(jobRoot: string): Promise<JobSummary[]> {
 }
 
 /**
- * Adopt a recorded candidate as a new immutable Plate Asset. The candidate is
- * addressed by exact content hash (a unique prefix is accepted); its bytes are
- * re-derived and verified before adoption, so a tampered or missing file
+ * Adopt a recorded candidate as a new immutable Asset — the kind follows the
+ * job: a plate job adopts a Plate Asset, an object job verifies the
+ * candidate's true alpha (REQ-015) and adopts an Object Asset. The candidate
+ * is addressed by exact content hash (a unique prefix is accepted); its bytes
+ * are re-derived and verified before adoption, so a tampered or missing file
  * cannot enter the library under a stale identity. Overwriting an existing
- * asset is unrepresentable — `writePlateAsset` refuses existing ids.
+ * asset is unrepresentable — the write path refuses existing ids.
  */
 export async function adoptCandidate(
   jobRoot: string,
@@ -304,15 +424,38 @@ export async function adoptCandidate(
     );
 
   const adoptedFrom = `job:${jobId}#${cand.contentHash}`;
+  const provenance = {
+    ...(job.request.subject ? { subject: job.request.subject } : {}),
+    ...(run.fullPrompt ? { fullPrompt: run.fullPrompt } : {}),
+    model: run.model,
+    adoptedFrom,
+  };
+
+  if (job.kind === "object") {
+    // The alpha gate runs before any write: an opaque candidate is exactly
+    // the chroma-key shape REQ-015 forbids, and it must not enter the library.
+    verifyTrueAlpha(bytes, cand.file);
+    // The gate just proved the bytes are PNG — the recorded mediaType is
+    // derived, not authoritative, and object assets are contractually
+    // object.png (writeObjectAsset hardcodes the type, so a mislabeled
+    // candidate cannot produce object.jpg).
+    const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, bytes, {
+      kind: "object",
+      id: assetId,
+      name: opts.name ?? assetId,
+      tags: opts.tags ?? [],
+      ...provenance,
+      matting: "true-alpha",
+    });
+    return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
+  }
+
   const imagePath = await writePlateAsset(opts.libraryRoot, assetId, bytes, {
     kind: "plate",
     id: assetId,
     name: opts.name ?? assetId,
     tags: opts.tags ?? [],
-    ...(job.request.subject ? { subject: job.request.subject } : {}),
-    ...(run.fullPrompt ? { fullPrompt: run.fullPrompt } : {}),
-    model: run.model,
-    adoptedFrom,
+    ...provenance,
   }, cand.mediaType);
   return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
 }

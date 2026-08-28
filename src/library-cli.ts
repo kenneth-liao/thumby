@@ -15,13 +15,17 @@ import {
 import { parseFacets, IDENTITY_KIT_DIR } from "./identity.js";
 
 const HELP = `
-library — the reusable asset library (plates + logos + cutouts + identity sources)
+library — the reusable asset library (plates + logos + cutouts + objects + identity sources)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
   bun run library resolve <ref> [options]     Resolve an asset reference to its exact content identity.
   bun run library add-logo <file> --id <id>   Add a logo image to the library.
   bun run library adopt <plate.png> --id <id> Adopt a generated plate (with its provenance).
   bun run library add-cutout <file> --id <id> Add a transparent-PNG cutout.
+
+Object Assets (REQ-015) enter the library only through Generation Job
+adoption — "bun run jobs adopt <jobId> <hash> --id <id>" — which verifies
+true alpha before writing; there is no manual object add path.
 
 Asset references name exact content and work the same for library and
 project-local assets: "<id>" or "library:<id>" resolves a library asset
@@ -117,10 +121,16 @@ async function scanOrDie(): Promise<Library> {
 /** Write an HTML contact sheet of everything in the library. */
 async function writeSheet(lib: Library) {
   const identity = lib.identity.present ? lib.identity.entries : [];
-  if (lib.logos.length === 0 && lib.plates.length === 0 && lib.cutouts.length === 0 && identity.length === 0)
+  if (
+    lib.logos.length === 0 &&
+    lib.plates.length === 0 &&
+    lib.cutouts.length === 0 &&
+    lib.objects.length === 0 &&
+    identity.length === 0
+  )
     return;
   const figure = (kind: string, id: string, file: string, caption: string) =>
-    `<figure><a href="file://${path.join(LIBRARY_ROOT, kind, id, file)}"><img class="${kind === "plates" ? "plate-img" : kind === "cutouts" ? "cutout-img" : ""}" src="file://${path.join(LIBRARY_ROOT, kind, id, file)}"></a><figcaption>${caption}</figcaption></figure>`;
+    `<figure><a href="file://${path.join(LIBRARY_ROOT, kind, id, file)}"><img class="${kind === "plates" ? "plate-img" : kind === "cutouts" || kind === "objects" ? "cutout-img" : ""}" src="file://${path.join(LIBRARY_ROOT, kind, id, file)}"></a><figcaption>${caption}</figcaption></figure>`;
   const identityFigure = (s: (typeof identity)[number]) =>
     `<figure><a href="file://${s.imagePath}"><img class="cutout-img" src="file://${s.imagePath}"></a><figcaption>${s.meta.id} [${s.meta.tags.join(", ")}]</figcaption></figure>`;
   const section = (
@@ -143,7 +153,7 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 img.plate-img{max-width:100%;max-height:none;width:100%}
 img.cutout-img{max-width:180px;max-height:180px;object-fit:contain}
 .empty{color:#5c5c64;font-size:12px;margin:8px 4px}
-</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length + identity.length}</h1>
+</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length + lib.objects.length + identity.length}</h1>
 ${section(
   "logos",
   lib.logos
@@ -166,6 +176,15 @@ ${section(
     )
     .join("\n"),
   "(none — adopt one with bun run library adopt <plate.png> --id <name>)",
+)}
+${section(
+  "objects",
+  lib.objects
+    .map((o) =>
+      figure("objects", o.meta.id, path.basename(o.imagePath), `${o.meta.id} [${o.meta.tags.join(", ")}] ${o.meta.matting}`),
+    )
+    .join("\n"),
+  "(none — adopt one with bun run jobs adopt <jobId> <hash> --id <name>)",
 )}
 ${section(
   "cutouts",
