@@ -1,13 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   scanLibrary,
   resolveLogo,
   resolveCutout,
   searchLibrary,
+  resolveAsset,
+  parseAssetRef,
+  contentHash,
 } from "../src/assets.js";
+
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
 let root: string;
 
@@ -187,5 +193,175 @@ describe("searchLibrary", () => {
     const all = await searchLibrary(await scanLibrary(root), "");
     expect(all.logos).toHaveLength(2);
     expect(all.plates).toHaveLength(1);
+  });
+});
+
+describe("parseAssetRef", () => {
+  it("classifies a bare id as library scope", () => {
+    expect(parseAssetRef("openai")).toEqual({ scope: "library", id: "openai" });
+  });
+
+  it("classifies an explicit library: prefix", () => {
+    expect(parseAssetRef("library:openai")).toEqual({ scope: "library", id: "openai" });
+    expect(parseAssetRef("library:openai@" + sha("x"))).toEqual({
+      scope: "library",
+      id: "openai",
+      hash: sha("x"),
+    });
+  });
+
+  it("splits an @<hash> suffix off a library id", () => {
+    const h = sha("x");
+    expect(parseAssetRef(`openai@${h}`)).toEqual({ scope: "library", id: "openai", hash: h });
+    expect(parseAssetRef(`openai@${h.slice(0, 12)}`).hash).toBe(h.slice(0, 12));
+  });
+
+  it("classifies separator and dot paths as project scope", () => {
+    expect(parseAssetRef("media/hook.png")).toEqual({ scope: "project", path: "media/hook.png" });
+    expect(parseAssetRef("./media/hook.png")).toEqual({ scope: "project", path: "./media/hook.png" });
+    expect(parseAssetRef("../elsewhere/hook.png")).toEqual({
+      scope: "project",
+      path: "../elsewhere/hook.png",
+    });
+  });
+
+  it("splits a hex @<hash> off a project path but keeps non-hex @ in the path", () => {
+    const h = sha("x");
+    expect(parseAssetRef(`media/hook.png@${h.slice(0, 10)}`)).toEqual({
+      scope: "project",
+      path: "media/hook.png",
+      hash: h.slice(0, 10),
+    });
+    expect(parseAssetRef("media/we@ird.png")).toEqual({ scope: "project", path: "media/we@ird.png" });
+  });
+
+  it("rejects a malformed hash suffix with an actionable error", () => {
+    expect(() => parseAssetRef("openai@xyz")).toThrow(/invalid content hash/);
+    expect(() => parseAssetRef("openai@")).toThrow(/invalid content hash/);
+    expect(() => parseAssetRef("openai@" + "a".repeat(65))).toThrow(/invalid content hash/);
+  });
+
+  it("rejects empty references", () => {
+    expect(() => parseAssetRef("  ")).toThrow(/empty/);
+  });
+});
+
+describe("contentHash", () => {
+  it("is the sha-256 of the exact bytes", () => {
+    expect(contentHash(new TextEncoder().encode("PNGBYTES"))).toBe(sha("PNGBYTES"));
+    expect(contentHash(new TextEncoder().encode("other"))).not.toBe(sha("PNGBYTES"));
+  });
+});
+
+describe("resolveAsset", () => {
+  it("resolves a library asset by id with its content identity", async () => {
+    await seedLogo("openai");
+    const asset = await resolveAsset(root, await scanLibrary(root), "openai");
+    expect(asset.scope).toBe("library");
+    expect(asset.id).toBe("openai");
+    expect(asset.kind).toBe("logo");
+    expect(asset.hash).toBe(sha("<svg viewBox=\"0 0 1 1\"/>"));
+    expect(asset.mediaType).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(asset.bytes)).toContain("<svg");
+  });
+
+  it("resolves a library logo through an alias", async () => {
+    await seedLogo("openai", { extra: '{ "aliases": ["chatgpt"] }' });
+    const asset = await resolveAsset(root, await scanLibrary(root), "chatgpt");
+    expect(asset.id).toBe("openai");
+  });
+
+  it("resolves a library plate by id with png media type", async () => {
+    await put("plates/neon/plate.png", "PNGBYTES");
+    await put("plates/neon/meta.json", JSON.stringify({ kind: "plate", id: "neon", tags: [] }));
+    const asset = await resolveAsset(root, await scanLibrary(root), "neon");
+    expect(asset.kind).toBe("plate");
+    expect(asset.mediaType).toBe("image/png");
+    expect(asset.hash).toBe(sha("PNGBYTES"));
+  });
+
+  it("pins exact content with a full or prefix hash", async () => {
+    await seedLogo("openai");
+    const lib = await scanLibrary(root);
+    const h = lib.logos[0]!.hash;
+    expect((await resolveAsset(root, lib, `openai@${h}`)).hash).toBe(h);
+    expect((await resolveAsset(root, lib, `library:openai@${h.slice(0, 8)}`)).hash).toBe(h);
+  });
+
+  it("fails loudly with the actual hash when pinned content has changed", async () => {
+    await seedLogo("openai");
+    const lib = await scanLibrary(root);
+    await put("logos/openai/openai.svg", "<svg viewBox=\"0 0 2 2\"/>");
+    const err = await resolveAsset(root, lib, `openai@${sha("<svg viewBox=\"0 0 1 1\"/>").slice(0, 12)}`).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err!.message).toMatch(/content mismatch/);
+    expect(err!.message).toContain(sha("<svg viewBox=\"0 0 2 2\"/>"));
+    expect(err!.message).toMatch(/re-?pin/i);
+  });
+
+  it("lists available ids when a library asset is unknown", async () => {
+    await seedLogo("openai");
+    const err = await resolveAsset(root, await scanLibrary(root), "nope").then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err!.message).toMatch(/unknown library asset "nope"/);
+    expect(err!.message).toContain("openai");
+  });
+
+  it("resolves a project-local reference relative to the project root", async () => {
+    await mkdir(path.join(root, "media"), { recursive: true });
+    await writeFile(path.join(root, "media/hook.png"), "PNGBYTES");
+    const asset = await resolveAsset(root, await scanLibrary(root), "media/hook.png");
+    expect(asset.scope).toBe("project");
+    expect(asset.path).toBe("media/hook.png");
+    expect(asset.hash).toBe(sha("PNGBYTES"));
+    expect(asset.mediaType).toBe("image/png");
+  });
+
+  it("still resolves a project containing relative/exact refs after relocation", async () => {
+    await mkdir(path.join(root, "media"), { recursive: true });
+    await writeFile(path.join(root, "media/hook.png"), "PNGBYTES");
+    const before = await resolveAsset(root, await scanLibrary(root), "media/hook.png@" + sha("PNGBYTES"));
+    const moved = path.join(path.dirname(root), "relocated-" + path.basename(root));
+    await rename(root, moved);
+    const after = await resolveAsset(moved, await scanLibrary(moved), "media/hook.png@" + sha("PNGBYTES"));
+    expect(after.hash).toBe(before.hash);
+    expect(after.scope).toBe("project");
+  });
+
+  it("fails with an actionable error when project content is missing", async () => {
+    const err = await resolveAsset(root, await scanLibrary(root), "media/gone.png").then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err!.message).toMatch(/missing project asset "media\/gone\.png"/);
+    expect(err!.message).toContain(path.join(root, "media/gone.png"));
+  });
+
+  it("pins exact bytes for project-local references too", async () => {
+    await mkdir(path.join(root, "media"), { recursive: true });
+    await writeFile(path.join(root, "media/hook.png"), "PNGBYTES");
+    const ref = "media/hook.png@" + sha("DIFFERENT").slice(0, 12);
+    await expect(resolveAsset(root, await scanLibrary(root), ref)).rejects.toThrow(/content mismatch/);
+  });
+
+  it("maps media types by extension", async () => {
+    await seedLogo("openai");
+    await put("logos/webp/logo.webp", "WEBPBYTES");
+    await put("logos/webp/meta.json", JSON.stringify({ kind: "logo", id: "webp", tags: [] }));
+    await put("logos/jpgy/logo.jpg", "JPGBYTES");
+    await put("logos/jpgy/meta.json", JSON.stringify({ kind: "logo", id: "jpgy", tags: [] }));
+    const lib = await scanLibrary(root);
+    expect((await resolveAsset(root, lib, "webp")).mediaType).toBe("image/webp");
+    expect((await resolveAsset(root, lib, "jpgy")).mediaType).toBe("image/jpeg");
+  });
+
+  it("fails scan on malformed metadata with the offending file named", async () => {
+    await put("logos/bad/logo.png", "PNGBYTES");
+    await put("logos/bad/meta.json", JSON.stringify({ kind: "logo", id: "bad", tags: "not-an-array" }));
+    await expect(scanLibrary(root)).rejects.toThrow(/logos\/bad\/meta\.json: tags/);
   });
 });

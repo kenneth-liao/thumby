@@ -179,6 +179,31 @@ Overlay specs reference library logos by id, so no absolute paths:
 (`markColor` overrides; without one the logo's `defaultColor` applies.) The
 library's bytes are gitignored — creator cutouts and brand logos stay local.
 
+### Asset references and content identity
+
+Every asset has an exact content identity: the sha-256 of its bytes, derived
+at scan time (never stored in `meta.json`, so it cannot drift from the file).
+`bun run library list` shows a `@` prefix of it per asset, and
+`bun run library resolve <ref>` prints the full identity:
+
+```bash
+bun run library resolve openai              # library asset (logos answer to aliases)
+bun run library resolve media/hook.png     # project-local file, relative to the project
+```
+
+References work the same for both scopes. Add `@<sha-256-or-prefix>` to pin
+exact bytes:
+
+```bash
+bun run library resolve openai@a039ba73932b        # library
+bun run library resolve media/hook.png@1b2c3d4e    # project-local
+```
+
+Pinned references fail loudly with the new hash when the content changes —
+swapping an asset's bytes never silently changes old references. Path-based
+references are project-relative, so a project still resolves after its
+directory is relocated.
+
 ## Overlay cards
 
 `--overlay <spec.json>` draws floating glass tiles joined by dashed connectors

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- One asset-resolution contract for reusable-library and project-local assets: references (`<id>`, `library:<id>`, or a project-relative path) resolve to exact bytes, and `@<sha-256-or-prefix>` pins content so changed bytes create a new identity instead of silently changing old references (#8)
+- `bun run library resolve <ref>` prints an asset's exact content identity; `list` shows the identity prefix per asset; `--cutout` accepts the same reference syntax (#8)
+- Asset scans validate metadata shape (tags, name) and hash image bytes, failing with actionable errors on missing content, identity mismatches, malformed metadata, and duplicate ids (#8)
+
 ## [0.4.0]
 
 ### Added

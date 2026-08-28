@@ -12,7 +12,7 @@ import { MODELS, DEFAULT_MODEL, resolveModel } from "./models.js";
 import { STYLES, DEFAULT_STYLE } from "./styles.js";
 import { PAIRINGS, DEFAULT_PAIRING, assertFontAssets } from "./fonts.js";
 import { loadLibrary } from "./overlay.js";
-import { resolveCutout } from "./assets.js";
+import { resolveAsset } from "./assets.js";
 
 const HELP = `
 thumby — YouTube thumbnails: AI background + code-rendered text
@@ -290,6 +290,9 @@ for (const w of genWarnings) console.log(`  warn     ${w}`);
 
 // 2 — cutout, loaded once and reused across every variant.
 // A library id keeps compositions portable; a path still works for one-offs.
+// Ids and refs go through the one asset-resolution contract (optionally
+// pinned to exact content with <id>@<hash>); a filesystem path stays a
+// direct one-off at the CLI boundary.
 let cutoutLibraryId: string | undefined;
 const cutout = await (async () => {
   if (!values.cutout) return undefined;
@@ -303,12 +306,9 @@ const cutout = await (async () => {
       mediaType: `image/${path.extname(asPath).slice(1).toLowerCase() || "png"}`,
     };
   }
-  const entry = resolveCutout(await loadLibrary(), values.cutout);
-  cutoutLibraryId = entry.meta.id;
-  return {
-    bytes: await readFile(entry.imagePath),
-    mediaType: `image/${path.extname(entry.imagePath).slice(1).toLowerCase() || "png"}`,
-  };
+  const asset = await resolveAsset(process.cwd(), await loadLibrary(), values.cutout);
+  cutoutLibraryId = asset.id;
+  return { bytes: asset.bytes, mediaType: asset.mediaType };
 })();
 const cutoutSide = (values["cutout-side"] ??
   (zone === "left" ? "right" : zone === "right" ? "left" : "center")) as
