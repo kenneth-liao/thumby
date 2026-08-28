@@ -8,6 +8,7 @@ import {
   scanLibrary,
   searchLibrary,
   resolveAsset,
+  writePlateAsset,
   type Library,
   type CutoutMeta,
 } from "./assets.js";
@@ -291,7 +292,9 @@ if (
   fail(`"${id}" already exists in the library.`);
 }
 
-await mkdir(dir, { recursive: true });
+// adopt creates its own asset directory exclusively inside writePlateAsset;
+// add-logo / add-cutout still own their directory creation here.
+if (command !== "adopt") await mkdir(dir, { recursive: true });
 try {
   if (command === "add-logo") {
     const src = path.resolve(positionals[1] ?? "");
@@ -326,7 +329,9 @@ try {
     );
     console.log(`  logo     ${id} → ${path.relative(process.cwd(), destFile)}`);
   } else if (command === "adopt") {
-    // Adopt a generated plate, carrying its provenance forward from run.json.
+    // Adopt a generated plate through the one canonical write path
+    // (writePlateAsset): exclusive create, cross-kind id, media-type-correct
+    // filename — provenance carried forward from run.json.
     const src = path.resolve(positionals[1] ?? "");
     if (!src) fail("adopt needs a plate PNG path");
     let prior: { subject?: string; fullPrompt?: string; model?: string };
@@ -335,26 +340,25 @@ try {
     } catch {
       prior = {};
     }
-    const destFile = path.join(dir, "plate.png");
-    await copyFile(src, destFile);
-    await writeFile(
-      path.join(dir, "meta.json"),
-      JSON.stringify(
-        {
-          kind: "plate",
-          id,
-          name: values.name ?? values.id!,
-          tags: csv(values.tags!),
-          ...(prior.subject ? { subject: prior.subject } : {}),
-          ...(prior.fullPrompt ? { fullPrompt: prior.fullPrompt } : {}),
-          ...(prior.model ? { model: prior.model } : {}),
-          adoptedFrom: src,
-        },
-        null,
-        2,
-      ),
+    const ext = path.extname(src).toLowerCase().replace(".", "");
+    const mediaType = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp" }[ext] ?? "image/png";
+    const imagePath = await writePlateAsset(
+      LIBRARY_ROOT,
+      id,
+      await readFile(src),
+      {
+        kind: "plate",
+        id,
+        name: values.name ?? values.id!,
+        tags: csv(values.tags!),
+        ...(prior.subject ? { subject: prior.subject } : {}),
+        ...(prior.fullPrompt ? { fullPrompt: prior.fullPrompt } : {}),
+        ...(prior.model ? { model: prior.model } : {}),
+        adoptedFrom: src,
+      },
+      mediaType,
     );
-    console.log(`  plate    ${id} → ${path.relative(process.cwd(), destFile)}`);
+    console.log(`  plate    ${id} → ${path.relative(process.cwd(), imagePath)}`);
     if (prior.subject) {
       console.log(`  from     "${prior.subject.slice(0, 68)}${prior.subject.length > 68 ? "…" : ""}"`);
     } else {

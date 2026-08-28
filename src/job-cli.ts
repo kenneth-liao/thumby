@@ -27,7 +27,7 @@ import {
   type PlateGenerator,
   type PlateJobRequest,
 } from "./jobs.js";
-import { generatePlates } from "./generate.js";
+import { generatePlates, type GenerateOptions } from "./generate.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
@@ -86,19 +86,26 @@ const failure = (message: string, path = "jobs"): CliResult => ({
   output: { ok: false, errors: [{ path, message }] },
 });
 
-/** The real generation path: map the recorded request onto the AI SDK call. */
-export const PRODUCTION_GENERATOR: PlateGenerator = async (request: PlateJobRequest) => {
-  const result = await generatePlates({
+/**
+ * The request→generatePlates mapping — the load-bearing REQ-014 wiring lives
+ * here: a Plate Job is a bare backdrop (no person, product, device, or
+ * independently editable foreground object baked in), whatever the caller passes.
+ */
+export function generateOptionsFor(request: PlateJobRequest): GenerateOptions {
+  return {
     subject: request.subject,
     model: request.model,
     zone: request.zone,
     refs: request.refs.map((r) => r.path),
     count: request.count,
-    // A Plate Job is a bare backdrop by definition (REQ-014): no person,
-    // product, device, or independently editable foreground object baked in.
     subjectless: true,
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
-  });
+  };
+}
+
+/** The real generation path: map the recorded request onto the AI SDK call. */
+export const PRODUCTION_GENERATOR: PlateGenerator = async (request: PlateJobRequest) => {
+  const result = await generatePlates(generateOptionsFor(request));
   return {
     plates: result.plates.map((p) => ({ bytes: p.bytes, mediaType: p.mediaType })),
     warnings: result.warnings,
@@ -249,7 +256,7 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
   if (cmd === "plates") return platesCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
 
   if (cmd === "rerun") {
-    if (!first || rest.length) return usageError('"jobs rerun" takes exactly one <jobId>');
+    if (!first || second !== undefined) return usageError('"jobs rerun" takes exactly one <jobId>');
     const job = await rerunPlateJob(deps.jobsRoot, first, deps.generate);
     const runIndex = job.runs.length - 1;
     return ok({
@@ -263,7 +270,7 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
   }
 
   if (cmd === "show") {
-    if (!first || rest.length) return usageError('"jobs show" takes exactly one <jobId>');
+    if (!first || second !== undefined) return usageError('"jobs show" takes exactly one <jobId>');
     const job = await loadJob(deps.jobsRoot, first);
     return ok({ ok: true, job });
   }

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PlateGenerator } from "../src/jobs.js";
 import { scanLibrary } from "../src/assets.js";
-import { run as cliRun, PRODUCTION_GENERATOR } from "../src/job-cli.js";
+import { run as cliRun, PRODUCTION_GENERATOR, generateOptionsFor } from "../src/job-cli.js";
 
 let root: string;
 let jobsRoot: string;
@@ -129,6 +129,13 @@ describe("jobs rerun", () => {
     expect(res.exitCode).toBe(1);
     expect((res.output as Record<string, any>).ok).toBe(false);
   });
+
+  test("extra positionals are usage errors, not silently ignored", async () => {
+    await run(["plates", "subject", "--job", "one-arg-job"]);
+    expect((await run(["rerun", "one-arg-job", "extra"])).exitCode).toBe(2);
+    expect((await run(["show", "one-arg-job", "extra"])).exitCode).toBe(2);
+    expect((await run(["rerun", "one-arg-job"])).exitCode).toBe(0);
+  });
 });
 
 describe("jobs show and list", () => {
@@ -195,7 +202,28 @@ describe("jobs adopt", () => {
 });
 
 describe("production generator wiring", () => {
-  test("maps a job request onto generatePlates options", async () => {
+  test("maps a job request onto generatePlates options — backdrop contract included", () => {
+    // The REQ-014 load-bearing fact: a Plate Job is always a bare backdrop,
+    // and the full request (zone, count, typed-ref paths, temperature) maps through.
+    expect(
+      generateOptionsFor({
+        kind: "plate", subject: "neon room", zone: "right", model: "nano-2",
+        count: 3, temperature: 0.4,
+        refs: [{ role: "style", path: "refs/palette.png", contentHash: "ab".repeat(32) }],
+      }),
+    ).toEqual({
+      subject: "neon room",
+      zone: "right",
+      model: "nano-2",
+      refs: ["refs/palette.png"],
+      count: 3,
+      subjectless: true,
+      temperature: 0.4,
+    });
+    expect(generateOptionsFor({ ...requestFixture(), temperature: undefined }).temperature).toBeUndefined();
+  });
+
+  test("the production generator rejects a model that cannot take references", async () => {
     // Offline contract check only: the production generator rejects a model
     // that cannot take references, proving the request is forwarded.
     const refFile = path.join(root, "style.png");
@@ -208,3 +236,14 @@ describe("production generator wiring", () => {
     expect(((res.output as Record<string, any>).errors[0].message as string)).toMatch(/does not accept reference images/);
   });
 });
+
+function requestFixture() {
+  return {
+    kind: "plate" as const,
+    subject: "neon room",
+    zone: "right" as const,
+    model: "nano-2",
+    count: 3,
+    refs: [],
+  };
+}

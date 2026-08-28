@@ -238,6 +238,26 @@ describe("adoptCandidate", () => {
     ).rejects.toThrow(/no candidate/i);
   });
 
+  test("adopts a content identity that recurs across runs — ambiguity is about distinct hashes", async () => {
+    const dupGen: PlateGenerator = async () => ({
+      plates: [{ bytes: Buffer.from("same-bytes-every-run"), mediaType: "image/png" }],
+      warnings: [],
+      fullPrompt: "identical output",
+    });
+    await runPlateJob(jobRoot, "plate-recur", { ...baseRequest(), count: 1 }, dupGen);
+    const second = await rerunPlateJob(jobRoot, "plate-recur", dupGen);
+    expect(second.runs).toHaveLength(2);
+    expect(second.runs[1]!.candidates[0]!.contentHash).toBe(second.runs[0]!.candidates[0]!.contentHash);
+
+    // The recurring identity is adoptable — even by a short prefix — and its
+    // provenance resolves to the earliest run that produced it.
+    const hash = second.runs[1]!.candidates[0]!.contentHash;
+    const result = await adoptCandidate(jobRoot, "plate-recur", hash.slice(0, 10), "recur-id", { libraryRoot });
+    expect(result.contentHash).toBe(hash);
+    const lib = await scanLibrary(libraryRoot);
+    expect(lib.plates.find((p) => p.meta.id === "recur-id")!.meta.fullPrompt).toBe("identical output");
+  });
+
   test("fails loudly when the candidate file no longer matches its recorded identity", async () => {
     const job = await runPlateJob(jobRoot, "plate-tamper", baseRequest(), fakeGen);
     const cand = job.runs[0]!.candidates[0]!;

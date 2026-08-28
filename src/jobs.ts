@@ -278,16 +278,23 @@ export async function adoptCandidate(
   opts: { libraryRoot: string; name?: string; tags?: string[] },
 ): Promise<{ assetId: string; contentHash: string; imagePath: string; adoptedFrom: string }> {
   const job = await loadJob(jobRoot, jobId);
-  const matches = job.runs
-    .flatMap((run) => run.candidates.map((c) => ({ cand: c, run })))
-    .filter(({ cand }) => cand.contentHash.startsWith(candidateRef));
-  if (matches.length === 0)
+  // Uniqueness is on content identity: the same bytes recurring across runs
+  // collapse to one candidate, so ambiguity only means two distinct hashes.
+  const byHash = new Map<string, { cand: JobCandidate; run: JobRun }>();
+  for (const { cand, run } of job.runs.flatMap((run) =>
+    run.candidates.map((cand) => ({ cand, run })),
+  )) {
+    if (cand.contentHash.startsWith(candidateRef) && !byHash.has(cand.contentHash))
+      byHash.set(cand.contentHash, { cand, run });
+  }
+  if (byHash.size === 0)
     throw new Error(`Job "${jobId}" has no candidate matching "${candidateRef}"`);
-  if (matches.length > 1)
+  if (byHash.size > 1)
     throw new Error(
-      `Candidate reference "${candidateRef}" is ambiguous — it matches ${matches.length} candidates; use a longer hash prefix`,
+      `Candidate reference "${candidateRef}" is ambiguous — it matches ${byHash.size} distinct candidates; use a longer hash prefix`,
     );
-  const { cand, run } = matches[0]!;
+  // A recurring hash resolves to its first recorded run — the earliest lineage.
+  const { cand, run } = byHash.values().next().value!;
 
   const bytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.file));
   const actual = sha256(bytes);
