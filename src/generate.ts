@@ -146,6 +146,9 @@ export async function generatePlates(
             `${spec.id} returned no image. Text response: ${result.text.slice(0, 300)}`,
           );
         }
+        // The multimodal branch must record warnings too — a Generation Job
+        // that certifies an empty warnings array is a false record.
+        warnings.push(...(result.warnings ?? []).map((w) => describeWarning(spec.id, w)));
         return {
           bytes: file.uint8Array,
           mediaType: file.mediaType ?? "image/png",

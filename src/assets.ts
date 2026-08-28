@@ -1,4 +1,5 @@
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -209,6 +210,46 @@ export async function scanLibrary(root: string): Promise<Library> {
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
     identity: kit,
   };
+}
+
+const ASSET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** File extension for an image media type; unknown subtypes land as .png. */
+export function extensionFor(mediaType: string): string {
+  const subtype = mediaType.replace(/^image\//, "");
+  return { png: "png", jpeg: "jpg", webp: "webp", "svg+xml": "svg" }[subtype] ?? "png";
+}
+
+/**
+ * Write a new plate asset into the library. This is the one canonical write
+ * path for adoption: the id must be valid, and the asset directory is created
+ * exclusively (mkdir fails on an existing id), so overwriting an adopted
+ * asset is unrepresentable — not merely detected. Returns the image path.
+ */
+export async function writePlateAsset(
+  root: string,
+  id: string,
+  bytes: Uint8Array,
+  meta: PlateMeta,
+  mediaType = "image/png",
+): Promise<string> {
+  if (!ASSET_ID_PATTERN.test(id))
+    throw new Error(`Invalid asset id "${id}" — use lowercase letters/digits/hyphens`);
+  // An id is library-wide vocabulary: no asset of any kind may share it.
+  for (const kind of ["logos", "plates", "cutouts"]) {
+    if (existsSync(path.join(root, kind, id)))
+      throw new Error(`"${id}" already exists in the library — adoption never overwrites an asset`);
+  }
+  const kindDir = path.join(root, "plates");
+  await mkdir(kindDir, { recursive: true });
+  // Exclusive create: a second adoption of the same id throws here instead of
+  // clobbering the first asset's bytes.
+  const dir = path.join(kindDir, id);
+  await mkdir(dir);
+  const imagePath = path.join(dir, `plate.${extensionFor(mediaType)}`);
+  await writeFile(imagePath, bytes);
+  await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+  return imagePath;
 }
 
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {

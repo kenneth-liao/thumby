@@ -1,13 +1,14 @@
 {
   "name": "thumby",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "for f in $(find test -name '*.test.ts'); do bun test --isolate \"$f\" || exit 1; done",
     "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
-    "library": "bun run src/library-cli.ts"
+    "library": "bun run src/library-cli.ts",
+    "jobs": "bun run src/job-cli.ts"
   },
   "dependencies": {
     "ai": "^7.0.82",
