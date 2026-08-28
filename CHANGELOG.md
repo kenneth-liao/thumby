@@ -12,7 +12,7 @@
 ### Fixed
 
 - `--cutout <logo-or-plate-id>` silently composited the wrong asset kind where it previously failed loudly — library resolution at the cutout slot is now kind-constrained and rejects non-cutout ids (#24)
-- A one-off `--cutout <path>` bypassed the contract: `run.json` recorded no content hash and jpg/svg paths got invalid media types (`image/jpg`, `image/svg`); path one-offs now resolve through the same contract as ids (#24)
+- A one-off `--cutout <path>` bypassed the contract: `run.json` recorded no content hash and jpg/svg paths got invalid media types (`image/jpg`, `image/svg`); path one-offs now resolve through the same contract as ids, and an unsupported extension (e.g. `.gif`) now fails loudly instead of guessing a media type (#24)
 
 ## [0.4.0]
 

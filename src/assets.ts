@@ -231,21 +231,6 @@ export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta
   );
 }
 
-/**
- * Resolve a plate id to its entry. Throws with the available options when
- * nothing matches, so a typo'd plate reference fails loudly before compose.
- */
-export function resolvePlate(lib: Library, id: string): LibraryEntry<PlateMeta> {
-  const hit = lib.plates.find(byId(id.toLowerCase()));
-  if (hit) return hit;
-  throw new Error(
-    `Unknown plate "${id}". In library: ${
-      lib.plates.map((p) => p.meta.id).join(", ") ||
-      "(none — adopt one with bun run library adopt <file> --id <name>)"
-    }`,
-  );
-}
-
 // --- the asset resolution contract ------------------------------------------
 //
 // One runtime-validated contract for both scopes: reusable-library assets
