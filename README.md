@@ -204,6 +204,52 @@ swapping an asset's bytes never silently changes old references. Path-based
 references are project-relative, so a project still resolves after its
 directory is relocated.
 
+## Scenes
+
+A **Scene** is the declarative alternative to the long-form command: a versioned
+JSON document of ordered layers (image + text for now), rendered locally to
+exactly 1280×720. Array order is compositing order — later layers on top.
+Scenes, layers, and assets are the vocabulary the design spec (#7) builds on.
+
+```bash
+bun run scene schema                       # the Scene JSON Schema (machine-readable)
+bun run scene validate scene.json          # field-specific errors before any render
+bun run scene inspect scene.json           # layer summary + resolved asset hashes
+bun run scene render scene.json [--out p]  # render to PNG (1280×720)
+```
+
+All four print JSON on stdout (`{ "ok": true, … }` or
+`{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
+(ok / invalid or failed / usage). Validation happens entirely before the
+browser starts: unsupported schema versions, duplicate layer ids, missing
+assets, invalid transforms, and unknown layer types are rejected naming the
+offending field (e.g. `layers[2].asset`).
+
+```json
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    { "id": "background", "type": "image", "asset": "./plate.png",
+      "position": { "x": 0, "y": 0 }, "size": { "width": 1280, "height": 720 } },
+    { "id": "headline", "type": "text", "text": "Two\nlines", "font": "Anton",
+      "fontSize": 120, "position": { "x": 90, "y": 500 }, "size": { "width": 900, "height": 180 } }
+  ]
+}
+```
+
+Every layer carries a stable unique `id`, `position`/`size`, and optionally
+`visible`, `opacity`, `rotation` (degrees, clockwise), and `mirror`. Image
+layers reference Assets through the [library's reference syntax](#the-asset-library)
+(`library:<id>`, an id, or a path relative to the scene file, pin exact content
+with `@<hash>`) and support `fit` (`cover`/`contain`/`fill`/`none`) plus
+cent-crop `crop` insets. Text layers render from the bundled fonts by family
+name with explicit `\n` line breaks.
+
+Scenes are fully offline: fonts and assets resolve from local bytes as data
+URIs, validation and rendering never touch the network, and nothing here ever
+starts a Generation Job.
+
 ## Overlay cards
 
 `--overlay <spec.json>` draws floating glass tiles joined by dashed connectors

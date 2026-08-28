@@ -4,6 +4,13 @@
 
 ### Added
 
+- Versioned Scene v1 — a validated JSON document of ordered Image/Text layers rendered locally at exactly 1280×720: `bun run scene schema | inspect | validate | render` all return structured JSON with field-specific errors (unsupported versions, duplicate ids, missing assets, invalid transforms, unknown types) rejected before any browser starts (#9)
+- Layers carry stable unique ids plus visibility, position, size, rotation, mirroring, and opacity; image layers add exact-content Asset references (the #8 contract), crop/fit; text layers render bundled fonts by family with explicit line breaks (#9)
+- Scenes are fully offline by construction — fonts and assets load as data URIs, no command touches the network, and nothing starts a Generation Job (#9)
+- One shared headless-Chromium launcher (`src/browser.ts`) now backs both the legacy compose path and Scene rendering (#9)
+
+### Added
+
 - One asset-resolution contract for reusable-library and project-local assets: references (`<id>`, `library:<id>`, or a project-relative path) resolve to exact bytes, and `@<sha-256-or-prefix>` pins content so changed bytes create a new identity instead of silently changing old references (#8)
 - `bun run library resolve <ref>` prints an asset's exact content identity; `list` shows the identity prefix per asset; `--cutout` accepts the same reference syntax (#8)
 - Asset scans validate metadata shape (tags, name) and hash image bytes, failing with actionable errors on missing content, identity mismatches, malformed metadata, and duplicate ids (#8)
