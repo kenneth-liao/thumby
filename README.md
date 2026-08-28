@@ -243,8 +243,16 @@ Every layer carries a stable unique `id`, `position`/`size`, and optionally
 layers reference Assets through the [library's reference syntax](#the-asset-library)
 (`library:<id>`, an id, or a path relative to the scene file, pin exact content
 with `@<hash>`) and support `fit` (`cover`/`contain`/`fill`/`none`) plus
-cent-crop `crop` insets. Text layers render from the bundled fonts by family
+percent-crop `crop` insets. Text layers render from the bundled fonts by family
 name with explicit `\n` line breaks.
+
+A Scene is an externally authored document, so its project scope is a trust
+boundary: path references resolve relative to the scene file *and are contained
+inside that directory* — `../`, absolute paths, and symlinks pointing outside
+it fail validation naming the layer. Render output obeys the same boundary:
+`--out p` must stay inside the scene's directory (default
+`<scene-dir>/out/<scene-basename>.png`); anything else is a usage error with
+exit 2.
 
 Scenes are fully offline: fonts and assets resolve from local bytes as data
 URIs, validation and rendering never touch the network, and nothing here ever
