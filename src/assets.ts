@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -249,10 +249,31 @@ export function extensionFor(mediaType: string): string {
 }
 
 /**
+ * Atomically reserve an asset id library-wide. The exclusive mkdir is the
+ * claim: either this process owns the id for the duration of its write or the
+ * id is taken. Held across the collision check and the kind-directory create
+ * (which are themselves check-then-act), so concurrent adoptions of the same
+ * id — across kinds — have exactly one winner.
+ */
+async function reserveAssetId(root: string, id: string): Promise<string> {
+  const lockDir = path.join(root, ".reservations", id);
+  await mkdir(path.dirname(lockDir), { recursive: true });
+  try {
+    await mkdir(lockDir);
+  } catch {
+    throw new Error(
+      `"${id}" is reserved right now — another adoption holds it, or a crashed adoption left a stale reservation at ${lockDir} (remove it if no adoption is running)`,
+    );
+  }
+  return lockDir;
+}
+
+/**
  * The one canonical adoption write path, shared by every generated-asset kind:
- * the id must be valid, and the asset directory is created exclusively (mkdir
- * fails on an existing id), so overwriting an adopted asset is unrepresentable
- * — not merely detected. Returns the image path.
+ * the id must be valid, the id is reserved atomically library-wide, and the
+ * asset directory is created exclusively (mkdir fails on an existing id), so
+ * overwriting an adopted asset is unrepresentable — not merely detected.
+ * Returns the image path.
  */
 async function writeKindAsset(
   root: string,
@@ -265,21 +286,28 @@ async function writeKindAsset(
 ): Promise<string> {
   if (!ASSET_ID_PATTERN.test(id))
     throw new Error(`Invalid asset id "${id}" — use lowercase letters/digits/hyphens`);
-  // An id is library-wide vocabulary: no asset of any kind may share it.
-  for (const kind of KIND_DIRS) {
-    if (existsSync(path.join(root, kind, id)))
-      throw new Error(`"${id}" already exists in the library — adoption never overwrites an asset`);
+  const reservation = await reserveAssetId(root, id);
+  try {
+    // An id is library-wide vocabulary: no asset of any kind may share it.
+    // Re-checked under the reservation — the reservation is what makes this
+    // check-then-act pair atomic against concurrent adoptions.
+    for (const kind of KIND_DIRS) {
+      if (existsSync(path.join(root, kind, id)))
+        throw new Error(`"${id}" already exists in the library — adoption never overwrites an asset`);
+    }
+    const kindRoot = path.join(root, kindDir);
+    await mkdir(kindRoot, { recursive: true });
+    // Exclusive create: a second adoption of the same id throws here instead of
+    // clobbering the first asset's bytes.
+    const dir = path.join(kindRoot, id);
+    await mkdir(dir);
+    const imagePath = path.join(dir, `${fileBase}.${extensionFor(mediaType)}`);
+    await writeFile(imagePath, bytes);
+    await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+    return imagePath;
+  } finally {
+    await rm(reservation, { recursive: true, force: true });
   }
-  const kindRoot = path.join(root, kindDir);
-  await mkdir(kindRoot, { recursive: true });
-  // Exclusive create: a second adoption of the same id throws here instead of
-  // clobbering the first asset's bytes.
-  const dir = path.join(kindRoot, id);
-  await mkdir(dir);
-  const imagePath = path.join(dir, `${fileBase}.${extensionFor(mediaType)}`);
-  await writeFile(imagePath, bytes);
-  await writeFile(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n");
-  return imagePath;
 }
 
 /** Write a new plate asset into the library (the plate-kind write path). */
@@ -296,16 +324,18 @@ export async function writePlateAsset(
 /**
  * Write a new object asset into the library (the object-kind write path).
  * Callers must have verified true alpha first — this function records the
- * matting claim, it does not re-check the pixels.
+ * matting claim, it does not re-check the pixels. The media type is not a
+ * parameter: adoption verifies the bytes are PNG, so the contract's
+ * `object.png` is hardcoded here and a mislabeled candidate cannot produce a
+ * differently-named asset.
  */
 export async function writeObjectAsset(
   root: string,
   id: string,
   bytes: Uint8Array,
   meta: ObjectMeta,
-  mediaType = "image/png",
 ): Promise<string> {
-  return writeKindAsset(root, "objects", "object", id, bytes, meta, mediaType);
+  return writeKindAsset(root, "objects", "object", id, bytes, meta, "image/png");
 }
 
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {

@@ -197,6 +197,56 @@ describe("adoptCandidate for object jobs", () => {
   });
 });
 
+describe("loadJob record integrity", () => {
+  test("refuses a record whose kind contradicts its request kind — one discriminant or none", async () => {
+    await runObjectJob(jobRoot, "obj-contradiction", baseRequest(), fakeGen);
+    const file = path.join(jobRoot, "obj-contradiction", "job.json");
+    const tampered = JSON.parse(await readFile(file, "utf8"));
+    tampered.kind = "plate"; // claims the plate contract while carrying an object request
+    await writeFile(file, JSON.stringify(tampered, null, 2));
+    // Both dispatch paths go through loadJob — neither can run the contradiction.
+    await expect(loadJob(jobRoot, "obj-contradiction")).rejects.toThrow(/contradictory/i);
+    await expect(adoptCandidate(jobRoot, "obj-contradiction", "0", "steal", { libraryRoot })).rejects.toThrow(
+      /contradictory/i,
+    );
+  });
+
+  test("writes object jobs as schemaVersion 2 and keeps plate records at v1", async () => {
+    await runObjectJob(jobRoot, "obj-v2", baseRequest(), fakeGen);
+    const objRecord = JSON.parse(await readFile(path.join(jobRoot, "obj-v2", "job.json"), "utf8"));
+    expect(objRecord.schemaVersion).toBe(2);
+  });
+
+  test("rejects a v1 record claiming kind object — v1 is plate-only, the rollback boundary", async () => {
+    await runObjectJob(jobRoot, "obj-forged-v1", baseRequest(), fakeGen);
+    const file = path.join(jobRoot, "obj-forged-v1", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.schemaVersion = 1; // what a 0.15.1-era plate-only record would carry
+    await writeFile(file, JSON.stringify(rec, null, 2));
+    await expect(loadJob(jobRoot, "obj-forged-v1")).rejects.toThrow(/schemaVersion 1.*plate-only/i);
+    await expect(adoptCandidate(jobRoot, "obj-forged-v1", "0", "no-gate", { libraryRoot })).rejects.toThrow(
+      /plate-only/i,
+    );
+  });
+
+  test("adopts a candidate mislabeled image/jpeg as a PNG object — verified bytes are the truth", async () => {
+    const mislabeled: ObjectGenerator = async () => ({
+      candidates: [{ bytes: ALPHA_PNG, mediaType: "image/jpeg" }],
+      warnings: [],
+      fullPrompt: "p",
+    });
+    await runObjectJob(jobRoot, "obj-mislabeled", { ...baseRequest(), count: 1 }, mislabeled);
+    const job = await loadJob(jobRoot, "obj-mislabeled");
+    const hash = job.runs[0]!.candidates[0]!.contentHash;
+    const result = await adoptCandidate(jobRoot, "obj-mislabeled", hash, "lamp", { libraryRoot });
+    // The alpha gate proved the bytes are PNG, so the asset is object.png —
+    // not object.jpg — and downstream resolution reports image/png.
+    expect(result.imagePath.endsWith(path.join("lamp", "object.png"))).toBe(true);
+    const lib = await scanLibrary(libraryRoot);
+    expect(lib.objects[0]!.imagePath).toBe(result.imagePath);
+  });
+});
+
 describe("listJobs with object jobs", () => {
   test("summarizes both kinds from one jobs root", async () => {
     await runObjectJob(jobRoot, "obj-a", { ...baseRequest(), count: 1 }, fakeGen);

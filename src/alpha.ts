@@ -11,6 +11,13 @@
  * job lifecycle stays offline and browser-free. Anything that cannot be
  * measured — JPEG, palette, grayscale, interlaced, 16-bit — is refused with
  * an actionable error, never guessed.
+ *
+ * The bytes cross an external-provider trust boundary, so every stage is
+ * bounded before it allocates or inflates: encoded size, IHDR geometry
+ * (dimensions and pixel count), chunk lengths and CRCs, compression/filter
+ * methods, the inflate output length, and each scanline's filter code are all
+ * checked before use. A small compressed candidate can never exhaust memory,
+ * and a corrupt one is refused, not mis-measured.
  */
 import { inflateSync } from "node:zlib";
 
@@ -18,6 +25,13 @@ const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** An object matte must be at least 1% transparent (real cutout) and 1% opaque (a subject exists). */
 const MIN_SHARE = 0.01;
+
+/** Encoded-size cap — an external candidate larger than this is never parsed. */
+const MAX_ENCODED_BYTES = 64 * 1024 * 1024;
+/** Per-axis dimension cap (PNG spec max is 2^31−1; nothing thumbnail-shaped needs more). */
+const MAX_DIMENSION = 8192;
+/** Pixel-count cap — bounds the decoded scanline buffer and the output allocation. */
+const MAX_PIXELS = 16_777_216;
 
 /** Transparent = alpha ≤ 8; opaque = alpha ≥ 248. Semi-transparent edge pixels are neither. */
 const TRANSPARENT_MAX = 8;
@@ -41,7 +55,29 @@ function refuse(label: string, why: string): never {
   );
 }
 
+// CRC-32 (PNG polynomial), bit-reflected table form — verifies every chunk.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(data: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]!) & 0xff]! ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 export function verifyTrueAlpha(bytes: Uint8Array, label: string): AlphaReport {
+  if (bytes.byteLength > MAX_ENCODED_BYTES)
+    refuse(
+      label,
+      `the candidate is ${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB — over the ${MAX_ENCODED_BYTES / 1024 / 1024} MB parse limit`,
+    );
   const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (buf.length < 8 || !buf.subarray(0, 8).equals(SIGNATURE))
     refuse(label, "the bytes are not a PNG (bad signature)");
@@ -52,7 +88,25 @@ export function verifyTrueAlpha(bytes: Uint8Array, label: string): AlphaReport {
   const height = buf.readUInt32BE(20);
   const bitDepth = buf[24]!;
   const colorType = buf[25]!;
+  const compressionMethod = buf[26]!;
+  const filterMethod = buf[27]!;
   const interlace = buf[28]!;
+  if (width === 0 || height === 0)
+    refuse(label, `the PNG declares a zero dimension (${width}×${height}) — not a real image`);
+  if (width > MAX_DIMENSION || height > MAX_DIMENSION)
+    refuse(
+      label,
+      `the PNG declares ${width}×${height} — over the ${MAX_DIMENSION}px per-axis parse limit`,
+    );
+  if (width * height > MAX_PIXELS)
+    refuse(
+      label,
+      `the PNG declares ${width}×${height} — over the ${MAX_PIXELS.toLocaleString("en-US")}-pixel parse limit`,
+    );
+  if (compressionMethod !== 0)
+    refuse(label, `unknown IHDR compression method ${compressionMethod} — corrupt or non-standard PNG`);
+  if (filterMethod !== 0)
+    refuse(label, `unknown IHDR filter method ${filterMethod} — corrupt or non-standard PNG`);
   if (bitDepth !== 8) refuse(label, `bit depth ${bitDepth} is not supported — 8-bit PNG only`);
   if (colorType === 0 || colorType === 2 || colorType === 3)
     refuse(
@@ -66,22 +120,30 @@ export function verifyTrueAlpha(bytes: Uint8Array, label: string): AlphaReport {
   let off = 8;
   while (off + 12 <= buf.length) {
     const len = buf.readUInt32BE(off);
+    if (off + 12 + len > buf.length)
+      refuse(label, `chunk "${buf.toString("ascii", off + 4, off + 8)}" declares ${len} bytes past the end of the file (corrupt PNG)`);
     const type = buf.toString("ascii", off + 4, off + 8);
+    // The CRC covers the chunk type plus its data.
+    if (crc32(buf.subarray(off + 4, off + 8 + len)) !== buf.readUInt32BE(off + 8 + len))
+      refuse(label, `chunk "${type}" fails its CRC-32 check (corrupt PNG)`);
     if (type === "IDAT") idat.push(buf.subarray(off + 8, off + 8 + len));
     if (type === "IEND") break;
     off += 12 + len;
   }
   if (idat.length === 0) refuse(label, "the PNG has no IDAT image data");
 
+  const stride = width * 4;
+  const expectedRaw = height * (stride + 1);
   let raw: Buffer;
   try {
-    raw = inflateSync(Buffer.concat(idat));
+    // Bounded inflate: the stream may not produce more than the declared
+    // geometry needs, so a decompression bomb cannot allocate past the cap.
+    raw = inflateSync(Buffer.concat(idat), { maxOutputLength: expectedRaw });
   } catch {
-    refuse(label, "the IDAT stream does not decompress (corrupt PNG)");
+    refuse(label, "the IDAT stream does not decompress to the declared pixel data (corrupt or oversized PNG)");
   }
-  const stride = width * 4;
-  if (raw.length < height * (stride + 1))
-    refuse(label, "the IDAT stream is shorter than the declared pixel data (corrupt PNG)");
+  if (raw.length !== expectedRaw)
+    refuse(label, "the IDAT stream length does not match the declared pixel data (corrupt PNG)");
 
   const paeth = (a: number, b: number, c: number) => {
     const p = a + b - c;
@@ -97,6 +159,8 @@ export function verifyTrueAlpha(bytes: Uint8Array, label: string): AlphaReport {
   let pos = 0;
   for (let y = 0; y < height; y++) {
     const filter = raw[pos++]!;
+    if (filter > 4)
+      refuse(label, `scanline ${y} uses unknown filter code ${filter} (corrupt PNG)`);
     const cur = out.subarray(y * stride, (y + 1) * stride);
     const prev = y > 0 ? out.subarray((y - 1) * stride, y * stride) : null;
     for (let x = 0; x < stride; x++) {

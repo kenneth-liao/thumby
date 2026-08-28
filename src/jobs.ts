@@ -20,7 +20,14 @@ import { resolveModel } from "./models.js";
 import { extensionFor, writePlateAsset, writeObjectAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
 
-export const JOB_SCHEMA_VERSION = 1 as const;
+/**
+ * Job record schema versions. v1 is plate-only; object-capable jobs are v2.
+ * The bump is the rollback boundary: a 0.15.1 binary rejects a v2 record
+ * outright instead of rerunning or adopting an object job through its
+ * plate-only path (where no alpha gate exists).
+ */
+export const PLATE_JOB_SCHEMA_VERSION = 1 as const;
+export const OBJECT_JOB_SCHEMA_VERSION = 2 as const;
 
 /** A generation reference with an explicit role and exact content identity. */
 export interface TypedRef {
@@ -76,7 +83,7 @@ export interface JobRun {
 }
 
 export interface GenerationJob {
-  schemaVersion: typeof JOB_SCHEMA_VERSION;
+  schemaVersion: typeof PLATE_JOB_SCHEMA_VERSION | typeof OBJECT_JOB_SCHEMA_VERSION;
   jobId: string;
   kind: "plate" | "object";
   createdAt: string;
@@ -196,7 +203,7 @@ async function runJob(
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
-    schemaVersion: JOB_SCHEMA_VERSION,
+    schemaVersion: request.kind === "object" ? OBJECT_JOB_SCHEMA_VERSION : PLATE_JOB_SCHEMA_VERSION,
     jobId,
     kind: request.kind,
     createdAt: now,
@@ -310,7 +317,15 @@ async function recordRun(
   };
 }
 
-/** Load a job record; missing or corrupt records fail loudly. */
+/**
+ * Load a job record; missing, corrupt, or contradictory records fail loudly.
+ * The record's `kind` mirrors `request.kind`, but a hand-edited or tampered
+ * file could disagree — rerun dispatches on the request and adoption on the
+ * record, so an unvalidated contradiction would let one job rerun under one
+ * contract and adopt under another (bypassing the object alpha gate). Both
+ * are validated equal here, the single ingestion point, and v1 records are
+ * pinned to plate jobs (v2 introduced object jobs).
+ */
 export async function loadJob(jobRoot: string, jobId: string): Promise<GenerationJob> {
   if (!JOB_ID_PATTERN.test(jobId))
     throw new Error(`Invalid job id "${jobId}" — use lowercase letters/digits/hyphens`);
@@ -322,8 +337,18 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
   }
   try {
     const job = JSON.parse(raw) as GenerationJob;
-    if (job.schemaVersion !== JOB_SCHEMA_VERSION)
-      throw new Error(`unsupported job schemaVersion ${job.schemaVersion}`);
+    if (job.schemaVersion !== PLATE_JOB_SCHEMA_VERSION && job.schemaVersion !== OBJECT_JOB_SCHEMA_VERSION)
+      throw new Error(
+        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${PLATE_JOB_SCHEMA_VERSION} and ${OBJECT_JOB_SCHEMA_VERSION} only`,
+      );
+    if (job.kind !== job.request.kind)
+      throw new Error(
+        `Job "${jobId}" is contradictory: record kind ${JSON.stringify(job.kind)} does not match request kind ${JSON.stringify(job.request?.kind)} — it cannot be trusted and will not run`,
+      );
+    if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, which is plate-only, but its kind is ${JSON.stringify(job.kind)} — object jobs require schemaVersion ${OBJECT_JOB_SCHEMA_VERSION}`,
+      );
     return job;
   } catch (err) {
     throw new Error(`Job "${jobId}" has an unreadable record: ${(err as Error).message}`);
@@ -410,6 +435,10 @@ export async function adoptCandidate(
     // The alpha gate runs before any write: an opaque candidate is exactly
     // the chroma-key shape REQ-015 forbids, and it must not enter the library.
     verifyTrueAlpha(bytes, cand.file);
+    // The gate just proved the bytes are PNG — the recorded mediaType is
+    // derived, not authoritative, and object assets are contractually
+    // object.png (writeObjectAsset hardcodes the type, so a mislabeled
+    // candidate cannot produce object.jpg).
     const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, bytes, {
       kind: "object",
       id: assetId,
@@ -417,7 +446,7 @@ export async function adoptCandidate(
       tags: opts.tags ?? [],
       ...provenance,
       matting: "true-alpha",
-    }, cand.mediaType);
+    });
     return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
   }
 

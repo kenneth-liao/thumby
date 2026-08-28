@@ -12,6 +12,7 @@ import {
   parseAssetRef,
   contentHash,
   writeObjectAsset,
+  writePlateAsset,
 } from "../src/assets.js";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -203,6 +204,23 @@ describe("writeObjectAsset", () => {
     expect(() => writeObjectAsset(root, "Bad_Id", new TextEncoder().encode("x"), meta)).toThrow(
       /asset id/i,
     );
+  });
+
+  it("gives concurrent cross-kind adoptions of one id exactly one winner (atomic reservation)", async () => {
+    const results = await Promise.allSettled([
+      writeObjectAsset(root, "clash", new TextEncoder().encode("OBJ"), meta),
+      writePlateAsset(root, "clash", new TextEncoder().encode("PLATE"), {
+        kind: "plate",
+        id: "clash",
+        name: "Clash",
+        tags: [],
+      }),
+    ]);
+    const winners = results.filter((r) => r.status === "fulfilled");
+    expect(winners).toHaveLength(1);
+    // The library holds one asset for the id — never a plate AND an object.
+    const lib = await scanLibrary(root);
+    expect([...lib.plates, ...lib.objects]).toHaveLength(1);
   });
 });
 

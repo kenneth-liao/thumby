@@ -17,7 +17,8 @@ function crc32(buf: Buffer): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function chunk(type: string, data: Buffer): Buffer {
+/** One PNG chunk: length, type, data, CRC-32. */
+export function chunk(type: string, data: Buffer): Buffer {
   const head = Buffer.alloc(4);
   head.writeUInt32BE(data.length);
   const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
@@ -30,19 +31,20 @@ function chunk(type: string, data: Buffer): Buffer {
  * Minimal PNG writer for test fixtures: filter-0 scanlines, zlib compression —
  * the exact shape the true-alpha gate and the pixel reader parse. Default is
  * RGBA (color type 6); `colorType: 2` writes opaque RGB, first three channels.
+ * `filterByte` overrides each scanline's filter code (for malformed fixtures).
  */
 export function encodePng(
   width: number,
   height: number,
   rgba: (x: number, y: number) => [number, number, number, number],
-  opts?: { colorType?: 2 | 6 },
+  opts?: { colorType?: 2 | 6; filterByte?: number },
 ): Buffer {
   const colorType = opts?.colorType ?? 6;
   const bpp = colorType === 6 ? 4 : 3;
   const raw = Buffer.alloc(height * (width * bpp + 1));
   for (let y = 0; y < height; y++) {
     const row = y * (width * bpp + 1);
-    raw[row] = 0; // filter: none
+    raw[row] = opts?.filterByte ?? 0; // filter: none (or an injected bad code)
     for (let x = 0; x < width; x++) {
       const [r, g, b, a] = rgba(x, y);
       const at = row + 1 + x * bpp;
@@ -58,11 +60,23 @@ export function encodePng(
   ihdr[8] = 8; // bit depth
   ihdr[9] = colorType;
   return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    PNG_SIGNATURE,
     chunk("IHDR", ihdr),
     chunk("IDAT", deflateSync(raw)),
     chunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+export const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** A minimal (8-bit, non-interlaced) IHDR payload for hand-built PNGs. */
+export function ihdr(width: number, height: number): Buffer {
+  const h = Buffer.alloc(13);
+  h.writeUInt32BE(width, 0);
+  h.writeUInt32BE(height, 4);
+  h[8] = 8; // bit depth
+  h[9] = 6; // color type: RGBA
+  return h;
 }
 
 

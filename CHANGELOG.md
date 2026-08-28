@@ -10,6 +10,14 @@
 - `bun run jobs adopt` writes object candidates as Object Assets (`assets/objects/<id>/object.png`) with `matting: "true-alpha"` recorded, through the same exclusive, never-overwriting write path as every other generated asset kind; objects resolve through the one asset-reference contract, kind-constrained or not, and appear in `library list`, search, and the contact sheet (#14)
 - ADR-0004 restates the model boundary: models may produce isolated non-text source Assets (plates, objects) but never final text or the final composite — superseding ADR-0001's literal background-only phrasing while preserving its local-text invariant (REQ-024) (#14)
 
+### Fixed
+
+- The true-alpha gate parses untrusted generated PNG bytes with every stage bounded before it allocates or inflates: encoded-size, per-axis dimension, and pixel-count caps; chunk-length bounds and CRC-32 verification; IHDR compression/filter method checks; inflate capped at the declared geometry; and unknown scanline filter codes rejected instead of decoded as filter 0 — a small compressed candidate can no longer exhaust memory, and corrupt PNGs are refused rather than mis-measured (#14)
+- Object Jobs are written under job schema version 2 (v1 stays plate-only), so a 0.15.1 binary rejects an object job record outright instead of rerunning or adopting it through the plate path without the alpha gate (#14)
+- `loadJob` refuses a job record whose `kind` contradicts its `request.kind` at the single ingestion point, so rerun and adoption can never dispatch the same record under two different contracts (#14)
+- Asset-id adoption reserves the id atomically library-wide (an exclusive reservation directory held across the collision check and kind-directory create), so concurrent plate/object adoptions of one id have exactly one winner instead of creating duplicate library-wide ids (#14)
+- Adopted objects are always written as `object.png` from the alpha-verified bytes — a candidate mislabeled `image/jpeg` in the job record can no longer enter the library under the wrong extension or resolve with the wrong media type (#14)
+
 ## [0.15.1]
 
 ### Added
