@@ -55,8 +55,7 @@ describe("scanLibrary", () => {
       logos: [],
       plates: [],
       cutouts: [],
-      identity: [],
-      identityVocabulary: {},
+      identity: { present: false, entries: [], vocabulary: {} },
     };
     expect(await scanLibrary(path.join(root, "nope"))).toEqual(empty);
     expect(await scanLibrary(root)).toEqual(empty);

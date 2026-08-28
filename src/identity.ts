@@ -8,6 +8,9 @@
 // never inferred or invented metadata.
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+// Circular with assets.ts by design: assets.ts calls scanIdentityKit at scan
+// time, identity.ts uses contentHash at call time — no module-init-order
+// dependency in either direction.
 import { contentHash, type LibraryEntry } from "./assets.js";
 
 /** The one identity kit inside the library root. */
@@ -30,11 +33,16 @@ export interface IdentityMeta {
 /** The declared facet vocabulary of the identity kit: axis → searchable values. */
 export type IdentityVocabulary = Record<string, string[]>;
 
-/** A scanned kit: its sources plus the declared vocabulary to validate searches against. */
+/** A scanned kit: whether it exists, its sources, and its declared vocabulary. */
 export interface IdentityKit {
+  /** The kit directory exists — an existing kit may still hold zero sources. */
+  present: boolean;
   entries: LibraryEntry<IdentityMeta>[];
   vocabulary: IdentityVocabulary;
 }
+
+/** The canonical empty kit — for callers scanning a library with no kit. */
+export const EMPTY_IDENTITY_KIT: IdentityKit = { present: false, entries: [], vocabulary: {} };
 
 interface RawIndex {
   tag_vocabulary?: Record<string, string[]>;
@@ -48,13 +56,14 @@ interface RawIndex {
  * rename happens once here — every downstream reader assumes canonical axes.
  */
 const COMMON_AXES: Record<string, string> = { clothing: "outfit", framing: "framing" };
+const COMMON_AXIS_NAMES = Object.values(COMMON_AXES);
 
 export async function scanIdentityKit(root: string): Promise<IdentityKit> {
   const kitDir = path.join(root, IDENTITY_KIT_DIR);
   try {
     await stat(kitDir);
   } catch {
-    return { entries: [], vocabulary: {} }; // a missing kit is an empty one
+    return EMPTY_IDENTITY_KIT; // a missing kit is an empty one
   }
 
   let raw: RawIndex;
@@ -117,9 +126,9 @@ export async function scanIdentityKit(root: string): Promise<IdentityKit> {
         );
       (facets[axis] ??= []).push(tag);
     }
-    for (const [key, axis] of Object.entries(COMMON_AXES)) {
-      const value = (raw.common as Record<string, unknown> | undefined)?.[key];
-      if (typeof value === "string" && value) (facets[axis] ??= []).push(value);
+    for (const axis of COMMON_AXIS_NAMES) {
+      const declared = vocabulary[axis];
+      if (declared) (facets[axis] ??= []).push(...declared);
     }
 
     entries.push({
@@ -129,7 +138,7 @@ export async function scanIdentityKit(root: string): Promise<IdentityKit> {
       hash: contentHash(bytes),
     });
   }
-  return { entries, vocabulary };
+  return { present: true, entries, vocabulary };
 }
 
 /** Declared axes: every tag_vocabulary axis plus the common-derived outfit/framing facets. */
@@ -140,9 +149,15 @@ function buildVocabulary(raw: RawIndex): IdentityVocabulary {
       throw new Error(`identity kit index.json: tag_vocabulary["${axis}"] must be an array of strings`);
     vocabulary[axis] = values;
   }
+  const common = raw.common;
   for (const [key, axis] of Object.entries(COMMON_AXES)) {
-    const value = (raw.common as Record<string, unknown> | undefined)?.[key];
-    if (typeof value === "string" && value) vocabulary[axis] = [value];
+    if (!common || !(key in common)) continue;
+    const value = common[key];
+    if (typeof value !== "string" || !value.trim())
+      throw new Error(
+        `identity kit index.json: common.${key} must be a non-empty string (it names the "${axis}" facet)`,
+      );
+    vocabulary[axis] = [value];
   }
   return vocabulary;
 }

@@ -54,16 +54,24 @@ afterEach(async () => {
 
 describe("scanIdentityKit", () => {
   it("returns an empty pool when the kit is missing, without erroring", async () => {
+    expect((await scanIdentityKit(root)).present).toBe(false);
     expect((await scanIdentityKit(root)).entries).toEqual([]);
     expect((await scanIdentityKit(root)).vocabulary).toEqual({});
-    expect((await scanLibrary(root)).identity).toEqual([]);
+    expect((await scanLibrary(root)).identity.entries).toEqual([]);
+  });
+
+  it("reports a present kit even when its index lists no sources", async () => {
+    await seedKit({ ...INDEX, images: [] });
+    const kit = await scanIdentityKit(root);
+    expect(kit.present).toBe(true);
+    expect(kit.entries).toEqual([]);
   });
 
   it("parses the index into entries with derived facets and content hashes", async () => {
     await seedKit();
     const lib = await scanLibrary(root);
-    expect(lib.identity).toHaveLength(3);
-    const first = lib.identity[0]!;
+    expect(lib.identity.entries).toHaveLength(3);
+    const first = lib.identity.entries[0]!;
     expect(first.meta.kind).toBe("identity");
     expect(first.meta.id).toBe("IMG_1505");
     expect(first.meta.tags).toEqual(["frontal", "facing-camera", "slight-smile"]);
@@ -109,12 +117,19 @@ describe("scanIdentityKit", () => {
     expect(scanLibrary(root)).rejects.toThrow(/made-up-tag/);
   });
 
+  it("fails loudly when common metadata is present but malformed", async () => {
+    await seedKit({ ...INDEX, common: { ...INDEX.common, clothing: 42 } });
+    expect(scanLibrary(root)).rejects.toThrow(/common\.clothing/);
+    await seedKit({ ...INDEX, common: { ...INDEX.common, framing: "" } });
+    expect(scanLibrary(root)).rejects.toThrow(/common\.framing/);
+  });
+
   it("treats index.json as canonical — unindexed files are ignored", async () => {
     await seedKit();
     await writeFile(path.join(root, "identity/kenny-headshots/.DS_Store"), "junk");
     await writeFile(path.join(root, "identity/kenny-headshots/IMG_9999.jpg"), "unindexed");
     const lib = await scanLibrary(root);
-    expect(lib.identity.map((e) => e.meta.id)).toEqual(["IMG_1505", "IMG_1506", "IMG_1507"]);
+    expect(lib.identity.entries.map((e) => e.meta.id)).toEqual(["IMG_1505", "IMG_1506", "IMG_1507"]);
   });
 });
 
@@ -122,22 +137,22 @@ describe("searchLibrary identity facets", () => {
   it("free-text queries match identity ids and tags like other assets", async () => {
     await seedKit();
     const lib = await scanLibrary(root);
-    expect((await searchLibrary(lib, "1506")).identity.map((e) => e.meta.id)).toEqual(["IMG_1506"]);
-    expect((await searchLibrary(lib, "teeth-smile")).identity).toHaveLength(2);
+    expect((await searchLibrary(lib, "1506")).identity.entries.map((e) => e.meta.id)).toEqual(["IMG_1506"]);
+    expect((await searchLibrary(lib, "teeth-smile")).identity.entries).toHaveLength(2);
   });
 
   it("filters by one axis", async () => {
     await seedKit();
     const lib = await scanLibrary(root);
     const found = await searchLibrary(lib, "", { facets: parseFacets(["pose=frontal"]) });
-    expect(found.identity.map((e) => e.meta.id)).toEqual(["IMG_1505", "IMG_1507"]);
+    expect(found.identity.entries.map((e) => e.meta.id)).toEqual(["IMG_1505", "IMG_1507"]);
   });
 
   it("values on the same axis are alternatives (any-of)", async () => {
     await seedKit();
     const lib = await scanLibrary(root);
     const found = await searchLibrary(lib, "", { facets: parseFacets(["pose=frontal", "pose=profile"]) });
-    expect(found.identity).toHaveLength(3);
+    expect(found.identity.entries).toHaveLength(3);
   });
 
   it("facets on different axes must all match (all-of)", async () => {
@@ -146,7 +161,7 @@ describe("searchLibrary identity facets", () => {
     const found = await searchLibrary(lib, "", {
       facets: parseFacets(["pose=frontal", "expression=teeth-smile"]),
     });
-    expect(found.identity.map((e) => e.meta.id)).toEqual(["IMG_1507"]);
+    expect(found.identity.entries.map((e) => e.meta.id)).toEqual(["IMG_1507"]);
   });
 
   it("supports the outfit and framing axes derived from the kit's common metadata", async () => {
@@ -155,20 +170,20 @@ describe("searchLibrary identity facets", () => {
     const outfit = await searchLibrary(lib, "", {
       facets: parseFacets(["outfit=charcoal crew-neck t-shirt"]),
     });
-    expect(outfit.identity).toHaveLength(3);
+    expect(outfit.identity.entries).toHaveLength(3);
     const framing = await searchLibrary(lib, "", {
       facets: parseFacets(["framing=standing mid-shot, torso up"]),
     });
-    expect(framing.identity).toHaveLength(3);
+    expect(framing.identity.entries).toHaveLength(3);
   });
 
   it("combines a free-text query with facets (all-of)", async () => {
     await seedKit();
     const lib = await scanLibrary(root);
     const hit = await searchLibrary(lib, "1507", { facets: parseFacets(["pose=frontal"]) });
-    expect(hit.identity.map((e) => e.meta.id)).toEqual(["IMG_1507"]);
+    expect(hit.identity.entries.map((e) => e.meta.id)).toEqual(["IMG_1507"]);
     const miss = await searchLibrary(lib, "1506", { facets: parseFacets(["pose=frontal"]) });
-    expect(miss.identity).toEqual([]);
+    expect(miss.identity.entries).toEqual([]);
   });
 
   it("returns an explicit empty identity pool for a valid but unsatisfied combination", async () => {
@@ -177,7 +192,7 @@ describe("searchLibrary identity facets", () => {
     const found = await searchLibrary(lib, "", {
       facets: parseFacets(["pose=profile", "expression=slight-smile"]),
     });
-    expect(found.identity).toEqual([]);
+    expect(found.identity.entries).toEqual([]);
     expect(found.logos).toEqual(lib.logos);
   });
 
@@ -197,9 +212,10 @@ describe("searchLibrary identity facets", () => {
     ).rejects.toThrow(/unknown "pose" facet value "frontall".*frontal, profile/s);
   });
 
-  it("rejects facet requests against an empty identity pool", async () => {
+  it("returns an explicit empty result for facets against an empty identity pool", async () => {
     const found = await searchLibrary(EMPTY_LIBRARY, "", { facets: parseFacets(["pose=frontal"]) });
-    expect(found.identity).toEqual([]);
+    expect(found.identity.entries).toEqual([]);
+    expect(found.identity.present).toBe(false);
   });
 });
 
@@ -233,31 +249,33 @@ describe("the real identity kit", () => {
   it.skipIf(!kitPresent)(
     "is well-formed and every facet present in its metadata is searchable",
     async () => {
-    const lib = await scanLibrary(LIBRARY_ROOT);
-    expect(lib.identity.length).toBeGreaterThan(0);
-    const index = JSON.parse(
-      await readFile(path.join(LIBRARY_ROOT, "identity/kenny-headshots/index.json"), "utf8"),
-    );
-    expect(lib.identity).toHaveLength(index.images.length);
-    for (const [axis, values] of Object.entries(index.tag_vocabulary)) {
-      for (const value of values as string[]) {
-        const found = await searchLibrary(lib, "", { facets: { [axis]: [value] } });
-        expect(Array.isArray(found.identity)).toBe(true);
+      const lib = await scanLibrary(LIBRARY_ROOT);
+      expect(lib.identity.entries.length).toBeGreaterThan(0);
+      const index = JSON.parse(
+        await readFile(path.join(LIBRARY_ROOT, "identity/kenny-headshots/index.json"), "utf8"),
+      );
+      expect(lib.identity.entries).toHaveLength(index.images.length);
+      for (const [axis, values] of Object.entries(index.tag_vocabulary)) {
+        for (const value of values as string[]) {
+          const found = await searchLibrary(lib, "", { facets: { [axis]: [value] } });
+          expect(Array.isArray(found.identity.entries)).toBe(true);
+        }
       }
-    }
-    // The shared outfit/framing facets from common metadata are searchable too.
-    const shared = await searchLibrary(lib, "", {
-      facets: {
-        outfit: [index.common.clothing],
-        framing: [index.common.framing],
-      },
-    });
-    expect(shared.identity).toHaveLength(index.images.length);
-    // Free text finds an anchor by tag without manual paths.
-    const smiling = await searchLibrary(lib, "teeth-smile");
-    expect(smiling.identity.length).toBeGreaterThan(0);
-    for (const entry of lib.identity) {
-      expect(entry.hash).toMatch(/^[0-9a-f]{64}$/);
-    }
-  }, 30000);
+      // The shared outfit/framing facets from common metadata are searchable too.
+      const shared = await searchLibrary(lib, "", {
+        facets: {
+          outfit: [index.common.clothing],
+          framing: [index.common.framing],
+        },
+      });
+      expect(shared.identity.entries).toHaveLength(index.images.length);
+      // Free text finds an anchor by tag without manual paths.
+      const smiling = await searchLibrary(lib, "teeth-smile");
+      expect(smiling.identity.entries.length).toBeGreaterThan(0);
+      for (const entry of lib.identity.entries) {
+        expect(entry.hash).toMatch(/^[0-9a-f]{64}$/);
+      }
+    },
+    30000,
+  );
 });

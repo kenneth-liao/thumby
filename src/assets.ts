@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import {
   scanIdentityKit,
   searchIdentityFacets,
+  EMPTY_IDENTITY_KIT,
   type IdentityKit,
   type IdentityMeta,
-  type IdentityVocabulary,
 } from "./identity.js";
 
 /** The single canonical location of the asset library: `<repo>/assets`. */
@@ -96,9 +96,7 @@ export interface Library {
   plates: LibraryEntry<PlateMeta>[];
   cutouts: LibraryEntry<CutoutMeta>[];
   /** Identity-kit sources (REQ-016) — searchable, not scene-resolvable. */
-  identity: LibraryEntry<IdentityMeta>[];
-  /** The kit's declared facet vocabulary, scan-derived from its index. */
-  identityVocabulary: IdentityVocabulary;
+  identity: IdentityKit;
 }
 
 /** The canonical empty library — for callers resolving project-scope refs only. */
@@ -106,8 +104,7 @@ export const EMPTY_LIBRARY: Library = {
   logos: [],
   plates: [],
   cutouts: [],
-  identity: [],
-  identityVocabulary: {},
+  identity: EMPTY_IDENTITY_KIT,
 };
 
 const KIND_DIRS = ["logos", "plates", "cutouts"] as const;
@@ -210,8 +207,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     logos: logos as LibraryEntry<LogoMeta>[],
     plates: plates as LibraryEntry<PlateMeta>[],
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
-    identity: kit.entries,
-    identityVocabulary: kit.vocabulary,
+    identity: kit,
   };
 }
 
@@ -231,16 +227,14 @@ export async function searchLibrary(
   const q = query.trim().toLowerCase();
   const text = <M extends BaseMeta>(entries: LibraryEntry<M>[]) =>
     q ? entries.filter((e) => matches(e, q)) : entries;
+  const identity = opts?.facets
+    ? searchIdentityFacets(lib.identity.entries, opts.facets, lib.identity.vocabulary)
+    : lib.identity.entries;
   return {
     logos: text(lib.logos),
     plates: text(lib.plates),
     cutouts: text(lib.cutouts),
-    identity: text(
-      opts?.facets
-        ? searchIdentityFacets(lib.identity, opts.facets, lib.identityVocabulary)
-        : lib.identity,
-    ),
-    identityVocabulary: lib.identityVocabulary,
+    identity: { ...lib.identity, entries: text(identity) },
   };
 }
 
