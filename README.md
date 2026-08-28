@@ -207,7 +207,7 @@ directory is relocated.
 ## Scenes
 
 A **Scene** is the declarative alternative to the long-form command: a versioned
-JSON document of ordered layers (image + text for now), rendered locally to
+JSON document of ordered layers (image, text, shape, and group), rendered locally to
 exactly 1280×720. Array order is compositing order — later layers on top.
 Scenes, layers, and assets are the vocabulary the design spec (#7) builds on.
 
@@ -222,7 +222,9 @@ All four print JSON on stdout (`{ "ok": true, … }` or
 `{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
 (ok / invalid or failed / usage). A successful render also carries
 `warnings` — non-fatal render signals naming the layer, e.g. an `autoFit`
-layer whose text still overflows at its `min` floor. Validation happens
+layer whose text still overflows at its `min` floor. `validate` and `inspect`
+report `layerCount` counting every layer in the tree, group children
+included. Validation happens
 entirely before the browser starts: unsupported schema versions, duplicate
 layer ids, missing assets, invalid transforms, and unknown layer types are
 rejected naming the offending field (e.g. `layers[2].asset`).
@@ -281,6 +283,58 @@ span inherits the layer's typography and may override `font`, `fontSize`,
 Worked fixtures live in `test/fixtures/text/` — render one with
 `bun run scene render test/fixtures/text/mixed-spans.json` and inspect the
 PNG it writes.
+
+Shapes and groups turn a Scene into reusable editable components. A **shape**
+layer draws geometry inscribed in its layer box — `rect` (with `radius`,
+clamped to half the shorter side like CSS border-radius, so `radius` ≥ half
+the shorter side renders a pill), `ellipse`, or `triangle` (apex
+top-center) — filled with a solid `color` or a gradient `fill`, outlined by
+`border` (a stroke centered on the shape's edge — half in, half out), all
+validated before render:
+
+```json
+{ "id": "badge", "type": "shape", "shape": "rect", "radius": 24,
+  "color": "#101820", "border": { "width": 2, "color": "#334155" },
+  "position": { "x": 400, "y": 220 }, "size": { "width": 480, "height": 270 } }
+```
+
+A **group** wraps nested layers into one component: children keep
+group-local coordinates and transform with the group, so `position` moves the
+whole card, `scale` resizes it around its center, `visible`/`opacity` and the
+effects below apply to everything inside, and array order composites within
+the group exactly as it does at the top level. Groups never clip or flatten
+their children — every layer keeps its stable id, so an agent can still
+restyle the logo disc inside a moved card:
+
+```json
+{ "id": "logo-card", "type": "group",
+  "position": { "x": 400, "y": 220 }, "size": { "width": 480, "height": 270 },
+  "scale": 0.8,
+  "layers": [
+    { "id": "card-bg", "type": "shape", "shape": "rect", "radius": 24, "color": "#101820", "...": "..." },
+    { "id": "card-logo", "type": "shape", "shape": "ellipse", "color": "#22d3ee", "...": "..." }
+  ] }
+```
+
+`size` on a group is the local coordinate space its children are authored
+against; `scale` is the resize control (a pure renderer cannot infer child
+scaling from a changed `size`, so resizing is an explicit, editable value).
+
+Image and group content take an `effects` object, emitted as one CSS filter
+chain in a fixed order (blur → colorAdjust → glow → shadow); glow and shadow
+follow the content's alpha — a grouped card's shadow follows the card, not
+its bounding box:
+
+```json
+{ "effects": {
+    "blur": 2,
+    "colorAdjust": { "brightness": 1.1, "saturate": 0.9 },
+    "glow": { "radius": 12, "color": "#00ff00" },
+    "shadow": { "x": 10, "y": 14, "blur": 28, "color": "#020617" } } }
+```
+
+A worked grouped component lives at
+`test/fixtures/shape-group/logo-card.json` — render it and inspect the PNG.
 
 A Scene is an externally authored document, so its project scope is a trust
 boundary: path references resolve relative to the scene file *and are contained

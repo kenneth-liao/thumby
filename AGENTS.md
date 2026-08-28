@@ -20,11 +20,13 @@ Single-context repo: `CONTEXT.md` and `docs/adr/` at the root. See `docs/agents/
 ## Conventions
 
 - `bun`, not npm. `uv`, not pip.
-- Tests: `bun run test` (`bun test --isolate`). Isolation is load-bearing —
-  a bare `bun test` shares one module registry across files and the render
-  tests then hang (deadlock, not failure) on nearly every run. Isolation is a
-  mitigation, not a cure: the browser-backed suites still deadlock
-  occasionally, so a hung run is a known flake to re-run, not a new bug (#27).
+- Tests: `bun run test` — every test file runs in its own `bun test --isolate`
+  invocation. Isolation is load-bearing — a bare `bun test` shares one module
+  registry across files and the render tests then hang (deadlock, not failure)
+  on nearly every run (#27), and two render suites running concurrently in one
+  process crash the browser intermittently. One browser-backed suite per
+  process is the stable shape; an isolated hang or browser crash is a known
+  flake to re-run, not a new bug (#27).
 - Model costs: measure from real Gateway billing (`✓` figures only) — never copy from price tables.
 - The tool must keep working offline for everything except plate generation.
 - Core design decision (model paints background only, text is local CSS —

@@ -17,9 +17,9 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { LIBRARY_ROOT, scanLibrary } from "./assets.js";
+import { LIBRARY_ROOT, scanLibrary, type ResolvedAsset } from "./assets.js";
 import { SCENE_SCHEMA, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
-import { renderScene } from "./scene-render.js";
+import { renderScene, countLayers } from "./scene-render.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
@@ -75,7 +75,10 @@ async function readSceneFile(
   }
 }
 
-function summarizeLayer(layer: Record<string, unknown>): Record<string, unknown> {
+function summarizeLayer(
+  layer: Record<string, unknown>,
+  assets?: Map<string, ResolvedAsset>,
+): Record<string, unknown> {
   const summary: Record<string, unknown> = {
     id: layer.id,
     type: layer.type,
@@ -86,10 +89,25 @@ function summarizeLayer(layer: Record<string, unknown>): Record<string, unknown>
   };
   if (layer.rotation !== undefined) summary.rotation = layer.rotation;
   if (layer.mirror !== undefined) summary.mirror = layer.mirror;
+  if (layer.effects !== undefined) summary.effects = layer.effects;
   if (layer.type === "image") {
     summary.asset = layer.asset;
     if (layer.fit !== undefined) summary.fit = layer.fit;
     if (layer.crop !== undefined) summary.crop = layer.crop;
+    // Fail fast like the old `.get(id)!`: a validated image layer's asset is
+    // always resolved, so a miss here is a contract bug, not an empty field.
+    if (assets) summary.resolvedAsset = resolvedAssetSummary(assets.get(layer.id as string)!);
+  } else if (layer.type === "shape") {
+    summary.shape = layer.shape;
+    if (layer.radius !== undefined) summary.radius = layer.radius;
+    if (layer.color !== undefined) summary.color = layer.color;
+    if (layer.fill !== undefined) summary.fill = layer.fill;
+    if (layer.border !== undefined) summary.border = layer.border;
+  } else if (layer.type === "group") {
+    if (layer.scale !== undefined) summary.scale = layer.scale;
+    summary.layers = (layer.layers as Record<string, unknown>[]).map((child) =>
+      summarizeLayer(child, assets),
+    );
   } else {
     if (layer.text !== undefined) summary.text = layer.text;
     if (layer.spans !== undefined) summary.spans = layer.spans;
@@ -158,7 +176,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return ok({
         ok: true,
         schemaVersion: SCHEMA_VERSION,
-        layerCount: resolved.scene.layers.length,
+        layerCount: countLayers(resolved.scene.layers),
       });
     }
 
@@ -167,14 +185,10 @@ async function dispatch(args: string[]): Promise<CliResult> {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         canvas: resolved.scene.canvas,
-        layerCount: resolved.scene.layers.length,
-        layers: resolved.scene.layers.map((layer) => {
-          const summary = summarizeLayer(layer as unknown as Record<string, unknown>);
-          if (layer.type === "image") {
-            summary.resolvedAsset = resolvedAssetSummary(resolved.assets.get(layer.id)!);
-          }
-          return summary;
-        }),
+        layerCount: countLayers(resolved.scene.layers),
+        layers: resolved.scene.layers.map((layer) =>
+          summarizeLayer(layer as unknown as Record<string, unknown>, resolved.assets),
+        ),
       });
     }
 

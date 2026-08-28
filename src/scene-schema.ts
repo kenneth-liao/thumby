@@ -7,9 +7,9 @@
  * Schema can't express (duplicate ids across layers, crop insets summing past
  * the source) and content resolution (assets, fonts) live in src/scene.ts.
  *
- * Image and Text layers are `oneOf` branches with their own required fields
- * and `additionalProperties: false`, so the schema itself rejects mixed
- * image/text properties and per-type missing fields — exactly what
+ * Layer types are `oneOf` branches with their own required fields and
+ * `additionalProperties: false`, so the schema itself rejects mixed
+ * cross-type properties and per-type missing fields — exactly what
  * loadScene enforces. Shared property definitions are $ref-ed once.
  *
  * Layer order in `layers` IS the compositing order (later layers on top).
@@ -224,6 +224,7 @@ export const SCENE_SCHEMA = {
             "How the asset (after crop) fills the layer box. Default: cover.",
         },
         crop: { $ref: "#/definitions/crop" },
+        effects: { $ref: "#/definitions/effects" },
       },
     },
     textLayer: {
@@ -324,9 +325,185 @@ export const SCENE_SCHEMA = {
         casing: { $ref: "#/definitions/casing" },
       },
     },
+    shapeLayer: {
+      type: "object",
+      required: ["id", "type", "position", "size", "shape"],
+      additionalProperties: false,
+      // Fill is at-most-one: neither color nor fill falls back to the default
+      // color; both is a contract violation mapped to one friendly message.
+      allOf: [{ not: { allOf: [{ required: ["color"] }, { required: ["fill"] }] } }],
+      properties: {
+        id: { $ref: "#/definitions/id" },
+        type: { const: "shape" },
+        visible: { $ref: "#/definitions/visible" },
+        opacity: { $ref: "#/definitions/opacity" },
+        position: { $ref: "#/definitions/point" },
+        size: { $ref: "#/definitions/size" },
+        rotation: { $ref: "#/definitions/rotation" },
+        mirror: { $ref: "#/definitions/mirror" },
+        shape: {
+          enum: ["rect", "ellipse", "triangle"],
+          description:
+            "The geometry, inscribed in the layer box: rect fills the box, " +
+            "ellipse touches all four edges, triangle has its apex at the " +
+            "top-center and its base along the bottom edge.",
+        },
+        radius: {
+          type: "number",
+          minimum: 0,
+          description:
+            "Corner radius in px — rect only (validated). Clamped to half " +
+            "the shorter side (CSS border-radius semantics), so radius ≥ " +
+            "half the shorter side renders a pill.",
+        },
+        color: {
+          $ref: "#/definitions/color",
+          description: "Solid fill. Default #000 when neither color nor fill is set.",
+        },
+        fill: {
+          $ref: "#/definitions/fill",
+          description:
+            "Linear gradient fill across the layer box — mutually exclusive " +
+            "with color. Angle in CSS degrees; default 90 (to right).",
+        },
+        border: { $ref: "#/definitions/border" },
+      },
+    },
+    groupLayer: {
+      type: "object",
+      required: ["id", "type", "position", "size", "layers"],
+      additionalProperties: false,
+      properties: {
+        id: { $ref: "#/definitions/id" },
+        type: { const: "group" },
+        visible: { $ref: "#/definitions/visible" },
+        opacity: { $ref: "#/definitions/opacity" },
+        position: { $ref: "#/definitions/point" },
+        size: { $ref: "#/definitions/size" },
+        rotation: { $ref: "#/definitions/rotation" },
+        mirror: { $ref: "#/definitions/mirror" },
+        scale: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description:
+            "Resize factor for the whole group, applied around the group's " +
+            "center — 1 (the default) renders children at their authored " +
+            "local sizes. Resizing a component scales its children; it never " +
+            "flattens them.",
+        },
+        effects: { $ref: "#/definitions/effects" },
+        layers: {
+          type: "array",
+          minItems: 1,
+          items: { $ref: "#/definitions/layer" },
+          description:
+            "Nested layers in group-local px — relative to the group's " +
+            "top-left, transformed with the group. Array order is the " +
+            "compositing order inside the group; the group itself composites " +
+            "at its own position in the scene's layer list. Children are " +
+            "never clipped to the group box.",
+        },
+      },
+    },
+    effects: {
+      type: "object",
+      additionalProperties: false,
+      minProperties: 1,
+      description:
+        "Editable visual effects for image and group content, emitted as one " +
+        "CSS filter chain in a fixed order: blur → colorAdjust → glow → " +
+        "shadow. Glow and shadow follow the content's alpha (drop-shadow), " +
+        "not its box.",
+      properties: {
+        blur: {
+          type: "number",
+          minimum: 0,
+          description: "Gaussian blur radius in px. 0 (absent) leaves edges crisp.",
+        },
+        colorAdjust: {
+          type: "object",
+          additionalProperties: false,
+          minProperties: 1,
+          description:
+            "Unmasked whole-content color adjustment — every pixel of the " +
+            "layer's content, no mask. Set fields apply; others stay at " +
+            "their unchanged defaults (1, 1, 1, 0°).",
+          properties: {
+            brightness: {
+              type: "number",
+              minimum: 0,
+              description: "Multiplier — 1 is unchanged, 0 is black.",
+            },
+            contrast: {
+              type: "number",
+              minimum: 0,
+              description: "Multiplier — 1 is unchanged.",
+            },
+            saturate: {
+              type: "number",
+              minimum: 0,
+              description: "Multiplier — 1 is unchanged, 0 is gray.",
+            },
+            hueRotate: {
+              type: "number",
+              description: "Hue rotation in degrees.",
+            },
+          },
+        },
+        glow: {
+          type: "object",
+          additionalProperties: false,
+          required: ["radius", "color"],
+          description: "Halo around the content's alpha — a centered drop shadow.",
+          properties: {
+            radius: {
+              type: "number",
+              exclusiveMinimum: 0,
+              description: "Halo blur radius in px.",
+            },
+            color: { $ref: "#/definitions/color" },
+          },
+        },
+        shadow: {
+          type: "object",
+          additionalProperties: false,
+          required: ["x", "y", "blur", "color"],
+          description:
+            "Drop shadow under the content's alpha — blur 0 renders a crisp copy.",
+          properties: {
+            x: { type: "number", description: "Horizontal offset in px." },
+            y: { type: "number", description: "Vertical offset in px." },
+            blur: { type: "number", minimum: 0, description: "Blur radius in px." },
+            color: { $ref: "#/definitions/color" },
+          },
+        },
+      },
+    },
+    border: {
+      type: "object",
+      additionalProperties: false,
+      required: ["width", "color"],
+      description:
+        "Shape outline, stroked centered on the edge — half paints inside " +
+        "the fill, half outside the layer box. Unlike text stroke, which " +
+        "paints entirely outside the glyphs.",
+      properties: {
+        width: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description: "Border width in px.",
+        },
+        color: { $ref: "#/definitions/color" },
+      },
+    },
     layer: {
-      oneOf: [{ $ref: "#/definitions/imageLayer" }, { $ref: "#/definitions/textLayer" }],
-      description: "Scene v1 layers: image or text.",
+      oneOf: [
+        { $ref: "#/definitions/imageLayer" },
+        { $ref: "#/definitions/textLayer" },
+        { $ref: "#/definitions/shapeLayer" },
+        { $ref: "#/definitions/groupLayer" },
+      ],
+      description: "Scene v1 layers: image, text, shape, or group.",
     },
   },
 } as const;
