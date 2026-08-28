@@ -121,8 +121,9 @@ export const SCENE_SCHEMA = {
       maximum: 1000,
       description:
         "CSS font weight. Default: the bundled face's natural weight. Bundled " +
-        "faces ship one weight each; other weights render through Chromium's " +
-        "deterministic font matching.",
+        "faces ship one weight each; a weight off the face renders through " +
+        "Chromium's synthetic bold — deterministic in the renderer's pinned " +
+        "browser, but synthesized glyphs, not a second shipped face.",
     },
     tracking: {
       type: "number",
@@ -229,6 +230,16 @@ export const SCENE_SCHEMA = {
       type: "object",
       required: ["id", "type", "position", "size", "font"],
       additionalProperties: false,
+      // The text contract is enforced here so the published schema document
+      // is self-sufficient — a schema-only consumer rejects exactly what
+      // thumby rejects. src/scene.ts maps violations to friendly messages.
+      // Content and sizing are exactly-one (oneOf); fill is at-most-one,
+      // since a layer with neither falls back to the default color.
+      allOf: [
+        { oneOf: [{ required: ["text"] }, { required: ["spans"] }] },
+        { oneOf: [{ required: ["fontSize"] }, { required: ["autoFit"] }] },
+        { not: { allOf: [{ required: ["color"] }, { required: ["fill"] }] } },
+      ],
       properties: {
         id: { $ref: "#/definitions/id" },
         type: { const: "text" },

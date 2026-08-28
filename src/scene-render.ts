@@ -23,6 +23,11 @@ export interface SceneRenderResult {
   png: Buffer;
   width: number;
   height: number;
+  /**
+   * Non-fatal render signals, e.g. an auto-fit layer that could not fit at
+   * its `min` floor. The PNG still renders; consumers surface these.
+   */
+  warnings: string[];
 }
 
 /** Intrinsic pixel dimensions of an image asset. */
@@ -173,9 +178,12 @@ function textMarkup(layer: TextLayer): string {
       "paint-order:stroke fill",
     );
   if (layer.shadows?.length)
+    // CSS paints the first text-shadow on top; the scene lists back to
+    // front, so emit reversed — the last-listed shadow lands front-most.
     styles.push(
       `text-shadow:${layer.shadows
         .map((s) => `${s.x}px ${s.y}px ${s.blur}px ${s.color}`)
+        .reverse()
         .join(",")}`,
     );
   const inner = layer.spans
@@ -290,25 +298,30 @@ async function measureCroppedImages(
 
 /**
  * Browser-side shrink-to-fit for one auto-fit text layer, addressed by its
- * index in the layer list (DOM order is scene order). Binary-searches the
- * largest size in [min, max] whose text stays inside the layer box; if even
- * `min` overflows, `min` renders — the floor is honored, not a guarantee.
- * Span font sizes are absolute and never scaled. Stroke width is an explicit
- * scene value and stays fixed while the size changes.
+ * stable `data-layer-id` — a missing element is a render-contract bug and
+ * throws, never a silently skipped layer. Binary-searches the largest size
+ * in [min, max] whose text stays inside the layer box; if even `min`
+ * overflows, `min` renders and the caller is told the floor was hit — the
+ * floor is honored, not a guarantee. Span font sizes are absolute and never
+ * scaled. Stroke width is an explicit scene value and stays fixed — unlike
+ * compose.ts's headline loop, which rescales stroke with size by design.
+ * Returns whether the final size actually fits.
  * Must stay self-contained — Playwright serializes it into the page.
  */
 const fitTextLayer = ({
-  index,
+  id,
   min,
   max,
 }: {
-  index: number;
+  id: string;
   min: number;
   max: number;
-}): void => {
-  const layer = document.querySelectorAll<HTMLElement>(".scene-layer")[index];
+}): boolean => {
+  const layer = [...document.querySelectorAll<HTMLElement>(".scene-layer")].find(
+    (el) => el.dataset.layerId === id,
+  );
   const box = layer?.firstElementChild;
-  if (!box) return;
+  if (!box) throw new Error(`auto-fit layer "${id}" has no render element`);
   const el = box as HTMLElement;
   let lo = min;
   let hi = max;
@@ -327,6 +340,9 @@ const fitTextLayer = ({
     }
   }
   el.style.fontSize = `${best}px`;
+  return (
+    el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1
+  );
 };
 
 /**
@@ -369,14 +385,29 @@ export async function renderScene(
     }
 
     // Auto-fit runs only after every face is force-loaded, so measurements
-    // see final glyph metrics, not fallback shapes.
-    for (const [index, layer] of resolved.scene.layers.entries()) {
+    // see final glyph metrics, not fallback shapes. A layer that cannot fit
+    // even at its `min` floor still renders — but is reported, never silent.
+    const warnings: string[] = [];
+    for (const layer of resolved.scene.layers) {
       if (layer.type !== "text" || !layer.autoFit) continue;
-      await page.evaluate(fitTextLayer, { index, ...layer.autoFit });
+      const fitted = await page.evaluate(fitTextLayer, {
+        id: layer.id,
+        ...layer.autoFit,
+      });
+      if (!fitted)
+        warnings.push(
+          `auto-fit could not fit layer "${layer.id}" — rendered at the ` +
+            `${layer.autoFit.min}px floor and the text overflows its box`,
+        );
     }
 
     const png = await page.screenshot({ type: "png" });
-    return { png, width: resolved.scene.canvas.width, height: resolved.scene.canvas.height };
+    return {
+      png,
+      width: resolved.scene.canvas.width,
+      height: resolved.scene.canvas.height,
+      warnings,
+    };
   } finally {
     await ctx?.close();
   }

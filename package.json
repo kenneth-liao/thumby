@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "bun test --isolate",
     "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
     "library": "bun run src/library-cli.ts"

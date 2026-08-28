@@ -220,10 +220,12 @@ bun run scene render scene.json [--out p]  # render to PNG (1280×720)
 
 All four print JSON on stdout (`{ "ok": true, … }` or
 `{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
-(ok / invalid or failed / usage). Validation happens entirely before the
-browser starts: unsupported schema versions, duplicate layer ids, missing
-assets, invalid transforms, and unknown layer types are rejected naming the
-offending field (e.g. `layers[2].asset`).
+(ok / invalid or failed / usage). A successful render also carries
+`warnings` — non-fatal render signals naming the layer, e.g. an `autoFit`
+layer whose text still overflows at its `min` floor. Validation happens
+entirely before the browser starts: unsupported schema versions, duplicate
+layer ids, missing assets, invalid transforms, and unknown layer types are
+rejected naming the offending field (e.g. `layers[2].asset`).
 
 ```json
 {
@@ -248,15 +250,18 @@ name with explicit `\n` line breaks.
 
 Rich text: a text layer is sized by `fontSize` or shrink-to-fit
 `autoFit: {min, max}` (largest size whose text stays inside the layer box;
-`min` renders even if it overflows). All of `weight`, `tracking` (em),
-`casing` (`upper`/`lower`/`none`), and span-level `color` are explicit scene
-values and land as inline styles — nothing else can out-specify them. Fill is
-a solid `color` or a two-stop gradient `fill: {from, to, angle}` (mutually
-exclusive, like `text`/`spans` and `fontSize`/`autoFit`); `stroke` paints
-outside the glyphs and `shadows` lists `text-shadow`s back to front. Content
-is plain `text` or independently styled `spans` — each span inherits the
-layer's typography and may override `font`, `fontSize`, `weight`, `color`,
-`tracking`, and `casing`:
+`min` renders even if it overflows — reported as a render warning, never
+silently clipped). All of `weight`, `tracking` (em), `casing`
+(`upper`/`lower`/`none`), and span-level `color` are explicit scene values
+and land as inline styles — nothing else can out-specify them. Bundled faces
+ship one weight each, so a `weight` off the face renders as Chromium's
+synthetic bold, not a second shipped face. Fill is a solid `color` or a
+two-stop gradient `fill: {from, to, angle}` (mutually exclusive, like
+`text`/`spans` and `fontSize`/`autoFit`); `stroke` paints outside the glyphs
+and `shadows` lists `text-shadow`s back to front — the last entry paints
+front-most. Content is plain `text` or independently styled `spans` — each
+span inherits the layer's typography and may override `font`, `fontSize`,
+`weight`, `color`, `tracking`, and `casing`:
 
 ```json
 { "id": "headline", "type": "text",

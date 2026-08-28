@@ -35,7 +35,9 @@ Options
                  (default: <scene-dir>/out/<scene-basename>.png)
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
-Exit codes: 0 ok, 1 invalid scene or render failure, 2 usage error.
+Successful renders carry a "warnings" array (e.g. an auto-fit layer that
+could not fit at its min floor). Exit codes: 0 ok, 1 invalid scene or render
+failure, 2 usage error.
 Rendering, validation, and inspection are offline and never start generation.
 `;
 
@@ -190,10 +192,10 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
-    const { png, width, height } = await renderScene(resolved);
+    const { png, width, height, warnings } = await renderScene(resolved);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, png);
-    return ok({ ok: true, output, width, height });
+    return ok({ ok: true, output, width, height, warnings });
   }
 
   return usageError(

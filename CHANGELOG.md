@@ -5,7 +5,8 @@
 ### Added
 
 - Rich Text layers render reference-faithful typography from Scene data: multiple independently styled `spans` (mutually exclusive with plain `text`), explicit `weight`, `tracking` (em), `casing`, solid `color` or gradient `fill`, `stroke`, and `shadows` (#10)
-- Text layers size by fixed `fontSize` or shrink-to-fit `autoFit: {min, max}` — the render picks the largest size whose text stays inside the layer box, measured after bundled fonts resolve (#10)
+- Text layers size by fixed `fontSize` or shrink-to-fit `autoFit: {min, max}` — the render picks the largest size whose text stays inside the layer box, measured after bundled fonts resolve; a layer that still overflows at its `min` floor renders but is reported in the render result's `warnings` (#10)
+- The published `scene schema` document enforces the text XOR pairs itself (`text`/`spans`, `fontSize`/`autoFit`, `color`/`fill`), so a schema-only consumer rejects exactly what thumby rejects (#10)
 - Every explicit text value is emitted as an inline style on the element it styles, so preset or stylesheet specificity can never silently override Scene values; an explicit span color restates the fill over a gradient (`-webkit-text-fill-color`) (#10)
 - `bun run scene inspect` summarizes the rich text properties (`spans`, `autoFit`, `weight`, `tracking`, `casing`, `fill`, `stroke`, `shadows`) (#10)
 - Rendered text fixtures under `test/fixtures/text/` (short, long auto-fit, forced breaks, mixed spans) for visual inspection (#10)

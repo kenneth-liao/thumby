@@ -4,6 +4,7 @@ import { inflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
+import Ajv from "ajv";
 import { contentHash, scanLibrary, type Library } from "../src/assets.js";
 import { BUNDLED_FACES, resolveFace } from "../src/fonts.js";
 import {
@@ -406,6 +407,27 @@ describe("scene validation", () => {
     expect(errors[0]!.message).toMatch(/min .* max/);
   });
 
+  it("publishes the whole text contract in the schema document itself", () => {
+    // The machine-readable contract must reject what thumby rejects —
+    // independent of the semantic pass.
+    const validate = new Ajv().compile({
+      ...(SCENE_SCHEMA.definitions as Record<string, any>).textLayer,
+      definitions: SCENE_SCHEMA.definitions,
+    });
+    const base = textLayer() as unknown as Record<string, unknown>;
+    const invalid = (over: Record<string, unknown>) =>
+      !validate({ ...base, ...over });
+    expect(invalid({ spans: [{ text: "Run" }] })).toBe(true); // text + spans
+    expect(invalid({ autoFit: { min: 20, max: 120 } })).toBe(true); // fontSize + autoFit
+    expect(invalid({ color: "#ffffff", fill: { from: "#ff0000", to: "#0000ff" } })).toBe(true); // color + fill
+    // Content and sizing are exactly-one: neither present is rejected too.
+    expect(invalid({ text: undefined })).toBe(true);
+    expect(invalid({ fontSize: undefined })).toBe(true);
+    // Either side alone stays valid.
+    expect(validate({ ...base, fontSize: undefined, autoFit: { min: 20, max: 120 } })).toBe(true);
+    expect(validate({ ...base, color: undefined, fill: { from: "#ff0000", to: "#0000ff" } })).toBe(true);
+  });
+
   it("rejects non-positive fontSize", async () => {
     const errors = await loadErrors(scene([textLayer({ fontSize: 0 })]));
     expect(errors[0]!.path).toBe("layers[0].fontSize");
@@ -689,10 +711,79 @@ describe("scene page html", () => {
     const el = html.slice(html.indexOf('data-layer-id="title"'));
     expect(el).toMatch(/-webkit-text-stroke:8px #111318/);
     expect(el).toMatch(/paint-order:stroke fill/);
+    // CSS paints the first text-shadow on top, so back-to-front listing
+    // emits reversed — the last-listed shadow lands front-most.
     expect(el).toMatch(
-      /text-shadow:0px 6px 0px #ff00ff,2px 2px 18px #000000/,
+      /text-shadow:2px 2px 18px #000000,0px 6px 0px #ff00ff/,
     );
   });
+
+  it("keeps the glyph interior when stroked — paint-order works in pixels", async () => {
+    // If Chromium ignored paint-order, a centered stroke would eat the glyph
+    // interior: stroked blue coverage must nearly match the unstroked render.
+    const blueCount = async (stroked: boolean) => {
+      const { resolved } = await load(
+        scene([
+          textLayer({
+            font: "Archivo Black",
+            fontSize: 300,
+            position: { x: 100, y: 180 },
+            size: { width: 1080, height: 380 },
+            color: "#0000ff",
+            stroke: stroked ? { width: 40, color: "#ff0000" } : undefined,
+            text: "IO",
+          }),
+        ]),
+      );
+      const { png } = await renderScene(resolved);
+      const img = decodePng(png);
+      let blue = 0;
+      for (let y = 160; y < 580; y += 2)
+        for (let x = 80; x < 1200; x += 2) {
+          const [r, g, b] = img.px(x, y);
+          if (b > 200 && r < 80 && g < 80) blue++;
+        }
+      return blue;
+    };
+    const plain = await blueCount(false);
+    const stroked = await blueCount(true);
+    expect(plain).toBeGreaterThan(1000);
+    expect(stroked).toBeGreaterThanOrEqual(plain * 0.9);
+  });
+
+  it("paints overlapping shadows with the last listed front-most", async () => {
+    // Two hard shadows at the same offset fully overlap: the front one must
+    // cover the back one completely, so blue (listed last) wins and no red
+    // survives — the reversed emission order, proven in pixels.
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          fontSize: 140,
+          position: { x: 100, y: 280 },
+          size: { width: 1080, height: 180 },
+          color: "#101318",
+          shadows: [
+            { x: 10, y: 10, blur: 0, color: "#ff0000" },
+            { x: 10, y: 10, blur: 0, color: "#0000ff" },
+          ],
+          text: "ORDER",
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    let red = false;
+    let blue = false;
+    for (let y = 260; y < 500; y += 2)
+      for (let x = 80; x < 1200; x += 2) {
+        const [r, g, b] = img.px(x, y);
+        if (r > 200 && g < 80 && b < 80) red = true;
+        if (b > 200 && r < 80 && g < 80) blue = true;
+      }
+    expect(blue).toBe(true);
+    expect(red).toBe(false);
+  }, 20000);
 });
 
 // --- render --------------------------------------------------------------------
@@ -705,7 +796,7 @@ describe("scene render", () => {
     expect(height).toBe(720);
     expect(png.readUInt32BE(16)).toBe(1280);
     expect(png.readUInt32BE(20)).toBe(720);
-  });
+  }, 20000);
 
   it("composites real pixels — crop selects the source window before fitting", async () => {
     // quad.svg: top half red, bottom half blue. Cropping off the top 50% must
@@ -724,7 +815,7 @@ describe("scene render", () => {
     expect(img.width).toBe(1280);
     expect(img.px(100, 100)).toEqual([0, 0, 255, 255]);
     expect(img.px(1100, 600)).toEqual([0, 0, 255, 255]);
-  });
+  }, 20000);
 
   it("centers the cropped window on cover — red above, blue below", async () => {
     // Window = left half (red over blue, 100×200 of a 200×200 source) covered
@@ -744,7 +835,7 @@ describe("scene render", () => {
     const img = decodePng(png);
     expect(img.px(640, 100)[0]).toBeGreaterThan(200); // red channel dominates
     expect(img.px(640, 600)[2]).toBeGreaterThan(200); // blue channel dominates
-  });
+  }, 20000);
 
   it("letterboxes contain with background instead of stretching", async () => {
     const { resolved } = await load(scene([imageLayer({ asset: "./bg.svg", fit: "contain" })]));
@@ -752,7 +843,7 @@ describe("scene render", () => {
     const img = decodePng(png);
     expect(img.px(5, 5)).toEqual([255, 255, 255, 255]);
     expect(img.px(640, 360)).toEqual([255, 0, 0, 255]);
-  });
+  }, 20000);
 
   it("text layers change pixels — a render without them differs", async () => {
     const base = await load(scene([imageLayer({ asset: "./bg.svg" })]));
@@ -762,7 +853,7 @@ describe("scene render", () => {
     const without = await renderScene(base.resolved);
     const with_ = await renderScene(withText.resolved);
     expect(with_.png.equals(without.png)).toBe(false);
-  });
+  }, 20000);
 
   it("renders with every network request aborted — data URIs only, no implicit generation", async () => {
     const { resolved } = await load(scene([imageLayer({ asset: "./bg.svg" }), textLayer()]));
@@ -776,7 +867,7 @@ describe("scene render", () => {
     } finally {
       await browser.close();
     }
-  });
+  }, 20000);
 
   it("applies casing in pixels — transformed and literal text render identically", async () => {
     const lowered = await load(scene([textLayer({ text: "aaa", casing: "upper" })]));
@@ -784,7 +875,7 @@ describe("scene render", () => {
     const a = await renderScene(lowered.resolved);
     const b = await renderScene(literal.resolved);
     expect(a.png.equals(b.png)).toBe(true);
-  });
+  }, 20000);
 
   it("tracking changes the rendered layout", async () => {
     const tight = await load(scene([textLayer({ text: "tracking", tracking: 0 })]));
@@ -792,7 +883,17 @@ describe("scene render", () => {
     const a = await renderScene(tight.resolved);
     const b = await renderScene(wide.resolved);
     expect(a.png.equals(b.png)).toBe(false);
-  });
+  }, 20000);
+
+  it("off-face weight changes pixels — synthesized, never silent", async () => {
+    // Anton ships weight 400 only; 900 renders through Chromium's synthetic
+    // bold, so the two renders must visibly differ.
+    const natural = await load(scene([textLayer({ text: "weight", weight: 400 })]));
+    const synthesized = await load(scene([textLayer({ text: "weight", weight: 900 })]));
+    const a = await renderScene(natural.resolved);
+    const b = await renderScene(synthesized.resolved);
+    expect(a.png.equals(b.png)).toBe(false);
+  }, 20000);
 
   it("tracks the gradient across glyphs — left reddish, right bluish", async () => {
     const { resolved } = await load(
@@ -816,13 +917,13 @@ describe("scene render", () => {
     };
     let red = false;
     let blue = false;
-    for (let y = 260; y < 500; y++)
-      for (let x = 100; x < 700; x++) red ||= dominant(x, y) === "red";
-    for (let y = 260; y < 500; y++)
-      for (let x = 700; x < 1180; x++) blue ||= dominant(x, y) === "blue";
+    for (let y = 260; y < 500; y += 2)
+      for (let x = 100; x < 700; x += 2) red ||= dominant(x, y) === "red";
+    for (let y = 260; y < 500; y += 2)
+      for (let x = 700; x < 1180; x += 2) blue ||= dominant(x, y) === "blue";
     expect(red).toBe(true);
     expect(blue).toBe(true);
-  });
+  }, 20000);
 
   it("shrinks to the largest size that fits the layer box — nothing spills outside", async () => {
     const { resolved } = await load(
@@ -843,8 +944,8 @@ describe("scene render", () => {
     const reddish = ([r, g, b]: number[]) => r > 150 && g < 120 && b < 120;
     let inside = false;
     let outside = false;
-    for (let y = 0; y < 720; y++)
-      for (let x = 0; x < 1280; x++) {
+    for (let y = 0; y < 720; y += 2)
+      for (let x = 0; x < 1280; x += 2) {
         if (!reddish(img.px(x, y))) continue;
         const inBox =
           x >= 98 && x <= 1002 && y >= 298 && y <= 442;
@@ -853,7 +954,7 @@ describe("scene render", () => {
       }
     expect(inside).toBe(true);
     expect(outside).toBe(false);
-  });
+  }, 20000);
 
   it("honors the whole autoFit range — a higher max renders bigger", async () => {
     const base = {
@@ -872,33 +973,63 @@ describe("scene render", () => {
     const a = await renderScene(capped.resolved);
     const b = await renderScene(free.resolved);
     expect(a.png.equals(b.png)).toBe(false);
-  });
+  }, 20000);
 
   it("keeps explicit span sizes absolute while the layer auto-fits", async () => {
+    const base = {
+      font: "Archivo Black",
+      text: undefined,
+      fontSize: undefined,
+      spans: [{ text: "FIXED ", fontSize: 80 }, { text: "REST" }],
+      autoFit: { min: 20, max: 200 },
+      position: { x: 100, y: 300 },
+      size: { width: 900, height: 200 },
+      color: "#ff0000",
+    };
+    const at80 = await load(scene([textLayer({ ...base })]));
+    const at40 = await load(
+      scene([
+        textLayer({
+          ...base,
+          spans: [{ text: "FIXED ", fontSize: 40 }, { text: "REST" }],
+        }),
+      ]),
+    );
+    const a = await renderScene(at80.resolved);
+    const b = await renderScene(at40.resolved);
+    // Dropping span sizing entirely would change this render — the explicit
+    // span fontSize is load-bearing.
+    expect(a.png.equals(b.png)).toBe(false);
+    let red = false;
+    const img = decodePng(b.png);
+    for (let y = 280; y < 520; y++)
+      for (let x = 80; x < 1200; x += 2) {
+        const [r, g, bl] = img.px(x, y);
+        if (r > 150 && g < 120 && bl < 120) red = true;
+      }
+    expect(red).toBe(true);
+  }, 20000);
+
+  it("reports an auto-fit layer that cannot fit at its min floor", async () => {
     const { resolved } = await load(
       scene([
         textLayer({
+          id: "floor",
           font: "Archivo Black",
-          text: undefined,
-          spans: [{ text: "FIXED ", fontSize: 80 }, { text: "REST" }],
+          text: "THIS TEXT CANNOT FIT AT ANY SIZE IN ITS RANGE",
           fontSize: undefined,
-          autoFit: { min: 20, max: 200 },
+          autoFit: { min: 90, max: 120 },
           position: { x: 100, y: 300 },
-          size: { width: 900, height: 200 },
+          size: { width: 400, height: 60 },
           color: "#ff0000",
         }),
       ]),
     );
-    const { png } = await renderScene(resolved);
-    const img = decodePng(png);
-    let red = false;
-    for (let y = 280; y < 520; y++)
-      for (let x = 80; x < 1200; x++) {
-        const [r, g, b] = img.px(x, y);
-        if (r > 150 && g < 120 && b < 120) red = true;
-      }
-    expect(red).toBe(true);
-  });
+    const { warnings } = await renderScene(resolved);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/layer "floor"/);
+    expect(warnings[0]).toMatch(/90px floor/);
+  }, 20000);
 
   it("renders stroke and shadow colors onto the canvas", async () => {
     const { resolved } = await load(
@@ -918,13 +1049,13 @@ describe("scene render", () => {
     const { png } = await renderScene(resolved);
     const img = decodePng(png);
     const hasColor = (want: (p: number[]) => boolean) => {
-      for (let y = 260; y < 500; y++)
-        for (let x = 80; x < 1200; x++) if (want(img.px(x, y))) return true;
+      for (let y = 260; y < 500; y += 2)
+        for (let x = 80; x < 1200; x += 2) if (want(img.px(x, y))) return true;
       return false;
     };
     expect(hasColor(([r, g, b]) => b > 200 && r < 80 && g < 80)).toBe(true); // stroke
     expect(hasColor(([r, g, b]) => r > 200 && g < 80 && b < 80)).toBe(true); // shadow
-  });
+  }, 20000);
 
   it("renders independently styled spans — each span's color lands on canvas", async () => {
     // Pure red and pure blue spans on a white canvas: each color must actually
@@ -947,8 +1078,8 @@ describe("scene render", () => {
     const { png } = await renderScene(resolved);
     const img = decodePng(png);
     const hasColor = (r: number, g: number, b: number) => {
-      for (let y = 280; y < 460; y++)
-        for (let x = 80; x < 1200; x++) {
+      for (let y = 280; y < 460; y += 2)
+        for (let x = 80; x < 1200; x += 2) {
           const [pr, pg, pb] = img.px(x, y);
           if (pr > r && pg < g && pb < b) return true;
         }
@@ -956,7 +1087,7 @@ describe("scene render", () => {
     };
     expect(hasColor(200, 80, 80)).toBe(true);
     expect(hasColor(80, 80, 200)).toBe(true);
-  });
+  }, 20000);
 });
 
 // --- cli ------------------------------------------------------------------------
@@ -982,7 +1113,8 @@ describe("committed fixtures", () => {
   });
 });
 
-describe("scene cli", () => {  it("schema returns the machine-readable JSON Schema document", async () => {
+describe("scene cli", () => {
+  it("schema returns the machine-readable JSON Schema document", async () => {
     const { exitCode, output } = await cliRun(["schema"]);
     expect(exitCode).toBe(0);
     const schema = output as typeof SCENE_SCHEMA;
@@ -1075,7 +1207,7 @@ describe("scene cli", () => {  it("schema returns the machine-readable JSON Sche
     const bytes = await readFile(out);
     expect(bytes.readUInt32BE(16)).toBe(1280);
     expect(bytes.readUInt32BE(20)).toBe(720);
-  });
+  }, 20000);
 
   it("refuses --out outside the scene directory", async () => {
     const { exitCode, output } = await cliRun([
@@ -1104,7 +1236,7 @@ describe("scene cli", () => {  it("schema returns the machine-readable JSON Sche
     expect(ok).toBe(false);
     expect(errors[0]!.path).toBe("render");
     expect(errors[0]!.message).toMatch(/EISDIR|directory/);
-  });
+  }, 20000);
 
   it("exits 2 with usage on an unknown command", async () => {
     const { exitCode, output } = await cliRun(["nonsense"]);

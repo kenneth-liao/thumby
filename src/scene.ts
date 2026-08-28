@@ -134,6 +134,40 @@ const branchValidators = {
   }),
 };
 
+/**
+ * The text contract — exactly one of text/spans, exactly one of
+ * fontSize/autoFit, at most one of color/fill — with its one set of friendly
+ * messages. The schema document enforces the rules itself (the textLayer
+ * `allOf` block), so this is only where a violation's opaque oneOf/not
+ * failure gets its message. Paths are layer-relative.
+ */
+function textContractErrors(layer: TextLayer): SceneError[] {
+  const errors: SceneError[] = [];
+  if (layer.text !== undefined && layer.spans !== undefined)
+    errors.push({
+      path: "spans",
+      message: `"spans" and "text" are mutually exclusive — content lives in one place`,
+    });
+  else if (layer.text === undefined && layer.spans === undefined)
+    errors.push({ path: "text", message: `text layers need "text" or "spans"` });
+  if (layer.fontSize !== undefined && layer.autoFit !== undefined)
+    errors.push({
+      path: "autoFit",
+      message: `"autoFit" and "fontSize" are mutually exclusive — one sizing mode per layer`,
+    });
+  else if (layer.fontSize === undefined && layer.autoFit === undefined)
+    errors.push({
+      path: "fontSize",
+      message: `text layers need "fontSize" or "autoFit"`,
+    });
+  if (layer.color !== undefined && layer.fill !== undefined)
+    errors.push({
+      path: "fill",
+      message: `"fill" and "color" are mutually exclusive — one fill per layer`,
+    });
+  return errors;
+}
+
 /** `jsonPointerToPath` output relative to a layer, prefixed with `layers[i]`. */
 const layerPath = (at: string, sub: string) => `${at}.${jsonPointerToPath(sub)}`;
 
@@ -165,32 +199,48 @@ function expandLayerErrors(errors: AjvError[]): SceneError[] {
     }
     const validate = branchValidators[type];
     validate(layer);
+    const branchErrors = validate.errors!;
+    // The schema's `allOf` block carries the text contract; its raw
+    // oneOf/not failures (and their branch noise) expand to the one friendly
+    // message home instead.
+    const inContract = (e: AjvError) => e.schemaPath.includes("/allOf/");
+    const contractHit = branchErrors.some(inContract);
     out.push(
-      ...validate.errors!.map((e): SceneError => {
-        // Nested hosts (spans) land their required/unknown-field errors on
-        // the offending span field, not the layer root.
-        const host = e.instancePath ? layerPath(at, e.instancePath) : at;
-        const inSpans = /^\/spans(\/|$)/.test(e.instancePath);
-        if (e.keyword === "required") {
-          const prop = e.params?.missingProperty as string;
+      ...branchErrors
+        .filter((e) => !inContract(e))
+        .map((e): SceneError => {
+          // Nested hosts (spans) land their required/unknown-field errors on
+          // the offending span field, not the layer root.
+          const host = e.instancePath ? layerPath(at, e.instancePath) : at;
+          const inSpans = /^\/spans(\/|$)/.test(e.instancePath);
+          if (e.keyword === "required") {
+            const prop = e.params?.missingProperty as string;
+            return {
+              path: `${host}.${prop}`,
+              message: `"${prop}" is required on ${inSpans ? "spans" : `${type} layers`}`,
+            };
+          }
+          if (e.keyword === "additionalProperties") {
+            const prop = e.params?.additionalProperty as string;
+            return {
+              path: `${host}.${prop}`,
+              message: `"${prop}" is not a valid ${inSpans ? "span" : "layer"} property`,
+            };
+          }
           return {
-            path: `${host}.${prop}`,
-            message: `"${prop}" is required on ${inSpans ? "spans" : `${type} layers`}`,
+            path: e.instancePath ? layerPath(at, e.instancePath) : at,
+            message: e.message ?? "is invalid",
           };
-        }
-        if (e.keyword === "additionalProperties") {
-          const prop = e.params?.additionalProperty as string;
-          return {
-            path: `${host}.${prop}`,
-            message: `"${prop}" is not a valid ${inSpans ? "span" : "layer"} property`,
-          };
-        }
-        return {
-          path: e.instancePath ? layerPath(at, e.instancePath) : at,
-          message: e.message ?? "is invalid",
-        };
-      }),
+        }),
     );
+    if (contractHit) {
+      out.push(
+        ...textContractErrors(layer as unknown as TextLayer).map((e) => ({
+          ...e,
+          path: `${at}.${e.path}`,
+        })),
+      );
+    }
   }
   return out;
 }
@@ -272,25 +322,9 @@ function semanticErrors(scene: Scene): SceneError[] {
     }
 
     if (layer.type === "text") {
-      if (layer.text !== undefined && layer.spans !== undefined)
-        at(
-          "spans",
-          `"spans" and "text" are mutually exclusive — content lives in one place`,
-        );
-      else if (layer.text === undefined && layer.spans === undefined)
-        at("text", `text layers need "text" or "spans"`);
-
-      if (layer.color !== undefined && layer.fill !== undefined)
-        at("fill", `"fill" and "color" are mutually exclusive — one fill per layer`);
-
-      if (layer.fontSize !== undefined && layer.autoFit !== undefined)
-        at(
-          "autoFit",
-          `"autoFit" and "fontSize" are mutually exclusive — one sizing mode per layer`,
-        );
-      else if (layer.fontSize === undefined && layer.autoFit === undefined)
-        at("fontSize", `text layers need "fontSize" or "autoFit"`);
-
+      // The content/sizing/fill contract is the schema's (textContractErrors
+      // owns its messages); an inverted autoFit range is this pass's — no
+      // JSON Schema keyword compares two sibling values.
       if (layer.autoFit && layer.autoFit.min > layer.autoFit.max)
         at(
           "autoFit",
