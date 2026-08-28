@@ -207,12 +207,7 @@ export async function searchLibrary(lib: Library, query: string): Promise<Librar
  */
 export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoMeta> {
   const want = idOrAlias.toLowerCase();
-  const hit = lib.logos.find(
-    (l) =>
-      l.meta.id === want ||
-      l.meta.name.toLowerCase() === want ||
-      (l.meta.aliases ?? []).some((a) => a.toLowerCase() === want),
-  );
+  const hit = lib.logos.find((l) => matchesLogo(l, want));
   if (hit) return hit;
   throw new Error(
     `Unknown logo "${idOrAlias}". In library: ${
@@ -226,12 +221,27 @@ export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoM
  * nothing matches, so a typo'd --cutout fails loudly before compose.
  */
 export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta> {
-  const hit = lib.cutouts.find((c) => c.meta.id === id);
+  const hit = lib.cutouts.find(byId(id.toLowerCase()));
   if (hit) return hit;
   throw new Error(
     `Unknown cutout "${id}". In library: ${
       lib.cutouts.map((c) => c.meta.id).join(", ") ||
       "(none — add one with bun run library add-cutout <file> --id <name>)"
+    }`,
+  );
+}
+
+/**
+ * Resolve a plate id to its entry. Throws with the available options when
+ * nothing matches, so a typo'd plate reference fails loudly before compose.
+ */
+export function resolvePlate(lib: Library, id: string): LibraryEntry<PlateMeta> {
+  const hit = lib.plates.find(byId(id.toLowerCase()));
+  if (hit) return hit;
+  throw new Error(
+    `Unknown plate "${id}". In library: ${
+      lib.plates.map((p) => p.meta.id).join(", ") ||
+      "(none — adopt one with bun run library adopt <file> --id <name>)"
     }`,
   );
 }
@@ -246,7 +256,7 @@ export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta
 // changing the bytes creates a different identity and old pinned references
 // fail loudly instead of silently resolving to new content.
 
-/** Full sha-256 hex or an unambiguous prefix of one (8–64 hex chars). */
+/** Full sha-256 hex, or a prefix of one (8–64 hex chars) matched against the single already-resolved asset. */
 const HASH_PATTERN = /^[0-9a-f]{8,64}$/i;
 
 /** sha-256 of the exact bytes — an Asset's content identity. */
@@ -264,13 +274,28 @@ export interface AssetRef {
   hash?: string;
 }
 
+/** Restricts library-scope resolution to one asset kind. */
+export type AssetKind = "logo" | "plate" | "cutout";
+
+/** Match a logo by id, display name, or alias against a lowercased `want`. */
+function matchesLogo(entry: LibraryEntry<LogoMeta>, want: string): boolean {
+  return (
+    entry.meta.id === want ||
+    (entry.meta.name ?? "").toLowerCase() === want ||
+    (entry.meta.aliases ?? []).some((a) => a.toLowerCase() === want)
+  );
+}
+
+const byId = (want: string) => (e: LibraryEntry) => e.meta.id === want;
+
 /** Parse one asset reference into its scope and exact-content pin. */
 export function parseAssetRef(ref: string): AssetRef {
   const raw = ref.trim();
   if (!raw) throw new Error(`empty asset reference — expected an asset id or path`);
 
   const isLibrary =
-    raw.startsWith("library:") || (!raw.includes("/") && !raw.startsWith("."));
+    raw.startsWith("library:") ||
+    (!raw.includes("/") && !raw.includes("\\") && !raw.startsWith("."));
   const body = isLibrary ? raw.replace(/^library:/, "") : raw;
   if (isLibrary && !body) throw new Error(`asset reference "${ref}" names no library asset`);
 
@@ -342,29 +367,46 @@ function verifyIdentity(label: string, pinned: string | undefined, actual: strin
  * Resolve an asset reference to its exact content through the one contract
  * shared by library and project-local scopes. Fails with actionable errors on
  * missing content, identity mismatches, and unsupported types.
+ *
+ * `opts.kind` constrains library-scope resolution to one asset kind — callers
+ * whose slot has a kind invariant (e.g. `--cutout` must be a transparent-PNG
+ * subject) must pass it so a logo or plate id fails loudly instead of
+ * compositing the wrong content.
  */
 export async function resolveAsset(
   projectRoot: string,
   lib: Library,
   ref: string,
+  opts?: { kind?: AssetKind },
 ): Promise<ResolvedAsset> {
   const parsed = parseAssetRef(ref);
 
   if (parsed.scope === "library") {
     const want = parsed.id!.toLowerCase();
-    const entry =
-      lib.logos.find(
-        (l) =>
-          l.meta.id === want ||
-          (l.meta.name ?? "").toLowerCase() === want ||
-          (l.meta.aliases ?? []).some((a) => a.toLowerCase() === want),
-      ) ?? [...lib.plates, ...lib.cutouts].find((e) => e.meta.id === want);
+    let entry: LibraryEntry | undefined;
+    let pool: LibraryEntry[];
+    if (opts?.kind === "logo") {
+      entry = lib.logos.find((l) => matchesLogo(l, want));
+      pool = lib.logos;
+    } else if (opts?.kind === "plate") {
+      entry = lib.plates.find(byId(want));
+      pool = lib.plates;
+    } else if (opts?.kind === "cutout") {
+      entry = lib.cutouts.find(byId(want));
+      pool = lib.cutouts;
+    } else {
+      entry =
+        lib.logos.find((l) => matchesLogo(l, want)) ??
+        lib.plates.find(byId(want)) ??
+        lib.cutouts.find(byId(want));
+      pool = [...lib.logos, ...lib.plates, ...lib.cutouts];
+    }
     if (!entry) {
-      const all = [...lib.logos, ...lib.plates, ...lib.cutouts];
       throw new Error(
-        `unknown library asset "${parsed.id}". In library: ${
-          all.map((e) => e.meta.id).join(", ") || "(empty — add assets with bun run library)"
-        }`,
+        `unknown library ${opts?.kind ?? "asset"} "${parsed.id}". In library: ${
+          pool.map((e) => e.meta.id).join(", ") ||
+          "(empty — add assets with bun run library)"
+        } — for a project-local file, use a project-relative path like ./<file>`,
       );
     }
     const bytes = new Uint8Array(await readFile(entry.imagePath));

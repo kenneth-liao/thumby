@@ -290,24 +290,31 @@ for (const w of genWarnings) console.log(`  warn     ${w}`);
 
 // 2 — cutout, loaded once and reused across every variant.
 // A library id keeps compositions portable; a path still works for one-offs.
-// Ids and refs go through the one asset-resolution contract (optionally
-// pinned to exact content with <id>@<hash>); a filesystem path stays a
-// direct one-off at the CLI boundary.
+// Everything resolves through the one asset-resolution contract — library
+// ids/refs (optionally pinned with <id>@<hash>) and one-off files alike — so
+// every cutout gets a content identity in run.json. The slot has a kind
+// invariant: a cutout is a transparent-PNG subject, so library resolution is
+// constrained to cutouts and a logo/plate id fails loudly.
 let cutoutLibraryId: string | undefined;
+let cutoutHash: string | undefined;
 const cutout = await (async () => {
   if (!values.cutout) return undefined;
   const asPath = path.resolve(values.cutout);
-  if (await stat(asPath).then(
+  const lib = await loadLibrary();
+  // A file that exists beside the invocation is a one-off project asset;
+  // normalize it through the contract too (./ form forces project scope).
+  const isFile = await stat(asPath).then(
     (s) => s.isFile(),
     () => false,
-  )) {
-    return {
-      bytes: await readFile(asPath),
-      mediaType: `image/${path.extname(asPath).slice(1).toLowerCase() || "png"}`,
-    };
-  }
-  const asset = await resolveAsset(process.cwd(), await loadLibrary(), values.cutout);
+  );
+  const asset = await resolveAsset(
+    isFile ? path.dirname(asPath) : process.cwd(),
+    lib,
+    isFile ? `./${path.basename(asPath)}` : values.cutout,
+    isFile ? undefined : { kind: "cutout" },
+  );
   cutoutLibraryId = asset.id;
+  cutoutHash = asset.hash;
   return { bytes: asset.bytes, mediaType: asset.mediaType };
 })();
 const cutoutSide = (values["cutout-side"] ??
@@ -393,6 +400,7 @@ const record = {
     ? {
         path: cutoutLibraryId ? null : path.resolve(values.cutout!),
         libraryId: cutoutLibraryId ?? null,
+        hash: cutoutHash ?? null,
         side: cutoutSide,
         scale: parseFloat(values["cutout-scale"]!) || 0.95,
         x: parseFloat(values["cutout-x"]!) || 0,

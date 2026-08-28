@@ -223,6 +223,7 @@ describe("parseAssetRef", () => {
       scope: "project",
       path: "../elsewhere/hook.png",
     });
+    expect(parseAssetRef("media\\hook.png")).toEqual({ scope: "project", path: "media\\hook.png" });
   });
 
   it("splits a hex @<hash> off a project path but keeps non-hex @ in the path", () => {
@@ -363,5 +364,31 @@ describe("resolveAsset", () => {
     await put("logos/bad/logo.png", "PNGBYTES");
     await put("logos/bad/meta.json", JSON.stringify({ kind: "logo", id: "bad", tags: "not-an-array" }));
     await expect(scanLibrary(root)).rejects.toThrow(/logos\/bad\/meta\.json: tags/);
+  });
+
+  it("constrains library resolution to the requested kind", async () => {
+    await seedLogo("openai", { extra: '{ "aliases": ["chatgpt"] }' });
+    await put("cutouts/deadpan/cutout.png", "PNGBYTES");
+    await put(
+      "cutouts/deadpan/meta.json",
+      JSON.stringify({ kind: "cutout", id: "deadpan", tags: [], approval: "trial" }),
+    );
+    const lib = await scanLibrary(root);
+
+    const cutout = await resolveAsset(root, lib, "deadpan", { kind: "cutout" });
+    expect(cutout.kind).toBe("cutout");
+
+    // A logo id in a cutout slot fails loudly, naming only the cutout pool.
+    const err = await resolveAsset(root, lib, "openai", { kind: "cutout" }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err!.message).toMatch(/unknown library cutout "openai"/);
+    expect(err!.message).toContain("deadpan");
+    expect(err!.message).toContain("project-relative path");
+
+    // An explicit logo kind still matches by id, name, or alias.
+    expect((await resolveAsset(root, lib, "chatgpt", { kind: "logo" })).kind).toBe("logo");
+    expect((await resolveAsset(root, lib, "OPENAI", { kind: "logo" })).kind).toBe("logo");
   });
 });
