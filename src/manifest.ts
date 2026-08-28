@@ -20,6 +20,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
+import type { Optimization } from "./finalize.js";
 
 export const MANIFEST_VERSION = 1;
 
@@ -92,6 +93,8 @@ export interface ManifestOutput {
   sha256: string;
   warnings: string[];
   assets: ManifestAsset[];
+  /** Present when finalization optimized the render to meet the 2 MB output limit. */
+  optimization?: Optimization;
 }
 
 /** The batch contact sheet, when the render wrote one. */
@@ -124,6 +127,8 @@ export interface ManifestRenderInput {
   png: Buffer;
   /** The resolved scene this output rendered — the source of its asset identities. */
   resolved: ResolvedScene;
+  /** Present when finalization optimized this output (recorded verbatim). */
+  optimization?: Optimization;
 }
 
 /**
@@ -155,6 +160,7 @@ export function buildManifest(opts: {
       sha256: sha256(o.png),
       warnings: o.warnings,
       assets: [...o.resolved.assets.entries()].map(([layer, a]) => assetEntry(layer, a)),
+      ...(o.optimization ? { optimization: o.optimization } : {}),
     })),
     ...(opts.contact
       ? {
@@ -196,7 +202,7 @@ class ManifestErrors {
 }
 
 /** Known keys per object — unknown keys are rejected, never silently ignored. */
-const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets"]);
+const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets", "optimization"]);
 const ASSET_KEYS = new Set(["layer", "scope", "id", "kind", "path", "hash", "mediaType"]);
 
 function checkAsset(at: string, v: unknown, errs: ManifestErrors): void {
@@ -228,6 +234,21 @@ function checkOutput(at: string, v: unknown, errs: ManifestErrors): void {
     errs.at(`${at}.warnings`, `"warnings" must be an array of strings`);
   if (!Array.isArray(v.assets)) errs.at(`${at}.assets`, `"assets" must be an array`);
   else v.assets.forEach((a, i) => checkAsset(`${at}.assets[${i}]`, a, errs));
+  if (v.optimization !== undefined) {
+    const at2 = `${at}.optimization`;
+    if (!isObject(v.optimization)) errs.at(at2, `"optimization" must be an object`);
+    else {
+      for (const k of Object.keys(v.optimization))
+        if (!["stage", "bytesBefore", "bytesAfter"].includes(k))
+          errs.at(`${at2}.${k}`, `"${k}" is not a valid optimization field`);
+      if (v.optimization.stage !== "lossless" && v.optimization.stage !== "quantized")
+        errs.at(`${at2}.stage`, `"stage" must be "lossless" or "quantized"`);
+      if (!isPosInt(v.optimization.bytesBefore))
+        errs.at(`${at2}.bytesBefore`, `"bytesBefore" must be a positive integer`);
+      if (!isPosInt(v.optimization.bytesAfter))
+        errs.at(`${at2}.bytesAfter`, `"bytesAfter" must be a positive integer`);
+    }
+  }
 }
 
 /**
