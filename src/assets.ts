@@ -2,6 +2,13 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  scanIdentityKit,
+  searchIdentityFacets,
+  type IdentityKit,
+  type IdentityMeta,
+  type IdentityVocabulary,
+} from "./identity.js";
 
 /** The single canonical location of the asset library: `<repo>/assets`. */
 export const LIBRARY_ROOT = path.resolve(
@@ -67,7 +74,15 @@ export interface CutoutMeta {
 
 export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta;
 
-export interface LibraryEntry<M extends AssetMeta = AssetMeta> {
+/** Structural base every library meta satisfies — lets `matches` be generic. */
+interface BaseMeta {
+  id: string;
+  name?: string;
+  tags: string[];
+  aliases?: string[];
+}
+
+export interface LibraryEntry<M extends BaseMeta = AssetMeta> {
   meta: M;
   imagePath: string;
   /** "svg" images are recolourable in-card; rasters are shown as-is. */
@@ -80,10 +95,20 @@ export interface Library {
   logos: LibraryEntry<LogoMeta>[];
   plates: LibraryEntry<PlateMeta>[];
   cutouts: LibraryEntry<CutoutMeta>[];
+  /** Identity-kit sources (REQ-016) — searchable, not scene-resolvable. */
+  identity: LibraryEntry<IdentityMeta>[];
+  /** The kit's declared facet vocabulary, scan-derived from its index. */
+  identityVocabulary: IdentityVocabulary;
 }
 
 /** The canonical empty library — for callers resolving project-scope refs only. */
-export const EMPTY_LIBRARY: Library = { logos: [], plates: [], cutouts: [] };
+export const EMPTY_LIBRARY: Library = {
+  logos: [],
+  plates: [],
+  cutouts: [],
+  identity: [],
+  identityVocabulary: {},
+};
 
 const KIND_DIRS = ["logos", "plates", "cutouts"] as const;
 type KindDir = (typeof KIND_DIRS)[number];
@@ -158,10 +183,11 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
 }
 
 export async function scanLibrary(root: string): Promise<Library> {
-  const [logos, plates, cutouts] = await Promise.all([
+  const [logos, plates, cutouts, kit] = await Promise.all([
     scanKindDir(root, "logos"),
     scanKindDir(root, "plates"),
     scanKindDir(root, "cutouts"),
+    scanIdentityKit(root),
   ]);
   // An id is the vocabulary every reader uses; it must be unambiguous library-wide.
   const seen = new Map<string, string>();
@@ -169,6 +195,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     ["logos", logos],
     ["plates", plates],
     ["cutouts", cutouts],
+    ["identity", kit.entries],
   ] as const) {
     for (const e of entries) {
       const owner = seen.get(e.meta.id);
@@ -183,10 +210,12 @@ export async function scanLibrary(root: string): Promise<Library> {
     logos: logos as LibraryEntry<LogoMeta>[],
     plates: plates as LibraryEntry<PlateMeta>[],
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
+    identity: kit.entries,
+    identityVocabulary: kit.vocabulary,
   };
 }
 
-function matches(entry: LibraryEntry, q: string): boolean {
+function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {
   const m = entry.meta;
   const hay = [m.id, m.name, ...m.tags, ...("aliases" in m ? m.aliases ?? [] : [])]
     .join("\n")
@@ -194,13 +223,24 @@ function matches(entry: LibraryEntry, q: string): boolean {
   return hay.includes(q);
 }
 
-export async function searchLibrary(lib: Library, query: string): Promise<Library> {
+export async function searchLibrary(
+  lib: Library,
+  query: string,
+  opts?: { facets?: Record<string, string[]> },
+): Promise<Library> {
   const q = query.trim().toLowerCase();
-  if (!q) return lib;
+  const text = <M extends BaseMeta>(entries: LibraryEntry<M>[]) =>
+    q ? entries.filter((e) => matches(e, q)) : entries;
   return {
-    logos: lib.logos.filter((e) => matches(e, q)),
-    plates: lib.plates.filter((e) => matches(e, q)),
-    cutouts: lib.cutouts.filter((e) => matches(e, q)),
+    logos: text(lib.logos),
+    plates: text(lib.plates),
+    cutouts: text(lib.cutouts),
+    identity: text(
+      opts?.facets
+        ? searchIdentityFacets(lib.identity, opts.facets, lib.identityVocabulary)
+        : lib.identity,
+    ),
+    identityVocabulary: lib.identityVocabulary,
   };
 }
 

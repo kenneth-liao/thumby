@@ -51,16 +51,15 @@ async function seedLogo(id: string, opts?: { svg?: boolean; extra?: string }) {
 
 describe("scanLibrary", () => {
   it("returns empty on a missing or empty library without erroring", async () => {
-    expect(await scanLibrary(path.join(root, "nope"))).toEqual({
+    const empty = {
       logos: [],
       plates: [],
       cutouts: [],
-    });
-    expect(await scanLibrary(root)).toEqual({
-      logos: [],
-      plates: [],
-      cutouts: [],
-    });
+      identity: [],
+      identityVocabulary: {},
+    };
+    expect(await scanLibrary(path.join(root, "nope"))).toEqual(empty);
+    expect(await scanLibrary(root)).toEqual(empty);
   });
 
   it("finds logos and derives the image path", async () => {

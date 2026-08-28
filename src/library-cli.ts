@@ -11,9 +11,10 @@ import {
   type Library,
   type CutoutMeta,
 } from "./assets.js";
+import { parseFacets } from "./identity.js";
 
 const HELP = `
-library — the reusable asset library (plates + logos + cutouts)
+library — the reusable asset library (plates + logos + cutouts + identity sources)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
   bun run library resolve <ref> [options]     Resolve an asset reference to its exact content identity.
@@ -26,6 +27,15 @@ project-local assets: "<id>" or "library:<id>" resolves a library asset
 (logos answer to aliases); "<project-relative path>" resolves a file in a
 project. Add "@<sha-256-or-prefix>" to pin exact bytes — if the content
 changes, pinned references fail loudly instead of silently changing.
+
+Identity sources (the tagged headshot kit) are searchable by role facet:
+
+  bun run library list --facets pose=frontal --facets expression=teeth-smile
+
+  --facets <a=v>   list only: identity facet filter, repeatable. Facets on
+                   the same axis are alternatives; different axes must all
+                   match. Axes and values come from the kit index (pose,
+                   facing, expression, gesture, extras, outfit, framing).
 
 Options
   --name <str>     Display name (defaults to the id)
@@ -42,7 +52,8 @@ Options
 
 Library lives at ${LIBRARY_ROOT}. One directory per asset:
 logos/<id>/ holds logo.svg|png + meta.json; plates/<id>/ holds plate.png +
-meta.json; cutouts/<id>/ holds cutout.png + meta.json.
+meta.json; cutouts/<id>/ holds cutout.png + meta.json. Identity sources live
+in identity/kenny-headshots/ with their index.json as canonical metadata.
 `;
 
 function fail(msg: string): never {
@@ -65,6 +76,7 @@ const parse = () =>
       "derived-from": { type: "string" },
       "edit-prompt": { type: "string" },
       project: { type: "string" },
+      facets: { type: "string", multiple: true },
       sheet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -164,7 +176,20 @@ ${section(
 if (command === "list") {
   const lib = await scanOrDie();
   const query = positionals.slice(1).join(" ");
-  const found = await searchLibrary(lib, query);
+  let facets: Record<string, string[]> | undefined;
+  if (values.facets?.length) {
+    try {
+      facets = parseFacets(values.facets);
+    } catch (err) {
+      fail((err as Error).message);
+    }
+  }
+  let found: Library;
+  try {
+    found = await searchLibrary(lib, query, { facets });
+  } catch (err) {
+    fail((err as Error).message);
+  }
 
   if (values.sheet) await writeSheet(found);
 
@@ -186,6 +211,19 @@ if (command === "list") {
   for (const c of found.cutouts) {
     console.log(
       `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}  @${c.hash.slice(0, 12)}`,
+    );
+  }
+  console.log(`\n  Identity sources (${found.identity.length})`);
+  if (lib.identity.length === 0) {
+    console.log(`    (no identity kit in this library — assets/identity/kenny-headshots is absent)`);
+  } else if (found.identity.length === 0) {
+    // Explicit empty: a requested combination with no source is reported,
+    // never inferred or invented (REQ-016).
+    console.log(`    (none — no identity source matches the requested combination)`);
+  }
+  for (const s of found.identity) {
+    console.log(
+      `    ${s.meta.id.padEnd(22)} [${s.meta.tags.join(", ")}]  @${s.hash.slice(0, 12)}`,
     );
   }
   if (values.sheet && (found.logos.length || found.plates.length || found.cutouts.length))
