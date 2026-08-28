@@ -219,13 +219,21 @@ bun run scene init scene-template [--out p] # initialize a Scene from a template
 bun run scene validate scene.json          # field-specific errors before any render
 bun run scene inspect scene.json           # layer summary + resolved asset hashes
 bun run scene render scene.json [--out p]  # render to PNG (1280×720)
+bun run scene rerender out/scene.manifest.json  # re-render from its Render manifest
 ```
 
 All four print JSON on stdout (`{ "ok": true, … }` or
 `{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
 (ok / invalid or failed / usage). A successful render also carries
 `warnings` — non-fatal render signals naming the layer, e.g. an `autoFit`
-layer whose text still overflows at its `min` floor. `validate` and `inspect`
+layer whose text still overflows at its `min` floor — and writes a portable
+Render manifest beside the output(s) (`<out>.manifest.json`): the scene
+identity, selected variants, exact Asset identities, tool version, outputs,
+and warnings, with every path relative to the manifest itself. Moving the
+whole project directory changes nothing, so `scene rerender` rewrites the
+recorded outputs offline after relocation — but only after verifying the
+scene bytes and every recorded Asset identity; a missing or drifted input
+fails instead of silently rendering newer content. `validate` and `inspect`
 report `layerCount` counting every layer in the tree, group children
 included. Validation happens
 entirely before the browser starts: unsupported schema versions, duplicate
