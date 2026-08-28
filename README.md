@@ -152,6 +152,7 @@ directory with an image plus `meta.json`:
 |---|---|---|
 | logo | `assets/logos/<id>/` | `logo.svg` or `logo.png` + `meta.json` |
 | plate | `assets/plates/<id>/` | `plate.png` + `meta.json` |
+| object | `assets/objects/<id>/` | `object.png` (true-alpha) + `meta.json` |
 
 Logo `meta.json`: `{ "kind":"logo", "id":"openai", "name":"OpenAI",
 "tags":["ai"], "defaultColor":"#4FC3A1", "aliases":["chatgpt"] }`.
@@ -169,6 +170,24 @@ Adopt a generated plate so it outlives its run folder — provenance
 ```bash
 bun run library adopt out/punchy/plate-1.png --id neon-terminal --tags neon,dark
 ```
+
+**Object Assets** are isolated non-text objects (REQ-015) — a lamp, a
+terminal, a device — generated through the Generation Job contract and
+adopted as independently positionable Image layers. They enter the library
+only through `bun run jobs adopt`:
+
+```bash
+bun run jobs objects "a retro desk lamp"      # reviewable candidates
+bun run jobs adopt <jobId> <hash> --id lamp   # true alpha is verified at adoption
+```
+
+The adoption gate verifies a real alpha matte — meaningful transparent area
+and a meaningful opaque subject — so an opaque candidate is refused: RGB
+chroma-key color distance cannot qualify an output. An adopted object is one
+Asset, never the composite (models may produce isolated non-text Assets but
+never final text or the final composite — ADR-0004); it enters a Scene as its
+own Image layer, movable, resizable, hideable, and replaceable with no
+regeneration of anything else.
 
 Overlay specs reference library logos by id, so no absolute paths:
 

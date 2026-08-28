@@ -10,8 +10,7 @@ export type TextZone = "left" | "right" | "bottom" | "none";
  * plate: no lettering of its own, and deliberate empty space where our headline
  * will land.
  */
-function buildPrompt(subject: string, zone: TextZone, subjectless: boolean): string {
-  // With a cutout supplying the subject, the plate must stay a clean backdrop —
+function buildPrompt(subject: string, zone: TextZone, subjectless: boolean): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
   // asking for a subject here produces something that fights the cutout.
   const backdrop: Record<TextZone, string> = {
     left: "Keep the entire left half AND the centre of the frame completely empty and unobstructed. Confine every visual element to the far right edge.",
@@ -40,6 +39,24 @@ function buildPrompt(subject: string, zone: TextZone, subjectless: boolean): str
       : []),
     "Style: high contrast, saturated, punchy lighting, strong focal subject, clean readable silhouette at small sizes.",
     "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, and no UI elements anywhere in the image.",
+  ].join("\n");
+}
+
+/**
+ * An object request (REQ-015) is one isolated non-text object: a standalone
+ * asset for local compositing, never a scene or a composite (OOS-009).
+ * Transparency is requested in the prompt; whether the model actually returns
+ * a true-alpha PNG is verified at adoption — an opaque candidate is refused
+ * there, so nothing hinges on the model's compliance.
+ */
+function buildObjectPrompt(subject: string): string {
+  return [
+    subject,
+    "",
+    "Format: exactly one single isolated object, centered, with the entire object fully inside the frame and clear margins around it on all sides.",
+    "The object must be a standalone asset on a plain uniform background: no environment, no scene, no room, no surface it stands on, no hands or people holding or touching it.",
+    "Style: clean readable silhouette at small sizes, even studio-like lighting, crisp well-defined edges suitable for cutout isolation, true transparency around the object.",
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, no UI elements, and no composite thumbnail layout — this object will be composited into a design by local tooling.",
   ].join("\n");
 }
 
@@ -79,6 +96,15 @@ export interface GenerateOptions {
   temperature?: number;
 }
 
+/** An isolated-object generation request (REQ-015). */
+export interface GenerateObjectOptions {
+  subject: string;
+  model: string;
+  refs: string[];
+  count: number;
+  temperature?: number;
+}
+
 /**
  * Exact 16:9 for models that want an explicit size, so nothing gets cropped.
  * OpenAI requires both dimensions divisible by 16 — 1536x864 satisfies both.
@@ -98,41 +124,48 @@ export interface GeneratedPlate {
   spec: ModelSpec;
 }
 
-export async function generatePlates(
-  opts: GenerateOptions,
-): Promise<GenerateResult> {
-  const spec = resolveModel(opts.model);
+/**
+ * The one AI-SDK call core, shared by every generation workflow: call the
+ * resolved model `count` times with the given prompt, collect the images and
+ * warnings. Workflow differences live entirely in the caller's prompt.
+ */
+async function runGeneration(
+  spec: ModelSpec,
+  prompt: string,
+  refs: string[],
+  count: number,
+  temperature?: number,
+): Promise<{ plates: GeneratedPlate[]; warnings: string[] }> {
   const warnings: string[] = [];
-  const prompt = buildPrompt(opts.subject, opts.zone, opts.subjectless);
 
-  if (opts.refs.length && !spec.supportsRef) {
+  if (refs.length && !spec.supportsRef) {
     throw new Error(
-      `Model "${opts.model}" does not accept reference images. Use nano-pro or nano-2 for likeness.`,
+      `Model "${spec.id}" does not accept reference images. Use nano-pro or nano-2 for likeness.`,
     );
   }
 
-  if (opts.temperature != null && spec.kind !== "multimodal") {
+  if (temperature != null && spec.kind !== "multimodal") {
     throw new Error(
-      `--temperature only applies to multimodal models (Gemini); "${opts.model}" is an image model.`,
+      `--temperature only applies to multimodal models (Gemini); "${spec.id}" is an image model.`,
     );
   }
 
-  const runs = Array.from({ length: opts.count }, (_, i) => i);
+  const runs = Array.from({ length: count }, (_, i) => i);
 
   const plates = await Promise.all(
     runs.map(async (): Promise<GeneratedPlate> => {
       if (spec.kind === "multimodal") {
         const result = await generateText({
           model: spec.id,
-          ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
-          ...(opts.refs.length
+          ...(temperature != null ? { temperature } : {}),
+          ...(refs.length
             ? {
                 messages: [
                   {
                     role: "user" as const,
                     content: [
                       { type: "text" as const, text: prompt },
-                      ...(await refParts(opts.refs)),
+                      ...(await refParts(refs)),
                     ],
                   },
                 ],
@@ -158,8 +191,8 @@ export async function generatePlates(
 
       const result = await generateImage({
         model: spec.id,
-        ...(opts.refs.length
-          ? { prompt: { text: prompt, images: await refBytes(opts.refs) } }
+        ...(refs.length
+          ? { prompt: { text: prompt, images: await refBytes(refs) } }
           : { prompt }),
         ...(spec.sizing === "size"
           ? { size: LANDSCAPE_SIZE }
@@ -176,5 +209,47 @@ export async function generatePlates(
     }),
   );
 
-  return { plates, warnings: [...new Set(warnings)], fullPrompt: prompt };
+  return { plates, warnings: [...new Set(warnings)] };
+}
+
+export async function generatePlates(
+  opts: GenerateOptions,
+): Promise<GenerateResult> {
+  const prompt = buildPrompt(opts.subject, opts.zone, opts.subjectless);
+  const { plates, warnings } = await runGeneration(
+    resolveModel(opts.model),
+    prompt,
+    opts.refs,
+    opts.count,
+    opts.temperature,
+  );
+  return { plates, warnings, fullPrompt: prompt };
+}
+
+/**
+ * Isolated non-text object generation (REQ-015): the prompt asks for a
+ * standalone cutout-ready object; adoption verifies true alpha. This function
+ * adds one warning to the run record when the resolved model cannot be asked
+ * for transparency — the record stays honest about what the gate will accept.
+ */
+export async function generateObjects(
+  opts: GenerateObjectOptions,
+): Promise<GenerateResult> {
+  const spec = resolveModel(opts.model);
+  const prompt = buildObjectPrompt(opts.subject);
+  const { plates, warnings } = await runGeneration(
+    spec,
+    prompt,
+    opts.refs,
+    opts.count,
+    opts.temperature,
+  );
+  return {
+    plates,
+    warnings: [
+      ...warnings,
+      "object: transparency is requested in-prompt — adoption verifies true alpha and refuses opaque candidates (REQ-015)",
+    ],
+    fullPrompt: prompt,
+  };
 }

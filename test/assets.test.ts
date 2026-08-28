@@ -11,6 +11,7 @@ import {
   resolveAsset,
   parseAssetRef,
   contentHash,
+  writeObjectAsset,
 } from "../src/assets.js";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -55,6 +56,7 @@ describe("scanLibrary", () => {
       logos: [],
       plates: [],
       cutouts: [],
+      objects: [],
       identity: { present: false, entries: [], vocabulary: {} },
     };
     expect(await scanLibrary(path.join(root, "nope"))).toEqual(empty);
@@ -143,6 +145,65 @@ describe("scanLibrary", () => {
     expect(lib.cutouts[0]!.kind).toBe("raster");
     expect(lib.cutouts[0]!.meta.approval).toBe("trial");
   });
+
+  it("scans an object asset with its matting provenance", async () => {
+    await put(
+      `objects/lamp/meta.json`,
+      JSON.stringify({
+        kind: "object",
+        id: "lamp",
+        name: "Desk Lamp",
+        tags: ["lamp"],
+        subject: "a retro desk lamp",
+        model: "gpt-image",
+        matting: "true-alpha",
+      }),
+    );
+    await put(`objects/lamp/object.png`, "PNGBYTES");
+    const lib = await scanLibrary(root);
+    expect(lib.objects).toHaveLength(1);
+    expect(lib.objects[0]!.meta.id).toBe("lamp");
+    expect(lib.objects[0]!.meta.kind).toBe("object");
+    expect(lib.objects[0]!.imagePath).toBe(path.resolve(root, "objects/lamp/object.png"));
+  });
+});
+
+describe("writeObjectAsset", () => {
+  const meta = {
+    kind: "object" as const,
+    id: "lamp",
+    name: "Desk Lamp",
+    tags: ["lamp"],
+    matting: "true-alpha" as const,
+  };
+
+  it("writes the object image and meta exclusively", async () => {
+    const imagePath = await writeObjectAsset(root, "lamp", new TextEncoder().encode("PNGBYTES"), meta);
+    expect(imagePath).toBe(path.resolve(root, "objects/lamp/object.png"));
+    const lib = await scanLibrary(root);
+    expect(lib.objects[0]!.meta).toEqual(meta);
+    expect(lib.objects[0]!.hash).toBe(sha("PNGBYTES"));
+  });
+
+  it("never overwrites an existing asset of any kind", async () => {
+    await writeObjectAsset(root, "lamp", new TextEncoder().encode("FIRST"), meta);
+    await put(`logos/lamp/lamp.svg`, "<svg/>");
+    await put(`logos/lamp/meta.json`, JSON.stringify({ kind: "logo", id: "lamp", tags: [] }));
+    await expect(
+      writeObjectAsset(root, "lamp", new TextEncoder().encode("SECOND"), meta),
+    ).rejects.toThrow(/already exists/i);
+    // Remove the conflicting logo fixture — the library itself forbids the
+    // cross-kind duplicate — then confirm the first adoption's bytes stand.
+    await rm(path.join(root, "logos/lamp"), { recursive: true });
+    const lib = await scanLibrary(root);
+    expect(lib.objects[0]!.hash).toBe(sha("FIRST"));
+  });
+
+  it("rejects an invalid asset id", async () => {
+    expect(() => writeObjectAsset(root, "Bad_Id", new TextEncoder().encode("x"), meta)).toThrow(
+      /asset id/i,
+    );
+  });
 });
 
 describe("searchLibrary", () => {
@@ -185,6 +246,25 @@ describe("searchLibrary", () => {
     expect((await searchLibrary(lib, "zzz")).cutouts).toHaveLength(0);
     expect(resolveCutout(lib, "deadpan").meta.id).toBe("deadpan");
     expect(() => resolveCutout(lib, "nope")).toThrow(/Unknown cutout/);
+  });
+
+  it("matches objects by id, name, and tag", async () => {
+    await put(`objects/lamp/object.png`, "PNGBYTES");
+    await put(
+      `objects/lamp/meta.json`,
+      JSON.stringify({
+        kind: "object",
+        id: "lamp",
+        name: "Desk Lamp",
+        tags: ["retro"],
+        matting: "true-alpha",
+      }),
+    );
+    const lib = await scanLibrary(root);
+    expect((await searchLibrary(lib, "lamp")).objects).toHaveLength(1);
+    expect((await searchLibrary(lib, "retro")).objects).toHaveLength(1);
+    expect((await searchLibrary(lib, "desk")).objects).toHaveLength(1);
+    expect((await searchLibrary(lib, "zzz")).objects).toHaveLength(0);
   });
 
   it("empty query returns everything", async () => {
@@ -277,6 +357,20 @@ describe("resolveAsset", () => {
     expect(asset.kind).toBe("plate");
     expect(asset.mediaType).toBe("image/png");
     expect(asset.hash).toBe(sha("PNGBYTES"));
+  });
+
+  it("resolves an object asset through the one contract, kind-constrained or not", async () => {
+    await put("objects/lamp/object.png", "PNGBYTES");
+    await put(
+      "objects/lamp/meta.json",
+      JSON.stringify({ kind: "object", id: "lamp", tags: [], matting: "true-alpha" }),
+    );
+    const lib = await scanLibrary(root);
+    const generic = await resolveAsset(root, lib, "lamp");
+    expect(generic.kind).toBe("object");
+    expect(generic.mediaType).toBe("image/png");
+    const constrained = await resolveAsset(root, lib, "lamp", { kind: "object" });
+    expect(constrained.kind).toBe("object");
   });
 
   it("pins exact content with a full or prefix hash", async () => {

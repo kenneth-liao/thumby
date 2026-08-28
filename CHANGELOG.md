@@ -1,12 +1,27 @@
 # Changelog
 
-## [Unreleased]
+## [0.16.0]
+
+### Added
+
+- Isolated Object Assets (REQ-015): `bun run jobs objects <subject>` starts an object Generation Job — one standalone non-text object, no scene, no composite — through the same record/rerun/adopt lifecycle as plates (#14)
+- Object subjects are validated at the request boundary: subjects asking for logos, wordmarks, headlines, or other text are rejected with a rewording hint before any generation call — official logos come from sourced Assets and final text is rendered locally (ADR-0001, DEC-005/DEC-006) (#14)
+- True-alpha adoption gate: object candidates are verified to carry a real alpha matte (meaningful transparent area and a meaningful opaque subject) by direct PNG parsing (`src/alpha.ts`); an opaque or effectively opaque candidate is refused with an actionable error — RGB chroma-key color distance cannot qualify an output, and there is no keying path to guess with (#14)
+- `bun run jobs adopt` writes object candidates as Object Assets (`assets/objects/<id>/object.png`) with `matting: "true-alpha"` recorded, through the same exclusive, never-overwriting write path as every other generated asset kind; objects resolve through the one asset-reference contract, kind-constrained or not, and appear in `library list`, search, and the contact sheet (#14)
+- ADR-0004 restates the model boundary: models may produce isolated non-text source Assets (plates, objects) but never final text or the final composite — superseding ADR-0001's literal background-only phrasing while preserving its local-text invariant (REQ-024) (#14)
+
+## [0.15.1]
 
 ### Added
 
 - YouTube's 2 MB output limit is now enforced on every final Render (REQ-011): `bun run scene render` (base, variants, and rerender) checks each output against a 2,000,000-byte limit — a compliant render passes through without recompression, an oversized one is optimized locally and deterministically (lossless alpha-drop, per-row re-filtering, and maximum deflate first; then 256-color median-cut quantization with Floyd–Steinberg dithering — dimensions never change), and a render that cannot comply fails with its observed size and next steps (#5)
 - Successful renders report each output's `bytes`, plus an `optimization` record (stage, bytes before→after) when finalization optimized it; the same record is written to the Render manifest and survives manifest-backed rerender (#5)
 - Render manifests are now schema version 2 (`outputs[].optimization` is the only addition); the reader still accepts version 1 manifests, but 0.14 and earlier reject version 2 manifests naming the version — rerender with the tool version that wrote the manifest (#5, #35)
+
+## [0.15.0]
+
+### Added
+
 - Generation Jobs (REQ-013/REQ-014): the plate-generation flow is now a recorded lifecycle — `bun run jobs plates <subject> [--ref role:path …]` starts a job whose record (`out/jobs/<jobId>/job.json`) captures the typed request, typed references with their sha-256 content identities, per-run full effective prompt, resolved gateway model, cost (with a measured/estimated flag), warnings, and all candidates as content-addressed files (#13)
 - `bun run jobs rerun <jobId>` re-executes a job's recorded request and appends a new run to the lineage — prior runs and candidates are never replaced, and drifted or missing reference content fails loudly instead of silently making the rerun a different job (#13)
 - `bun run jobs adopt <jobId> <hash> --id <assetId>` adopts a candidate (exact hash or unique prefix) as a new immutable Plate Asset through the normal contract, carrying job provenance (`adoptedFrom: job:<id>#<hash>`, subject, prompt, model); candidate bytes are re-verified against their recorded identity before adoption, and `writePlateAsset` (assets.ts) refuses existing ids so an adopted asset can never be overwritten (#13)
