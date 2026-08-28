@@ -32,7 +32,12 @@ export const MANIFEST_VERSION = 2;
  * rejects v2 manifests naming the version — rerender with the tool version
  * that wrote the manifest.
  */
-const SUPPORTED_MANIFEST_VERSIONS: readonly number[] = [1, 2];
+const SUPPORTED_MANIFEST_VERSIONS = [1, 2] as const;
+/** The manifest schema versions this tool reads — derived from the tuple above. */
+export type ManifestVersion = (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
+
+const isManifestVersion = (v: unknown): v is ManifestVersion =>
+  typeof v === "number" && (SUPPORTED_MANIFEST_VERSIONS as readonly unknown[]).includes(v);
 
 /** sha-256 hex of the exact bytes — the identity a rerender verifies. */
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -117,7 +122,7 @@ export interface ManifestContact {
 
 /** The portable record of one render invocation. */
 export interface RenderManifest {
-  manifestVersion: (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
+  manifestVersion: ManifestVersion;
   tool: { name: string; version: string };
   schemaVersion: number;
   /** Scene identity: manifest-relative path plus the scene file's exact bytes. */
@@ -293,10 +298,7 @@ export async function readManifest(
     )
       errs.at(k, `"${k}" is not a valid manifest field`);
 
-  if (
-    typeof raw.manifestVersion !== "number" ||
-    !SUPPORTED_MANIFEST_VERSIONS.includes(raw.manifestVersion)
-  )
+  if (!isManifestVersion(raw.manifestVersion))
     errs.at(
       "manifestVersion",
       `unsupported manifestVersion ${JSON.stringify(raw.manifestVersion)} — this tool reads versions ${SUPPORTED_MANIFEST_VERSIONS.join(" and ")} only`,
