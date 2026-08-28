@@ -234,7 +234,10 @@ palette quantization — dimensions never change), and a render that cannot
 comply fails with its observed size. A successful render also writes a portable
 Render manifest beside the output(s) (`<out>.manifest.json`): the scene
 identity, selected variants, exact Asset identities, tool version, outputs,
-and warnings, with every path relative to the manifest itself. Moving the
+and warnings, with every path relative to the manifest itself. Manifests are
+schema version 2 (version 1 predates the optimization record); this tool reads
+both, but 0.14 and earlier reject version 2 manifests naming the version —
+rerender with the tool version that wrote the manifest. Moving the
 whole project directory changes nothing, so `scene rerender` rewrites the
 recorded outputs offline after relocation — but only after verifying the
 scene bytes and every recorded Asset identity; a missing or drifted input

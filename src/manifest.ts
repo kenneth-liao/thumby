@@ -22,7 +22,17 @@ import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
 import type { Optimization } from "./finalize.js";
 
-export const MANIFEST_VERSION = 1;
+export const MANIFEST_VERSION = 2;
+
+/**
+ * Versions this reader accepts. v2 added `outputs[].optimization` (the 2 MB
+ * finalization record); v1 manifests predate it and are read unchanged — the
+ * field is optional and self-validating, so one strict gate covers both.
+ * Downgrade limitation, documented in the README: a v1 reader (thumby ≤ 0.14)
+ * rejects v2 manifests naming the version — rerender with the tool version
+ * that wrote the manifest.
+ */
+const SUPPORTED_MANIFEST_VERSIONS: readonly number[] = [1, 2];
 
 /** sha-256 hex of the exact bytes — the identity a rerender verifies. */
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -107,7 +117,7 @@ export interface ManifestContact {
 
 /** The portable record of one render invocation. */
 export interface RenderManifest {
-  manifestVersion: typeof MANIFEST_VERSION;
+  manifestVersion: (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
   tool: { name: string; version: string };
   schemaVersion: number;
   /** Scene identity: manifest-relative path plus the scene file's exact bytes. */
@@ -283,10 +293,13 @@ export async function readManifest(
     )
       errs.at(k, `"${k}" is not a valid manifest field`);
 
-  if (raw.manifestVersion !== MANIFEST_VERSION)
+  if (
+    typeof raw.manifestVersion !== "number" ||
+    !SUPPORTED_MANIFEST_VERSIONS.includes(raw.manifestVersion)
+  )
     errs.at(
       "manifestVersion",
-      `unsupported manifestVersion ${JSON.stringify(raw.manifestVersion)} — this tool supports version ${MANIFEST_VERSION} only`,
+      `unsupported manifestVersion ${JSON.stringify(raw.manifestVersion)} — this tool reads versions ${SUPPORTED_MANIFEST_VERSIONS.join(" and ")} only`,
     );
   if (!isObject(raw.tool)) errs.at("tool", `"tool" must be an object with "name" and "version"`);
   else {

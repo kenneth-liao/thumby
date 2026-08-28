@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { deflateSync } from "node:zlib";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { deflateSync, inflateSync } from "node:zlib";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { finalizeRender, OUTPUT_LIMIT } from "../src/finalize.js";
@@ -116,6 +117,93 @@ function withBitDepth(png: Buffer, depth: number): Buffer {
 
 const BUSY = (w = 1280, h = 720) => makePng({ width: w, height: h, pixels: noisePixel(0x5eed) });
 
+/**
+ * A structured, representative thumbnail: flat background, a hero block,
+ * a light panel with dark text bars, hard diagonal stripes, and a vertical
+ * gradient band (which pushes it past 256 distinct colors, so quantization
+ * runs real median cut + dithering — not an exact-palette shortcut).
+ */
+function structuredPixel(x: number, y: number): [number, number, number, number] {
+  let r = 0x20, g = 0x40, b = 0x60;
+  if (x >= 100 && x < 540 && y >= 120 && y < 420) {
+    r = 0xff; g = 0x88; b = 0x00;
+  }
+  if (x >= 700 && x < 1200 && y >= 100 && y < 620) {
+    r = 0xf5; g = 0xf5; b = 0xf5;
+    if (y >= 140 && y < 180 && x >= 730 && x < 1170) { r = 0x11; g = 0x11; b = 0x11; }
+    if (y >= 220 && y < 260 && x >= 730 && x < 1090) { r = 0x11; g = 0x11; b = 0x11; }
+    if (y >= 300 && y < 340 && x >= 730 && x < 950) { r = 0x11; g = 0x11; b = 0x11; }
+  }
+  if (y >= 620) {
+    if ((x + y) % 200 < 100) { r = 0x00; g = 0xaa; b = 0x44; } else { r = 0xff; g = 0xff; b = 0xff; }
+  }
+  if (x >= 560 && x < 660) {
+    const t = Math.round((y / 719) * 255);
+    r = t; g = t; b = t;
+  }
+  return [r, g, b, 0xff];
+}
+
+/** Independently decode an indexed PNG (filter-0 rows + PLTE) to RGB for pixel assertions. */
+function decodeIndexed(png: Buffer): {
+  width: number;
+  height: number;
+  bitDepth: number;
+  colorType: number;
+  rgb: Buffer;
+} {
+  let pos = 8;
+  let plte: Buffer | undefined;
+  const idat: Buffer[] = [];
+  while (pos + 12 <= png.length) {
+    const len = png.readUInt32BE(pos);
+    const type = png.toString("latin1", pos + 4, pos + 8);
+    const data = Buffer.from(png.subarray(pos + 8, pos + 8 + len));
+    if (type === "PLTE") plte = data;
+    else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    pos += 12 + len;
+  }
+  if (!plte) throw new Error("test decoder: no PLTE chunk");
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  const raw = inflateSync(Buffer.concat(idat));
+  const rgb = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    if (raw[y * (width + 1)] !== 0) throw new Error(`test decoder: unexpected row filter ${raw[y * (width + 1)]}`);
+    for (let x = 0; x < width; x++) {
+      const idx = raw[y * (width + 1) + 1 + x]!;
+      rgb[(y * width + x) * 3] = plte[idx * 3]!;
+      rgb[(y * width + x) * 3 + 1] = plte[idx * 3 + 1]!;
+      rgb[(y * width + x) * 3 + 2] = plte[idx * 3 + 2]!;
+    }
+  }
+  return { width, height, bitDepth: png[24]!, colorType: png[25]!, rgb };
+}
+
+function regionMean(rgb: Buffer, x0: number, x1: number, y0: number, y1: number): [number, number, number] {
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      const at = (y * 1280 + x) * 3;
+      r += rgb[at]!; g += rgb[at + 1]!; b += rgb[at + 2]!; n++;
+    }
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+}
+
+function perPixelError(rgb: Buffer): { mean: number; max: number } {
+  let sum = 0, max = 0;
+  for (let y = 0; y < 720; y++)
+    for (let x = 0; x < 1280; x++) {
+      const [wr, wg, wb] = structuredPixel(x, y);
+      const at = (y * 1280 + x) * 3;
+      const e = (Math.abs(rgb[at]! - wr) + Math.abs(rgb[at + 1]! - wg) + Math.abs(rgb[at + 2]! - wb)) / 3;
+      sum += e;
+      if (e > max) max = e;
+    }
+  return { mean: sum / (1280 * 720), max };
+}
+
 // --- unit: the finalization contract ----------------------------------------
 
 describe("finalizeRender", () => {
@@ -168,6 +256,52 @@ describe("finalizeRender", () => {
     if (!a.ok || !b.ok) return;
     expect(b.png.equals(a.png)).toBe(true);
     expect(b.optimization).toEqual(a.optimization);
+  });
+
+  it("preserves the picture through quantization — regions, contrast, and error bounds hold on decode", () => {
+    const png = makePng({ width: 1280, height: 720, pixels: structuredPixel });
+    // Measured margins: input 28,871 bytes; lossless re-encode 6,428 (over);
+    // quantized 5,972 (under) — the limit sits between, forcing stage 2.
+    expect(png.length).toBeGreaterThan(6_200);
+    const r = finalizeRender(png, { limit: 6_200 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.optimization?.stage).toBe("quantized");
+    expect(r.png.length).toBeLessThanOrEqual(6_200);
+
+    // Independently decode the finalized PNG — size and geometry verbatim.
+    const d = decodeIndexed(r.png);
+    expect(d.width).toBe(1280);
+    expect(d.height).toBe(720);
+    expect(d.bitDepth).toBe(8);
+    expect(d.colorType).toBe(3);
+
+    // Key color regions survive (measured: exact — median cut weights the
+    // large flat areas into the palette).
+    const regions: [string, number, number, number, number, [number, number, number]][] = [
+      ["background", 20, 80, 20, 80, [0x20, 0x40, 0x60]],
+      ["hero block", 150, 500, 150, 400, [0xff, 0x88, 0x00]],
+      ["light panel", 1100, 1190, 400, 600, [0xf5, 0xf5, 0xf5]],
+      ["text bar", 740, 940, 310, 335, [0x11, 0x11, 0x11]],
+    ];
+    for (const [name, x0, x1, y0, y1, want] of regions) {
+      const got = regionMean(d.rgb, x0, x1, y0, y1);
+      for (let i = 0; i < 3; i++)
+        expect(Math.abs(got[i]! - want[i]!)).toBeLessThanOrEqual(4);
+    }
+    // Bounded error everywhere — an all-black or index-corrupted encoder
+    // fails here (measured: mean 0.00, max 1).
+    const { mean, max } = perPixelError(d.rgb);
+    expect(mean).toBeLessThanOrEqual(4);
+    expect(max).toBeLessThanOrEqual(8);
+    // The text keeps its dark-on-light contrast (original 228; measured 228).
+    const bar = regionMean(d.rgb, 740, 940, 310, 335);
+    const surround = regionMean(d.rgb, 740, 940, 360, 420);
+    expect(surround[0]! - bar[0]!).toBeGreaterThanOrEqual(180);
+    // The gradient keeps its direction — top darker than bottom.
+    const top = regionMean(d.rgb, 590, 630, 20, 60);
+    const bottom = regionMean(d.rgb, 590, 630, 660, 700);
+    expect(bottom[0]!).toBeGreaterThan(top[0]! + 100);
   });
 
   it("fails with the observed size and an actionable explanation when compliance is impossible", () => {
@@ -308,7 +442,7 @@ describe("scene render finalization", () => {
     });
   });
 
-  it("a variant batch finalizes every output", async () => {
+  it("a variant batch finalizes every output and publishes nothing on the way", async () => {
     await withProject(async (dir) => {
       await writeFile(path.join(dir, "noise.png"), BUSY());
       const scene = path.join(dir, "show.json");
@@ -328,16 +462,44 @@ describe("scene render finalization", () => {
           ],
           variants: {
             shift: { changes: [{ layer: "bg", set: { position: { x: 10, y: 0 } } }] },
+            zoom: { changes: [{ layer: "bg", set: { size: { width: 1408, height: 792 } } }] },
           },
         }),
       );
-      const r = await cliRun(["render", scene, "--variant", "shift"]);
+      const r = await cliRun(["render", scene, "--variant", "shift,zoom"]);
       expect(r.exitCode).toBe(0);
-      const out = r.output as { ok: boolean; outputs: { bytes: number; optimization?: { stage: string } }[] };
+      const out = r.output as {
+        ok: boolean;
+        outputs: { output: string; bytes: number; optimization?: { stage: string } }[];
+        manifest: string;
+      };
       expect(out.ok).toBe(true);
-      expect(out.outputs).toHaveLength(1);
-      expect(out.outputs[0]!.bytes).toBeLessThanOrEqual(OUTPUT_LIMIT);
-      expect(out.outputs[0]!.optimization?.stage).toBe("quantized");
+      expect(out.outputs).toHaveLength(2);
+      const files: string[] = [];
+      for (const o of out.outputs) {
+        expect(o.bytes).toBeLessThanOrEqual(OUTPUT_LIMIT);
+        expect(o.optimization?.stage).toBe("quantized");
+        const onDisk = await readFile(o.output);
+        expect(onDisk.length).toBe(o.bytes);
+        files.push(o.output);
+      }
+      // The batch manifest records every output — in order, each with its
+      // optimization record and the true content hash of the file on disk —
+      // plus the batch contact sheet.
+      const manifest = JSON.parse(await readFile(out.manifest, "utf8")) as {
+        outputs: { output: string; sha256: string; optimization?: { stage: string } }[];
+        contact?: { output: string };
+      };
+      expect(manifest.outputs).toHaveLength(2);
+      const manifestDir = path.dirname(out.manifest);
+      for (const [i, o] of manifest.outputs.entries()) {
+        expect(o.optimization?.stage).toBe("quantized");
+        expect(files[i]).toBe(path.resolve(manifestDir, o.output));
+        const bytes = await readFile(path.resolve(manifestDir, o.output));
+        expect(createHash("sha256").update(bytes).digest("hex")).toBe(o.sha256);
+      }
+      expect(manifest.contact).toBeDefined();
+      await readFile(path.resolve(manifestDir, manifest.contact!.output));
     });
   });
 });
