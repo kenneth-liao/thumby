@@ -222,7 +222,9 @@ All four print JSON on stdout (`{ "ok": true, … }` or
 `{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
 (ok / invalid or failed / usage). A successful render also carries
 `warnings` — non-fatal render signals naming the layer, e.g. an `autoFit`
-layer whose text still overflows at its `min` floor. Validation happens
+layer whose text still overflows at its `min` floor. `validate` and `inspect`
+report `layerCount` counting every layer in the tree, group children
+included. Validation happens
 entirely before the browser starts: unsupported schema versions, duplicate
 layer ids, missing assets, invalid transforms, and unknown layer types are
 rejected naming the offending field (e.g. `layers[2].asset`).

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { contentHash, scanLibrary, type Library } from "../src/assets.js";
+import type { Page } from "playwright";
+import { scanLibrary, type Library } from "../src/assets.js";
 import { getBrowser } from "../src/browser.js";
 import { loadScene, type Scene, type SceneLayer, type LoadResult } from "../src/scene.js";
 import { scenePageHtml, renderScene, type ImageSize } from "../src/scene-render.js";
@@ -337,7 +338,7 @@ const child = (over: Record<string, unknown> = {}): SceneLayer => {
     if (value === undefined) delete layer[key];
     else layer[key] = value;
   }
-  return layer as SceneLayer;
+  return layer as unknown as SceneLayer;
 };
 
 describe("group layers — validation", () => {
@@ -466,7 +467,7 @@ describe("group layers — markup", () => {
     expect(html.indexOf('data-layer-id="m"')).toBeLessThan(html.lastIndexOf("</div>"));
   });
 
-  it("emits scale on the group transform — after mirror, before nothing else", async () => {
+  it("emits scale first on the group transform — mirror innermost, then rotation", async () => {
     const html = await htmlOf([groupLayer([child()], { scale: 0.5, rotation: 15, mirror: true })]);
     expect(html).toContain("transform:scale(0.5) rotate(15deg) scaleX(-1)");
   });
@@ -615,7 +616,6 @@ const logoCardLayers = (over: Record<string, unknown> = {}): SceneLayer[] => [
         id: "card-label",
         type: "text",
         shape: undefined,
-        color: undefined,
         text: "LOGO",
         font: "Anton",
         fontSize: 64,
@@ -938,7 +938,13 @@ describe("committed logo-card fixture", () => {
 
   it("renders 1280×720 with the card composited over the backdrop", async () => {
     const raw = JSON.parse(await readFile(FIXTURE, "utf8"));
-    const { resolved } = await loadScene(path.dirname(FIXTURE), async () => ({ list: async () => [] }), raw).then(
+    const { resolved } = await loadScene(
+      path.dirname(FIXTURE),
+      async () => {
+        throw new Error("the logo-card fixture must not reference library assets");
+      },
+      raw,
+    ).then(
       (r) => {
         expect(r.ok).toBe(true);
         return r as Extract<LoadResult, { ok: true }>;

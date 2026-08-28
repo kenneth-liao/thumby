@@ -4,12 +4,12 @@
     "module": "Preserve",
     "moduleResolution": "bundler",
     "lib": ["ES2023", "DOM"],
-    "types": ["node"],
+    "types": ["node", "bun"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

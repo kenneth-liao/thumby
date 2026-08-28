@@ -366,12 +366,7 @@ export const SCENE_SCHEMA = {
             "Linear gradient fill across the layer box — mutually exclusive " +
             "with color. Angle in CSS degrees; default 90 (to right).",
         },
-        border: {
-          $ref: "#/definitions/stroke",
-          description:
-            "Outline centered on the shape's edge — half paints outside the " +
-            "layer box (like text stroke painting outside glyphs).",
-        },
+        border: { $ref: "#/definitions/border" },
       },
     },
     groupLayer: {
@@ -482,6 +477,23 @@ export const SCENE_SCHEMA = {
             color: { $ref: "#/definitions/color" },
           },
         },
+      },
+    },
+    border: {
+      type: "object",
+      additionalProperties: false,
+      required: ["width", "color"],
+      description:
+        "Shape outline, stroked centered on the edge — half paints inside " +
+        "the fill, half outside the layer box. Unlike text stroke, which " +
+        "paints entirely outside the glyphs.",
+      properties: {
+        width: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description: "Border width in px.",
+        },
+        color: { $ref: "#/definitions/color" },
       },
     },
     layer: {

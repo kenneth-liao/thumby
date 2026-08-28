@@ -169,7 +169,9 @@ describe("scene validation", () => {
   });
 
   it("rejects unknown layer types", async () => {
-    const errors = await loadErrors(scene([{ ...imageLayer(), type: "connector" }]));
+    const errors = await loadErrors(
+      scene([{ ...imageLayer(), type: "connector" } as unknown as SceneLayer]),
+    );
     expect(errors[0]!.path).toBe("layers[0].type");
     expect(errors[0]!.message).toMatch(/unknown layer type "connector"/);
   });
@@ -1062,7 +1064,7 @@ describe("scene cli", () => {
     const { exitCode, output } = await cliRun(["schema"]);
     expect(exitCode).toBe(0);
     const schema = output as typeof SCENE_SCHEMA;
-    const layer = schema.definitions?.layer as { oneOf?: { $ref: string }[] };
+    const layer = schema.definitions?.layer as unknown as { oneOf?: { $ref: string }[] };
     expect(layer.oneOf).toHaveLength(4);
     expect(schema.properties?.layers?.type).toBe("array");
   });

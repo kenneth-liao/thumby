@@ -19,7 +19,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { LIBRARY_ROOT, scanLibrary, type ResolvedAsset } from "./assets.js";
 import { SCENE_SCHEMA, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
-import { renderScene, layerTree } from "./scene-render.js";
+import { renderScene, countLayers } from "./scene-render.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
@@ -94,8 +94,9 @@ function summarizeLayer(
     summary.asset = layer.asset;
     if (layer.fit !== undefined) summary.fit = layer.fit;
     if (layer.crop !== undefined) summary.crop = layer.crop;
-    const resolved = assets?.get(layer.id as string);
-    if (resolved) summary.resolvedAsset = resolvedAssetSummary(resolved);
+    // Fail fast like the old `.get(id)!`: a validated image layer's asset is
+    // always resolved, so a miss here is a contract bug, not an empty field.
+    if (assets) summary.resolvedAsset = resolvedAssetSummary(assets.get(layer.id as string)!);
   } else if (layer.type === "shape") {
     summary.shape = layer.shape;
     if (layer.radius !== undefined) summary.radius = layer.radius;
@@ -175,7 +176,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return ok({
         ok: true,
         schemaVersion: SCHEMA_VERSION,
-        layerCount: [...layerTree(resolved.scene.layers)].length,
+        layerCount: countLayers(resolved.scene.layers),
       });
     }
 
@@ -184,7 +185,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         canvas: resolved.scene.canvas,
-        layerCount: [...layerTree(resolved.scene.layers)].length,
+        layerCount: countLayers(resolved.scene.layers),
         layers: resolved.scene.layers.map((layer) =>
           summarizeLayer(layer as unknown as Record<string, unknown>, resolved.assets),
         ),

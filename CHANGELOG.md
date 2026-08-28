@@ -9,8 +9,7 @@
 - Editable `effects` on image and group content — `blur`, `colorAdjust` (unmasked brightness/contrast/saturate/hue-rotate), `glow`, and `shadow` — emitted as one CSS filter chain in a fixed order (blur → colorAdjust → glow → shadow) with glow and shadow following the content's alpha (#11)
 - Validation recurses into groups: duplicate ids are detected across the whole layer tree and nested failures carry full field paths (`layers[1].layers[0].asset`); `inspect` summarizes shapes, groups (with nested child summaries and resolved assets), and effects (#11)
 - The grouped logo-card fixture `test/fixtures/shape-group/logo-card.json` — moved, resized, hidden, and restyled as one component in tests (#11)
-- Rich Text layers render reference-faithful typography from Scene data: multiple independently styled `spans` (mutually exclusive with plain `text`), explicit `weight`, `tracking` (em), `casing`, solid `color` or gradient `fill`, `stroke`, and `shadows` (#10)
-- Text layers size by fixed `fontSize` or shrink-to-fit `autoFit: {min, max}` — the render picks the largest size whose text stays inside the layer box, measured after bundled fonts resolve; a layer that still overflows at its `min` floor renders but is reported in the render result's `warnings` (#10)
+- Rich Text layers render reference-faithful typography from Scene data: multiple independently styled `spans` (mutually exclusive with plain `text`), explicit `weight`, `tracking` (em), `casing`, solid `color` or gradient `fill`, `stroke`, and `shadows` (#10)- Text layers size by fixed `fontSize` or shrink-to-fit `autoFit: {min, max}` — the render picks the largest size whose text stays inside the layer box, measured after bundled fonts resolve; a layer that still overflows at its `min` floor renders but is reported in the render result's `warnings` (#10)
 - The published `scene schema` document enforces the text XOR pairs itself (`text`/`spans`, `fontSize`/`autoFit`, `color`/`fill`), so a schema-only consumer rejects exactly what thumby rejects (#10)
 - Every explicit text value is emitted as an inline style on the element it styles, so preset or stylesheet specificity can never silently override Scene values; an explicit span color restates the fill over a gradient (`-webkit-text-fill-color`) (#10)
 - `bun run scene inspect` summarizes the rich text properties (`spans`, `autoFit`, `weight`, `tracking`, `casing`, `fill`, `stroke`, `shadows`) (#10)
@@ -24,10 +23,13 @@
 - Scenes are fully offline by construction — fonts and assets load as data URIs, no command touches the network, and nothing starts a Generation Job (#9)
 - One shared headless-Chromium launcher (`src/browser.ts`) now backs both the legacy compose path and Scene rendering (#9)
 
+### Changed
+
+- `bun run scene validate` and `inspect` report `layerCount` for the whole layer tree — group children included — instead of top-level layers only (#11)
+
 ### Fixed
 
 - `bun run test` runs each test file in its own `bun test --isolate` invocation: one process ran every file concurrently, and two render suites' concurrent Playwright browser work crashed the browser mid-run in roughly half of full-suite runs (#11, #27)
-- The shared headless Chromium memoizes on globalThis so isolated module registries launch one browser per process, not one per test file (#11, #27)
 - `--cutout <logo-or-plate-id>` silently composited the wrong asset kind where it previously failed loudly — library resolution at the cutout slot is now kind-constrained and rejects non-cutout ids (#24)
 - A one-off `--cutout <path>` bypassed the contract: `run.json` recorded no content hash and jpg/svg paths got invalid media types (`image/jpg`, `image/svg`); path one-offs now resolve through the same contract as ids, and an unsupported extension (e.g. `.gif`) now fails loudly instead of guessing a media type (#24)
 - Scene CLI failures escaped as stack traces instead of the documented `{ok:false,errors}` JSON — `run()` is now an error boundary, and the repo asset library is scanned only when a scene actually references a library asset (#25)

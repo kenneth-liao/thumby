@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "for f in test/*.test.ts; do bun test --isolate \"$f\" || exit 1; done",
+    "test": "for f in $(find test -name '*.test.ts'); do bun test --isolate \"$f\" || exit 1; done",
     "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
     "library": "bun run src/library-cli.ts"
@@ -15,6 +15,7 @@
     "playwright": "^1.62.1"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.0",
     "@types/node": "^26.3.0",
     "typescript": "^7.0.2"
   }

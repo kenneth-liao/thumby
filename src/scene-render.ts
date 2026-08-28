@@ -62,6 +62,13 @@ export function* layerTree(layers: SceneLayer[]): Generator<SceneLayer> {
   }
 }
 
+/** Total layers in the scene tree, including group children. */
+export function countLayers(layers: SceneLayer[]): number {
+  let count = 0;
+  for (const _ of layerTree(layers)) count++;
+  return count;
+}
+
 /** The bundled faces a scene's text layers and spans name, deduped in scene order. */
 export function sceneFaces(resolved: ResolvedScene): FontFace[] {
   const faces: FontFace[] = [];
@@ -293,7 +300,7 @@ function shapeMarkup(
     fill = g.fill;
   }
   const border = layer.border
-    ? ` stroke="${layer.border.color}" stroke-width="${layer.border.width}"`
+    ? ` stroke="${layer.border.color}" stroke-width="${n(layer.border.width)}"`
     : "";
   // Clamp here with CSS border-radius semantics — radius ≥ half the shorter
   // side is a pill — rather than the browser's SVG clamp, which narrows only
