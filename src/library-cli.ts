@@ -7,6 +7,7 @@ import {
   LIBRARY_ROOT,
   scanLibrary,
   searchLibrary,
+  resolveAsset,
   type Library,
   type CutoutMeta,
 } from "./assets.js";
@@ -15,9 +16,16 @@ const HELP = `
 library — the reusable asset library (plates + logos + cutouts)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
+  bun run library resolve <ref> [options]     Resolve an asset reference to its exact content identity.
   bun run library add-logo <file> --id <id>   Add a logo image to the library.
   bun run library adopt <plate.png> --id <id> Adopt a generated plate (with its provenance).
   bun run library add-cutout <file> --id <id> Add a transparent-PNG cutout.
+
+Asset references name exact content and work the same for library and
+project-local assets: "<id>" or "library:<id>" resolves a library asset
+(logos answer to aliases); "<project-relative path>" resolves a file in a
+project. Add "@<sha-256-or-prefix>" to pin exact bytes — if the content
+changes, pinned references fail loudly instead of silently changing.
 
 Options
   --name <str>     Display name (defaults to the id)
@@ -30,6 +38,7 @@ Options
   --derived-from <path>  Cutout: the approved original this was edited from
   --edit-prompt <str>    Cutout: the edit instruction that produced it
   --sheet          list only: also write assets/index.html contact sheet
+  --project <dir>  resolve only: project root for project-local refs (default: cwd)
 
 Library lives at ${LIBRARY_ROOT}. One directory per asset:
 logos/<id>/ holds logo.svg|png + meta.json; plates/<id>/ holds plate.png +
@@ -55,6 +64,7 @@ const parse = () =>
       approval: { type: "string" },
       "derived-from": { type: "string" },
       "edit-prompt": { type: "string" },
+      project: { type: "string" },
       sheet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -67,8 +77,8 @@ if (values.help || positionals.length === 0) {
 }
 
 const command = positionals[0]!;
-if (!["list", "add-logo", "adopt", "add-cutout"].includes(command)) {
-  fail(`Unknown command "${command}". Options: list | add-logo | adopt | add-cutout`);
+if (!["list", "resolve", "add-logo", "adopt", "add-cutout"].includes(command)) {
+  fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout`);
 }
 const csv = (s: string) => s.split(",").map((t) => t.trim()).filter(Boolean);
 
@@ -163,24 +173,49 @@ if (command === "list") {
   for (const l of found.logos) {
     const color = l.meta.defaultColor ? `  ${l.meta.defaultColor}` : "";
     const aliases = l.meta.aliases?.length ? `  aka ${l.meta.aliases.join(", ")}` : "";
-    console.log(`    ${l.meta.id.padEnd(22)} ${l.meta.name.padEnd(18)} [${l.meta.tags.join(", ")}]${color}${aliases}`);
+    console.log(`    ${l.meta.id.padEnd(22)} ${l.meta.name.padEnd(18)} [${l.meta.tags.join(", ")}]${color}${aliases}  @${l.hash.slice(0, 12)}`);
   }
   console.log(`\n  Plates (${found.plates.length})`);
   if (found.plates.length === 0) console.log(`    (none — adopt one with: bun run library adopt out/<run>/plate-1.png --id <name>)`);
   for (const p of found.plates) {
     const subject = p.meta.subject ? `  "${p.meta.subject.slice(0, 60)}${p.meta.subject.length > 60 ? "…" : ""}"` : "";
-    console.log(`    ${p.meta.id.padEnd(22)} [${p.meta.tags.join(", ")}]${subject}`);
+    console.log(`    ${p.meta.id.padEnd(22)} [${p.meta.tags.join(", ")}]${subject}  @${p.hash.slice(0, 12)}`);
   }
   console.log(`\n  Cutouts (${found.cutouts.length})`);
   if (found.cutouts.length === 0) console.log(`    (none — add one with: bun run library add-cutout <cutout.png> --id <name> --tags <role facets>)`);
   for (const c of found.cutouts) {
     console.log(
-      `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}`,
+      `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}  @${c.hash.slice(0, 12)}`,
     );
   }
   if (values.sheet && (found.logos.length || found.plates.length || found.cutouts.length))
     console.log(`\n  sheet    ${path.relative(process.cwd(), path.join(LIBRARY_ROOT, "index.html"))}`);
   console.log("");
+  process.exit(0);
+}
+
+if (command === "resolve") {
+  const lib = await scanOrDie();
+  const ref = positionals[1];
+  if (!ref)
+    fail(
+      `resolve needs an asset reference — an id (optionally "<id>@<hash>"), "library:<id>@<hash>", or a project-relative path`,
+    );
+  const projectRoot = values.project ? path.resolve(values.project!) : process.cwd();
+  try {
+    const asset = await resolveAsset(projectRoot, lib, ref);
+    const identity = asset.id ?? asset.path!;
+    console.log(
+      `\n  scope      ${asset.scope}` +
+        `\n  identity   ${identity}@${asset.hash}` +
+        `\n  kind       ${asset.kind ?? "(file)"}` +
+        `\n  media      ${asset.mediaType}` +
+        `\n  bytes      ${asset.bytes.byteLength}` +
+        `\n  hash       sha-256:${asset.hash}\n`,
+    );
+  } catch (err) {
+    fail((err as Error).message);
+  }
   process.exit(0);
 }
 

@@ -1,4 +1,5 @@
 import { readFile, readdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,6 +72,8 @@ export interface LibraryEntry<M extends AssetMeta = AssetMeta> {
   imagePath: string;
   /** "svg" images are recolourable in-card; rasters are shown as-is. */
   kind: "svg" | "raster";
+  /** sha-256 of the image bytes — the exact-content identity, derived at scan time. */
+  hash: string;
 }
 
 export interface Library {
@@ -135,10 +138,16 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
         throw new Error(
           `${dir}/meta.json: id "${meta.id}" does not match directory name "${d}"`,
         );
+      if (meta.tags !== undefined &&
+        (!Array.isArray(meta.tags) || !meta.tags.every((t) => typeof t === "string")))
+        throw new Error(`${dir}/meta.json: tags must be an array of strings`);
+      if (meta.name !== undefined && typeof meta.name !== "string")
+        throw new Error(`${dir}/meta.json: name must be a string`);
       entries.push({
         meta,
         imagePath: imgResult,
         kind: imgResult.toLowerCase().endsWith(".svg") ? "svg" : "raster",
+        hash: contentHash(new Uint8Array(await readFile(imgResult))),
       });
     }
     return entries;
@@ -198,12 +207,7 @@ export async function searchLibrary(lib: Library, query: string): Promise<Librar
  */
 export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoMeta> {
   const want = idOrAlias.toLowerCase();
-  const hit = lib.logos.find(
-    (l) =>
-      l.meta.id === want ||
-      l.meta.name.toLowerCase() === want ||
-      (l.meta.aliases ?? []).some((a) => a.toLowerCase() === want),
-  );
+  const hit = lib.logos.find((l) => matchesLogo(l, want));
   if (hit) return hit;
   throw new Error(
     `Unknown logo "${idOrAlias}". In library: ${
@@ -217,7 +221,7 @@ export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoM
  * nothing matches, so a typo'd --cutout fails loudly before compose.
  */
 export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta> {
-  const hit = lib.cutouts.find((c) => c.meta.id === id);
+  const hit = lib.cutouts.find(byId(id.toLowerCase()));
   if (hit) return hit;
   throw new Error(
     `Unknown cutout "${id}". In library: ${
@@ -225,4 +229,198 @@ export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta
       "(none — add one with bun run library add-cutout <file> --id <name>)"
     }`,
   );
+}
+
+// --- the asset resolution contract ------------------------------------------
+//
+// One runtime-validated contract for both scopes: reusable-library assets
+// (`<id>` / `library:<id>`) and project-local assets (a project-relative
+// path). A reference may pin exact content with `@<hash>` — the sha-256 of
+// the bytes, full or an unambiguous prefix. The file's bytes are the single
+// source of truth: the hash is always derived, never stored in meta.json, so
+// changing the bytes creates a different identity and old pinned references
+// fail loudly instead of silently resolving to new content.
+
+/** Full sha-256 hex, or a prefix of one (8–64 hex chars) matched against the single already-resolved asset. */
+const HASH_PATTERN = /^[0-9a-f]{8,64}$/i;
+
+/** sha-256 of the exact bytes — an Asset's content identity. */
+export function contentHash(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export interface AssetRef {
+  scope: "library" | "project";
+  /** Library scope: the asset id (an untyped ref as written, before aliasing). */
+  id?: string;
+  /** Project scope: the referenced path as written (relative or absolute). */
+  path?: string;
+  /** Exact-content pin: sha-256 hex or its prefix, if the ref carried one. */
+  hash?: string;
+}
+
+/** Restricts library-scope resolution to one asset kind. */
+export type AssetKind = "logo" | "plate" | "cutout";
+
+/** Match a logo by id, display name, or alias against a lowercased `want`. */
+function matchesLogo(entry: LibraryEntry<LogoMeta>, want: string): boolean {
+  return (
+    entry.meta.id === want ||
+    (entry.meta.name ?? "").toLowerCase() === want ||
+    (entry.meta.aliases ?? []).some((a) => a.toLowerCase() === want)
+  );
+}
+
+const byId = (want: string) => (e: LibraryEntry) => e.meta.id === want;
+
+/** Parse one asset reference into its scope and exact-content pin. */
+export function parseAssetRef(ref: string): AssetRef {
+  const raw = ref.trim();
+  if (!raw) throw new Error(`empty asset reference — expected an asset id or path`);
+
+  const isLibrary =
+    raw.startsWith("library:") ||
+    (!raw.includes("/") && !raw.includes("\\") && !raw.startsWith("."));
+  const body = isLibrary ? raw.replace(/^library:/, "") : raw;
+  if (isLibrary && !body) throw new Error(`asset reference "${ref}" names no library asset`);
+
+  // A trailing @<hash> pins exact content. A `@` never appears in an asset
+  // id, so any tail after @ on a library ref must be a hash; on a project
+  // path a hex tail is a pin, and any other `@` is simply part of the filename.
+  const at = body.lastIndexOf("@");
+  if (at >= 0) {
+    const tail = body.slice(at + 1);
+    if (HASH_PATTERN.test(tail)) {
+      const head = body.slice(0, at);
+      const hash = tail.toLowerCase();
+      return isLibrary
+        ? { scope: "library", id: head, hash }
+        : { scope: "project", path: head, hash };
+    }
+    if (isLibrary)
+      throw new Error(
+        `invalid content hash "@${tail}" in asset reference "${ref}" — expected 8–64 hex chars (a sha-256 or its prefix)`,
+      );
+  }
+
+  return isLibrary
+    ? { scope: "library", id: body }
+    : { scope: "project", path: body };
+}
+
+const MEDIA_TYPES: Record<string, string> = {
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
+
+function mediaTypeFor(file: string): string {
+  const mt = MEDIA_TYPES[path.extname(file).toLowerCase()];
+  if (!mt)
+    throw new Error(
+      `unsupported asset image type "${path.extname(file)}" (${file}) — use svg, png, jpg, or webp`,
+    );
+  return mt;
+}
+
+/** A validated resolution: exact bytes plus the identity they hash to. */
+export interface ResolvedAsset {
+  scope: "library" | "project";
+  /** Library scope: the resolved asset id (post-alias). */
+  id?: string;
+  /** Library scope: the asset kind. */
+  kind?: "logo" | "plate" | "cutout";
+  /** Project scope: the path relative to the project root, in portable `/` form. */
+  path?: string;
+  bytes: Uint8Array;
+  mediaType: string;
+  /** sha-256 of the resolved bytes. */
+  hash: string;
+}
+
+function verifyIdentity(label: string, pinned: string | undefined, actual: string): void {
+  if (!pinned || actual.startsWith(pinned)) return;
+  throw new Error(
+    `asset content mismatch for ${label}: reference pins "@${pinned}" but the content now hashes to "@${actual}".\n` +
+      `The bytes changed; re-pin the reference to ${label}@${actual} or accept the new content.`,
+  );
+}
+
+/**
+ * Resolve an asset reference to its exact content through the one contract
+ * shared by library and project-local scopes. Fails with actionable errors on
+ * missing content, identity mismatches, and unsupported types.
+ *
+ * `opts.kind` constrains library-scope resolution to one asset kind — callers
+ * whose slot has a kind invariant (e.g. `--cutout` must be a transparent-PNG
+ * subject) must pass it so a logo or plate id fails loudly instead of
+ * compositing the wrong content.
+ */
+export async function resolveAsset(
+  projectRoot: string,
+  lib: Library,
+  ref: string,
+  opts?: { kind?: AssetKind },
+): Promise<ResolvedAsset> {
+  const parsed = parseAssetRef(ref);
+
+  if (parsed.scope === "library") {
+    const want = parsed.id!.toLowerCase();
+    let entry: LibraryEntry | undefined;
+    let pool: LibraryEntry[];
+    if (opts?.kind === "logo") {
+      entry = lib.logos.find((l) => matchesLogo(l, want));
+      pool = lib.logos;
+    } else if (opts?.kind === "plate") {
+      entry = lib.plates.find(byId(want));
+      pool = lib.plates;
+    } else if (opts?.kind === "cutout") {
+      entry = lib.cutouts.find(byId(want));
+      pool = lib.cutouts;
+    } else {
+      entry =
+        lib.logos.find((l) => matchesLogo(l, want)) ??
+        lib.plates.find(byId(want)) ??
+        lib.cutouts.find(byId(want));
+      pool = [...lib.logos, ...lib.plates, ...lib.cutouts];
+    }
+    if (!entry) {
+      throw new Error(
+        `unknown library ${opts?.kind ?? "asset"} "${parsed.id}". In library: ${
+          pool.map((e) => e.meta.id).join(", ") ||
+          "(empty — add assets with bun run library)"
+        } — for a project-local file, use a project-relative path like ./<file>`,
+      );
+    }
+    const bytes = new Uint8Array(await readFile(entry.imagePath));
+    const hash = contentHash(bytes);
+    verifyIdentity(entry.meta.id, parsed.hash, hash);
+    return {
+      scope: "library",
+      id: entry.meta.id,
+      kind: entry.meta.kind,
+      bytes,
+      mediaType: mediaTypeFor(entry.imagePath),
+      hash,
+    };
+  }
+
+  const abs = path.resolve(projectRoot, parsed.path!);
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await readFile(abs));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR")
+      throw new Error(
+        `missing project asset "${parsed.path}" — no file at ${abs}`,
+      );
+    throw err;
+  }
+  const hash = contentHash(bytes);
+  const rel = path.relative(projectRoot, abs).split(path.sep).join("/");
+  verifyIdentity(rel, parsed.hash, hash);
+  return { scope: "project", path: rel, bytes, mediaType: mediaTypeFor(abs), hash };
 }
