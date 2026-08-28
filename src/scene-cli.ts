@@ -89,10 +89,18 @@ function summarizeLayer(layer: Record<string, unknown>): Record<string, unknown>
     if (layer.fit !== undefined) summary.fit = layer.fit;
     if (layer.crop !== undefined) summary.crop = layer.crop;
   } else {
-    summary.text = layer.text;
+    if (layer.text !== undefined) summary.text = layer.text;
+    if (layer.spans !== undefined) summary.spans = layer.spans;
     summary.font = layer.font;
-    summary.fontSize = layer.fontSize;
+    if (layer.fontSize !== undefined) summary.fontSize = layer.fontSize;
+    if (layer.autoFit !== undefined) summary.autoFit = layer.autoFit;
+    if (layer.weight !== undefined) summary.weight = layer.weight;
+    if (layer.tracking !== undefined) summary.tracking = layer.tracking;
+    if (layer.casing !== undefined) summary.casing = layer.casing;
     if (layer.color !== undefined) summary.color = layer.color;
+    if (layer.fill !== undefined) summary.fill = layer.fill;
+    if (layer.stroke !== undefined) summary.stroke = layer.stroke;
+    if (layer.shadows !== undefined) summary.shadows = layer.shadows;
     if (layer.align !== undefined) summary.align = layer.align;
     if (layer.lineHeight !== undefined) summary.lineHeight = layer.lineHeight;
   }

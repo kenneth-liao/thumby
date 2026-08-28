@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -89,6 +89,12 @@ const textLayer = (over: Record<string, unknown> = {}): SceneLayer =>
     size: { width: 900, height: 180 },
     ...over,
   }) as SceneLayer;
+
+/** A text layer whose content is styled spans instead of plain text. */
+const spanLayer = (
+  spans: Record<string, unknown>[],
+  over: Record<string, unknown> = {},
+): SceneLayer => textLayer({ text: undefined, spans, ...over }) as SceneLayer;
 
 const scene = (layers: SceneLayer[]): Scene => ({
   schemaVersion: 1,
@@ -376,14 +382,98 @@ describe("scene validation", () => {
     const noFont = await loadErrors(scene([textLayer({ font: undefined })]));
     expect(noFont[0]!.path).toBe("layers[0].font");
     expect(noFont[0]!.message).toMatch(/"font" is required on text layers/);
-    const noSize = await loadErrors(scene([textLayer({ fontSize: undefined })]));
-    expect(noSize[0]!.path).toBe("layers[0].fontSize");
-    expect(noSize[0]!.message).toMatch(/"fontSize" is required on text layers/);
+  });
+
+  it("rejects a text layer with neither fontSize nor autoFit", async () => {
+    const errors = await loadErrors(scene([textLayer({ fontSize: undefined })]));
+    expect(errors[0]!.path).toBe("layers[0].fontSize");
+    expect(errors[0]!.message).toMatch(/"fontSize" or "autoFit"/);
+  });
+
+  it("rejects a layer with both fontSize and autoFit", async () => {
+    const errors = await loadErrors(
+      scene([textLayer({ autoFit: { min: 20, max: 120 } })]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].autoFit");
+    expect(errors[0]!.message).toMatch(/mutually exclusive/);
+  });
+
+  it("rejects an inverted autoFit range", async () => {
+    const errors = await loadErrors(
+      scene([textLayer({ fontSize: undefined, autoFit: { min: 120, max: 20 } })]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].autoFit");
+    expect(errors[0]!.message).toMatch(/min .* max/);
   });
 
   it("rejects non-positive fontSize", async () => {
     const errors = await loadErrors(scene([textLayer({ fontSize: 0 })]));
     expect(errors[0]!.path).toBe("layers[0].fontSize");
+  });
+
+  it("rejects both text and spans — content lives in one place", async () => {
+    const errors = await loadErrors(
+      scene([textLayer({ spans: [{ text: "Run" }] })]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].spans");
+    expect(errors[0]!.message).toMatch(/mutually exclusive/);
+  });
+
+  it("rejects a text layer with neither text nor spans", async () => {
+    const errors = await loadErrors(scene([textLayer({ text: undefined })]));
+    expect(errors[0]!.path).toBe("layers[0].text");
+    expect(errors[0]!.message).toMatch(/"text" or "spans"/);
+  });
+
+  it("requires text on every span", async () => {
+    const errors = await loadErrors(
+      scene([spanLayer([{ color: "#fff" }])]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].spans[0].text");
+    expect(errors[0]!.message).toMatch(/"text" is required on spans/);
+  });
+
+  it("rejects unknown span properties", async () => {
+    const errors = await loadErrors(
+      scene([spanLayer([{ text: "Run", swirl: 2 }])]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].spans[0].swirl");
+    expect(errors[0]!.message).toMatch(/"swirl" is not a valid span property/);
+  });
+
+  it("rejects empty span text", async () => {
+    const errors = await loadErrors(scene([spanLayer([{ text: "" }])]));
+    expect(errors[0]!.path).toBe("layers[0].spans[0].text");
+  });
+
+  it("rejects an unknown span font naming the bundled families", async () => {
+    const errors = await loadErrors(
+      scene([spanLayer([{ text: "Run", font: "Comic Sans" }])]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].spans[0].font");
+    expect(errors[0]!.message).toMatch(/unknown font family "Comic Sans"/);
+  });
+
+  it("rejects out-of-range weight", async () => {
+    const zero = await loadErrors(scene([textLayer({ weight: 0 })]));
+    expect(zero[0]!.path).toBe("layers[0].weight");
+    const big = await loadErrors(scene([textLayer({ weight: 1001 })]));
+    expect(big[0]!.path).toBe("layers[0].weight");
+  });
+
+  it("rejects an unknown casing value", async () => {
+    const errors = await loadErrors(scene([textLayer({ casing: "small-caps" })]));
+    expect(errors[0]!.path).toBe("layers[0].casing");
+  });
+
+  it("rejects a layer with both color and fill — one fill per layer", async () => {
+    const errors = await loadErrors(
+      scene([
+        textLayer({ color: "#fff", fill: { from: "#ff0000", to: "#0000ff" } }),
+      ]),
+    );
+    expect(errors[0]!.path).toBe("layers[0].fill");
+    expect(errors[0]!.message).toMatch(/mutually exclusive/);
   });
 });
 
@@ -493,6 +583,116 @@ describe("scene page html", () => {
     expect(html).toMatch(/@font-face \{ font-family: "Anton"/);
     expect(html).not.toMatch(/Bevan/);
   });
+
+  it("ships @font-face bytes for span font overrides too — no silent fallback", async () => {
+    const html = await htmlOf([
+      spanLayer([{ text: "quiet " }, { text: "LOUD", font: "Archivo Black" }]),
+    ]);
+    expect(html).toMatch(/@font-face \{ font-family: "Anton"/);
+    expect(html).toMatch(/@font-face \{ font-family: "Archivo Black"/);
+    expect(html).toMatch(/font-family:'Archivo Black'/);
+  });
+
+  it("renders spans as inline elements styled inside the layer", async () => {
+    const html = await htmlOf([
+      spanLayer([{ text: "Big " }, { text: "news", color: "#00c2ff", fontSize: 96 }]),
+    ]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    // Layer-level typography stays on the layer element; spans carry only their overrides.
+    expect(el).toMatch(/font-family:'Anton'/);
+    expect(el).toMatch(/font-size:120px/);
+    expect(el).toMatch(/<span>Big <\/span>/);
+    expect(el).toMatch(/<span style="font-size:96px;color:#00c2ff">news<\/span>/);
+  });
+
+  it("escapes HTML-significant characters in span content", async () => {
+    const html = await htmlOf([spanLayer([{ text: "a <b> & c" }])]);
+    expect(html).toContain("<span>a &lt;b&gt; &amp; c</span>");
+    expect(html).not.toContain("<b>");
+  });
+
+  it("applies weight, tracking, and casing as inline layer styles", async () => {
+    const html = await htmlOf(
+      [textLayer({ weight: 900, tracking: -0.02, casing: "upper" })],
+    );
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).toMatch(/font-weight:900/);
+    expect(el).toMatch(/letter-spacing:-0\.02em/);
+    expect(el).toMatch(/text-transform:uppercase/);
+  });
+
+  it("leaves casing and tracking off when unset", async () => {
+    const html = await htmlOf([textLayer()]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).not.toMatch(/text-transform/);
+    expect(el).not.toMatch(/letter-spacing/);
+  });
+
+  it("spans override weight, tracking, and casing independently", async () => {
+    const html = await htmlOf([
+      spanLayer([
+        { text: "quiet " },
+        { text: "LOUD", weight: 800, tracking: 0.1, casing: "upper" },
+      ]),
+    ]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).toMatch(/<span>quiet <\/span>/);
+    expect(el).toMatch(
+      /<span style="font-weight:800;letter-spacing:0\.1em;text-transform:uppercase">LOUD<\/span>/,
+    );
+  });
+
+  it("paints a gradient fill through background-clip, not color", async () => {
+    const html = await htmlOf([
+      textLayer({ color: undefined, fill: { from: "#ff0000", to: "#0000ff", angle: 45 } }),
+    ]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).toMatch(/color:transparent/);
+    expect(el).toMatch(/background:linear-gradient\(45deg,#ff0000,#0000ff\)/);
+    expect(el).toMatch(/-webkit-background-clip:text/);
+    expect(el).toMatch(/background-clip:text/);
+    expect(el).toMatch(/-webkit-text-fill-color:transparent/);
+    expect(el).not.toMatch(/color:#000/);
+  });
+
+  it("defaults the gradient angle to left→right", async () => {
+    const html = await htmlOf([
+      textLayer({ color: undefined, fill: { from: "#ff0000", to: "#0000ff" } }),
+    ]);
+    expect(html).toMatch(/linear-gradient\(90deg,#ff0000,#0000ff\)/);
+  });
+
+  it("restates an explicit span color over a gradient fill — the clip would hide it", async () => {
+    const html = await htmlOf([
+      spanLayer(
+        [{ text: "hot", color: "#ffd400" }, { text: " cold" }],
+        { color: undefined, fill: { from: "#ff0000", to: "#0000ff" } },
+      ),
+    ]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).toMatch(/-webkit-text-fill-color:#ffd400/);
+    // The colorless span keeps the gradient.
+    expect(el).toMatch(/<span> cold<\/span>/);
+    expect(el).not.toMatch(/<span style="color:#ffd400">/);
+  });
+
+  it("strokes outside the glyphs and lists shadows back to front", async () => {
+    const html = await htmlOf([
+      textLayer({
+        stroke: { width: 8, color: "#111318" },
+        shadows: [
+          { x: 0, y: 6, blur: 0, color: "#ff00ff" },
+          { x: 2, y: 2, blur: 18, color: "#000000" },
+        ],
+      }),
+    ]);
+    const el = html.slice(html.indexOf('data-layer-id="title"'));
+    expect(el).toMatch(/-webkit-text-stroke:8px #111318/);
+    expect(el).toMatch(/paint-order:stroke fill/);
+    expect(el).toMatch(
+      /text-shadow:0px 6px 0px #ff00ff,2px 2px 18px #000000/,
+    );
+  });
 });
 
 // --- render --------------------------------------------------------------------
@@ -577,12 +777,212 @@ describe("scene render", () => {
       await browser.close();
     }
   });
+
+  it("applies casing in pixels — transformed and literal text render identically", async () => {
+    const lowered = await load(scene([textLayer({ text: "aaa", casing: "upper" })]));
+    const literal = await load(scene([textLayer({ text: "AAA" })]));
+    const a = await renderScene(lowered.resolved);
+    const b = await renderScene(literal.resolved);
+    expect(a.png.equals(b.png)).toBe(true);
+  });
+
+  it("tracking changes the rendered layout", async () => {
+    const tight = await load(scene([textLayer({ text: "tracking", tracking: 0 })]));
+    const wide = await load(scene([textLayer({ text: "tracking", tracking: 0.5 })]));
+    const a = await renderScene(tight.resolved);
+    const b = await renderScene(wide.resolved);
+    expect(a.png.equals(b.png)).toBe(false);
+  });
+
+  it("tracks the gradient across glyphs — left reddish, right bluish", async () => {
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          fontSize: 160,
+          position: { x: 100, y: 260 },
+          size: { width: 1080, height: 220 },
+          color: undefined,
+          fill: { from: "#ff0000", to: "#0000ff" },
+          text: "GRAD GRAD",
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    const dominant = (x: number, y: number) => {
+      const [r, g, b] = img.px(x, y);
+      return r > 180 && g < 100 && b < 100 ? "red" : b > 180 && r < 100 && g < 100 ? "blue" : null;
+    };
+    let red = false;
+    let blue = false;
+    for (let y = 260; y < 500; y++)
+      for (let x = 100; x < 700; x++) red ||= dominant(x, y) === "red";
+    for (let y = 260; y < 500; y++)
+      for (let x = 700; x < 1180; x++) blue ||= dominant(x, y) === "blue";
+    expect(red).toBe(true);
+    expect(blue).toBe(true);
+  });
+
+  it("shrinks to the largest size that fits the layer box — nothing spills outside", async () => {
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          text: "AUTO FIT KEEPS EVERY GLYPH INSIDE THE BOX",
+          fontSize: undefined,
+          autoFit: { min: 20, max: 300 },
+          position: { x: 100, y: 300 },
+          size: { width: 900, height: 140 },
+          color: "#ff0000",
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    const reddish = ([r, g, b]: number[]) => r > 150 && g < 120 && b < 120;
+    let inside = false;
+    let outside = false;
+    for (let y = 0; y < 720; y++)
+      for (let x = 0; x < 1280; x++) {
+        if (!reddish(img.px(x, y))) continue;
+        const inBox =
+          x >= 98 && x <= 1002 && y >= 298 && y <= 442;
+        if (inBox) inside = true;
+        else outside = true;
+      }
+    expect(inside).toBe(true);
+    expect(outside).toBe(false);
+  });
+
+  it("honors the whole autoFit range — a higher max renders bigger", async () => {
+    const base = {
+      font: "Archivo Black",
+      text: "SIZING",
+      position: { x: 100, y: 300 },
+      size: { width: 900, height: 140 },
+      color: "#ff0000",
+    };
+    const capped = await load(
+      scene([textLayer({ ...base, fontSize: undefined, autoFit: { min: 20, max: 60 } })]),
+    );
+    const free = await load(
+      scene([textLayer({ ...base, fontSize: undefined, autoFit: { min: 20, max: 240 } })]),
+    );
+    const a = await renderScene(capped.resolved);
+    const b = await renderScene(free.resolved);
+    expect(a.png.equals(b.png)).toBe(false);
+  });
+
+  it("keeps explicit span sizes absolute while the layer auto-fits", async () => {
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          text: undefined,
+          spans: [{ text: "FIXED ", fontSize: 80 }, { text: "REST" }],
+          fontSize: undefined,
+          autoFit: { min: 20, max: 200 },
+          position: { x: 100, y: 300 },
+          size: { width: 900, height: 200 },
+          color: "#ff0000",
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    let red = false;
+    for (let y = 280; y < 520; y++)
+      for (let x = 80; x < 1200; x++) {
+        const [r, g, b] = img.px(x, y);
+        if (r > 150 && g < 120 && b < 120) red = true;
+      }
+    expect(red).toBe(true);
+  });
+
+  it("renders stroke and shadow colors onto the canvas", async () => {
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          fontSize: 140,
+          position: { x: 100, y: 280 },
+          size: { width: 1080, height: 180 },
+          color: "#ffffff",
+          stroke: { width: 10, color: "#0000ff" },
+          shadows: [{ x: 14, y: 14, blur: 0, color: "#ff0000" }],
+          text: "POP",
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    const hasColor = (want: (p: number[]) => boolean) => {
+      for (let y = 260; y < 500; y++)
+        for (let x = 80; x < 1200; x++) if (want(img.px(x, y))) return true;
+      return false;
+    };
+    expect(hasColor(([r, g, b]) => b > 200 && r < 80 && g < 80)).toBe(true); // stroke
+    expect(hasColor(([r, g, b]) => r > 200 && g < 80 && b < 80)).toBe(true); // shadow
+  });
+
+  it("renders independently styled spans — each span's color lands on canvas", async () => {
+    // Pure red and pure blue spans on a white canvas: each color must actually
+    // appear, so per-span styling demonstrably reaches pixels.
+    const { resolved } = await load(
+      scene([
+        textLayer({
+          font: "Archivo Black",
+          fontSize: 90,
+          position: { x: 100, y: 300 },
+          size: { width: 1080, height: 140 },
+          text: undefined,
+          spans: [
+            { text: "RED", color: "#ff0000" },
+            { text: " BLUE", color: "#0000ff" },
+          ],
+        }),
+      ]),
+    );
+    const { png } = await renderScene(resolved);
+    const img = decodePng(png);
+    const hasColor = (r: number, g: number, b: number) => {
+      for (let y = 280; y < 460; y++)
+        for (let x = 80; x < 1200; x++) {
+          const [pr, pg, pb] = img.px(x, y);
+          if (pr > r && pg < g && pb < b) return true;
+        }
+      return false;
+    };
+    expect(hasColor(200, 80, 80)).toBe(true);
+    expect(hasColor(80, 80, 200)).toBe(true);
+  });
 });
 
 // --- cli ------------------------------------------------------------------------
 
-describe("scene cli", () => {
-  it("schema returns the machine-readable JSON Schema document", async () => {
+describe("committed fixtures", () => {
+  const FIXTURES_DIR = path.join(import.meta.dir, "fixtures", "text");
+
+  it("every fixture scene validates as text-only", async () => {
+    const files = (await readdir(FIXTURES_DIR)).filter((f) => f.endsWith(".json"));
+    expect(files.length).toBeGreaterThanOrEqual(4);
+    for (const file of files) {
+      const raw = JSON.parse(await readFile(path.join(FIXTURES_DIR, file), "utf8"));
+      // Fixtures carry no assets — a library scan attempt is a fixture bug.
+      const result = await loadScene(
+        FIXTURES_DIR,
+        async () => {
+          throw new Error(`${file} must not reference library assets`);
+        },
+        raw,
+      );
+      expect(result.ok).toBe(true);
+    }
+  });
+});
+
+describe("scene cli", () => {  it("schema returns the machine-readable JSON Schema document", async () => {
     const { exitCode, output } = await cliRun(["schema"]);
     expect(exitCode).toBe(0);
     const schema = output as typeof SCENE_SCHEMA;
@@ -630,6 +1030,41 @@ describe("scene cli", () => {
       resolvedAsset: { scope: "project", path: "bg.svg", hash: fix.svgHash },
     });
     expect(layers[1]).toMatchObject({ id: "title", type: "text", font: "Anton", fontSize: 120 });
+  });
+
+  it("inspect summarizes rich text properties", async () => {
+    const rich = path.join(fix.projectRoot, "rich.json");
+    await writeFile(
+      rich,
+      JSON.stringify(
+        scene([
+          textLayer({
+            text: undefined,
+            spans: [{ text: "Go ", color: "#ff0000" }, { text: "FAST" }],
+            autoFit: { min: 40, max: 180 },
+            fontSize: undefined,
+            weight: 800,
+            tracking: -0.01,
+            casing: "upper",
+            stroke: { width: 6, color: "#111318" },
+            shadows: [{ x: 0, y: 6, blur: 12, color: "#000000" }],
+          }),
+        ]),
+      ),
+    );
+    const { exitCode, output } = await cliRun(["inspect", rich]);
+    expect(exitCode).toBe(0);
+    const [layer] = (output as { layers: Record<string, any>[] }).layers;
+    expect(layer).toMatchObject({
+      spans: [{ text: "Go ", color: "#ff0000" }, { text: "FAST" }],
+      autoFit: { min: 40, max: 180 },
+      weight: 800,
+      tracking: -0.01,
+      casing: "upper",
+      stroke: { width: 6, color: "#111318" },
+      shadows: [{ x: 0, y: 6, blur: 12, color: "#000000" }],
+    });
+    expect(layer.text).toBeUndefined();
   });
 
   it("render writes a 1280×720 png and reports the output", async () => {

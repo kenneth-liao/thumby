@@ -17,7 +17,7 @@ import {
   resolveFace,
   type FontFace,
 } from "./fonts.js";
-import type { ResolvedScene, ImageLayer, TextLayer } from "./scene.js";
+import type { ResolvedScene, ImageLayer, TextLayer, TextSpan } from "./scene.js";
 
 export interface SceneRenderResult {
   png: Buffer;
@@ -41,13 +41,17 @@ const esc = (s: string) =>
 /** Rounding that keeps geometry readable without visible drift. */
 const n = (v: number) => Number(v.toFixed(4));
 
-/** The bundled faces a scene's text layers name, deduped in scene order. */
+/** The bundled faces a scene's text layers and spans name, deduped in scene order. */
 export function sceneFaces(resolved: ResolvedScene): FontFace[] {
   const faces: FontFace[] = [];
+  const add = (family: string) => {
+    const face = resolveFace(family);
+    if (!faces.includes(face)) faces.push(face);
+  };
   for (const layer of resolved.scene.layers) {
     if (layer.type !== "text") continue;
-    const face = resolveFace(layer.font);
-    if (!faces.includes(face)) faces.push(face);
+    add(layer.font);
+    for (const span of layer.spans ?? []) if (span.font) add(span.font);
   }
   return faces;
 }
@@ -133,9 +137,74 @@ function textMarkup(layer: TextLayer): string {
   // the validated scene can only name fonts whose bytes the renderer ships.
   const face = resolveFace(layer.font);
   const lineHeight = layer.lineHeight ?? 1.1;
-  return `<div style="width:100%;height:100%;font-family:'${face.family}';font-weight:${face.weight};font-size:${layer.fontSize}px;color:${layer.color ?? "#000"};text-align:${layer.align ?? "left"};line-height:${lineHeight};white-space:pre-line;overflow-wrap:break-word;">${esc(
-    layer.text,
-  )}</div>`;
+  // Auto-fit layers start markup at their max; renderScene shrinks to fit
+  // after fonts resolve, so the shipped markup is deterministic either way.
+  const startSize = layer.fontSize ?? layer.autoFit!.max;
+  const styles = [
+    `font-family:'${face.family}'`,
+    `font-weight:${layer.weight ?? face.weight}`,
+    `font-size:${startSize}px`,
+    `text-align:${layer.align ?? "left"}`,
+    `line-height:${lineHeight}`,
+    "white-space:pre-line",
+    "overflow-wrap:break-word",
+  ];
+  // Explicit scene values land as inline styles on the element they style —
+  // no CSS class carries scene state, so nothing can out-specify them.
+  if (layer.tracking !== undefined) styles.push(`letter-spacing:${layer.tracking}em`);
+  if (layer.casing && layer.casing !== "none")
+    styles.push(`text-transform:${CASING_CSS[layer.casing]}`);
+  if (layer.fill) {
+    // Gradient text paints through background-clip; spans with explicit
+    // colors must restate the fill color or the clip would hide them.
+    styles.push(
+      "color:transparent",
+      `background:linear-gradient(${layer.fill.angle ?? 90}deg,${layer.fill.from},${layer.fill.to})`,
+      "-webkit-background-clip:text",
+      "background-clip:text",
+      "-webkit-text-fill-color:transparent",
+    );
+  } else {
+    styles.push(`color:${layer.color ?? "#000"}`);
+  }
+  if (layer.stroke)
+    styles.push(
+      `-webkit-text-stroke:${layer.stroke.width}px ${layer.stroke.color}`,
+      "paint-order:stroke fill",
+    );
+  if (layer.shadows?.length)
+    styles.push(
+      `text-shadow:${layer.shadows
+        .map((s) => `${s.x}px ${s.y}px ${s.blur}px ${s.color}`)
+        .join(",")}`,
+    );
+  const inner = layer.spans
+    ? layer.spans.map((span) => spanMarkup(span, Boolean(layer.fill))).join("")
+    : esc(layer.text ?? "");
+  return `<div style="width:100%;height:100%;${styles.join(";")}">${inner}</div>`;
+}
+
+/** Scene casing vocabulary → CSS text-transform. "none" never reaches markup. */
+const CASING_CSS = { upper: "uppercase", lower: "lowercase" } as const;
+
+/**
+ * One span as an inline element carrying only its overrides — everything
+ * unset inherits the layer element's inline styles through CSS inheritance.
+ */
+function spanMarkup(span: TextSpan, layerHasGradient: boolean): string {
+  const styles: string[] = [];
+  if (span.font) styles.push(`font-family:'${resolveFace(span.font).family}'`);
+  if (span.weight !== undefined) styles.push(`font-weight:${span.weight}`);
+  if (span.fontSize !== undefined) styles.push(`font-size:${span.fontSize}px`);
+  if (span.tracking !== undefined) styles.push(`letter-spacing:${span.tracking}em`);
+  if (span.casing && span.casing !== "none")
+    styles.push(`text-transform:${CASING_CSS[span.casing]}`);
+  if (span.color !== undefined)
+    styles.push(
+      layerHasGradient ? `-webkit-text-fill-color:${span.color}` : `color:${span.color}`,
+    );
+  const attr = styles.length ? ` style="${styles.join(";")}"` : "";
+  return `<span${attr}>${esc(span.text)}</span>`;
 }
 
 function layerMarkup(
@@ -220,6 +289,47 @@ async function measureCroppedImages(
 }
 
 /**
+ * Browser-side shrink-to-fit for one auto-fit text layer, addressed by its
+ * index in the layer list (DOM order is scene order). Binary-searches the
+ * largest size in [min, max] whose text stays inside the layer box; if even
+ * `min` overflows, `min` renders — the floor is honored, not a guarantee.
+ * Span font sizes are absolute and never scaled. Stroke width is an explicit
+ * scene value and stays fixed while the size changes.
+ * Must stay self-contained — Playwright serializes it into the page.
+ */
+const fitTextLayer = ({
+  index,
+  min,
+  max,
+}: {
+  index: number;
+  min: number;
+  max: number;
+}): void => {
+  const layer = document.querySelectorAll<HTMLElement>(".scene-layer")[index];
+  const box = layer?.firstElementChild;
+  if (!box) return;
+  const el = box as HTMLElement;
+  let lo = min;
+  let hi = max;
+  let best = min;
+  for (let i = 0; i < 22; i++) {
+    const mid = (lo + hi) / 2;
+    el.style.fontSize = `${mid}px`;
+    const fits =
+      el.scrollWidth <= el.clientWidth + 1 &&
+      el.scrollHeight <= el.clientHeight + 1;
+    if (fits) {
+      best = mid;
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  el.style.fontSize = `${best}px`;
+};
+
+/**
  * Render a resolved Scene to a PNG. Fails loudly when a text face does not
  * resolve from its bundled bytes — silent fallback never reaches a screenshot.
  * Pass `page` to render in an existing page (tests inject route-blocked ones).
@@ -256,6 +366,13 @@ export async function renderScene(
         `Font(s) failed to resolve from bundled bytes: ${unresolved.join(", ")}. ` +
           `Silent fallback is not allowed — check assets/fonts/.`,
       );
+    }
+
+    // Auto-fit runs only after every face is force-loaded, so measurements
+    // see final glyph metrics, not fallback shapes.
+    for (const [index, layer] of resolved.scene.layers.entries()) {
+      if (layer.type !== "text" || !layer.autoFit) continue;
+      await page.evaluate(fitTextLayer, { index, ...layer.autoFit });
     }
 
     const png = await page.screenshot({ type: "png" });

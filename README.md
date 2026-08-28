@@ -246,6 +246,37 @@ with `@<hash>`) and support `fit` (`cover`/`contain`/`fill`/`none`) plus
 percent-crop `crop` insets. Text layers render from the bundled fonts by family
 name with explicit `\n` line breaks.
 
+Rich text: a text layer is sized by `fontSize` or shrink-to-fit
+`autoFit: {min, max}` (largest size whose text stays inside the layer box;
+`min` renders even if it overflows). All of `weight`, `tracking` (em),
+`casing` (`upper`/`lower`/`none`), and span-level `color` are explicit scene
+values and land as inline styles — nothing else can out-specify them. Fill is
+a solid `color` or a two-stop gradient `fill: {from, to, angle}` (mutually
+exclusive, like `text`/`spans` and `fontSize`/`autoFit`); `stroke` paints
+outside the glyphs and `shadows` lists `text-shadow`s back to front. Content
+is plain `text` or independently styled `spans` — each span inherits the
+layer's typography and may override `font`, `fontSize`, `weight`, `color`,
+`tracking`, and `casing`:
+
+```json
+{ "id": "headline", "type": "text",
+  "autoFit": { "min": 40, "max": 180 },
+  "font": "Bevan", "casing": "upper", "tracking": -0.01,
+  "fill": { "from": "#ffb347", "to": "#c0182b" },
+  "stroke": { "width": 3, "color": "#14100b" },
+  "shadows": [{ "x": 3, "y": 5, "blur": 14, "color": "#241a0e" }],
+  "spans": [
+    { "text": "every " },
+    { "text": "span", "color": "#00c2ff" },
+    { "text": " counts" }
+  ],
+  "position": { "x": 70, "y": 120 }, "size": { "width": 1140, "height": 420 } }
+```
+
+Worked fixtures live in `test/fixtures/text/` — render one with
+`bun run scene render test/fixtures/text/mixed-spans.json` and inspect the
+PNG it writes.
+
 A Scene is an externally authored document, so its project scope is a trust
 boundary: path references resolve relative to the scene file *and are contained
 inside that directory* — `../`, absolute paths, and symlinks pointing outside

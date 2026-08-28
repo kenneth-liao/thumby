@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "stacked",
+      "type": "text",
+      "text": "three\nforced\nlines",
+      "font": "Passion One",
+      "fontSize": 150,
+      "lineHeight": 1.0,
+      "casing": "upper",
+      "color": "#132a13",
+      "position": { "x": 90, "y": 90 },
+      "size": { "width": 700, "height": 480 },
+      "rotation": -4,
+      "align": "left"
+    },
+    {
+      "id": "mirrored",
+      "type": "text",
+      "text": "mirror\ncheck",
+      "font": "Permanent Marker",
+      "fontSize": 90,
+      "lineHeight": 1.15,
+      "color": "#3a2b52",
+      "position": { "x": 900, "y": 160 },
+      "size": { "width": 320, "height": 300 },
+      "rotation": 8,
+      "mirror": true,
+      "align": "center"
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "text": "forced-break fixture — \\n breaks, rotation, mirror, lineHeight",
+      "font": "Source Sans 3",
+      "fontSize": 30,
+      "tracking": 0.2,
+      "casing": "upper",
+      "color": "#5a6572",
+      "position": { "x": 60, "y": 640 },
+      "size": { "width": 1160, "height": 50 },
+      "align": "center"
+    }
+  ]
+}

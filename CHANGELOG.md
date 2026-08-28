@@ -4,6 +4,11 @@
 
 ### Added
 
+- Rich Text layers render reference-faithful typography from Scene data: multiple independently styled `spans` (mutually exclusive with plain `text`), explicit `weight`, `tracking` (em), `casing`, solid `color` or gradient `fill`, `stroke`, and `shadows` (#10)
+- Text layers size by fixed `fontSize` or shrink-to-fit `autoFit: {min, max}` — the render picks the largest size whose text stays inside the layer box, measured after bundled fonts resolve (#10)
+- Every explicit text value is emitted as an inline style on the element it styles, so preset or stylesheet specificity can never silently override Scene values; an explicit span color restates the fill over a gradient (`-webkit-text-fill-color`) (#10)
+- `bun run scene inspect` summarizes the rich text properties (`spans`, `autoFit`, `weight`, `tracking`, `casing`, `fill`, `stroke`, `shadows`) (#10)
+- Rendered text fixtures under `test/fixtures/text/` (short, long auto-fit, forced breaks, mixed spans) for visual inspection (#10)
 - One asset-resolution contract for reusable-library and project-local assets: references (`<id>`, `library:<id>`, or a project-relative path) resolve to exact bytes, and `@<sha-256-or-prefix>` pins content so changed bytes create a new identity instead of silently changing old references (#8)
 - `bun run library resolve <ref>` prints an asset's exact content identity; `list` shows the identity prefix per asset; `--cutout` accepts the same reference syntax (#8)
 - Asset scans validate metadata shape (tags, name) and hash image bytes, failing with actionable errors on missing content, identity mismatches, malformed metadata, and duplicate ids (#8)
