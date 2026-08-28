@@ -1,6 +1,11 @@
 import { chromium, type Browser } from "playwright";
 import { STYLES, type StylePreset } from "./styles.js";
-import { resolvePairing, type Pairing } from "./fonts.js";
+import {
+  resolvePairing,
+  fontFaceCss,
+  familyResolvedJs,
+  type Pairing,
+} from "./fonts.js";
 import { renderOverlay, type OverlaySpec } from "./overlay.js";
 import type { TextZone } from "./generate.js";
 
@@ -74,11 +79,12 @@ function page(
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>
   * { margin:0; padding:0; box-sizing:border-box; }
+  ${fontFaceCss(font.display, font.sans)}
   :root {
     --accent: ${spec.accent}; --fill: ${spec.fill}; --stroke: ${spec.stroke};
     --bar-ink: #0b0b0d; --stroke-w: 8px;
-    --font-display: "${font.display}", Georgia, serif;
-    --font-sans: "${font.sans}", "Helvetica Neue", sans-serif;
+    --font-display: "${font.display.family}";
+    --font-sans: "${font.sans.family}";
     --tracking: ${font.tracking};
   }
   body { width:${WIDTH}px; height:${HEIGHT}px; overflow:hidden; position:relative; }
@@ -100,13 +106,13 @@ function page(
              align-items:flex-start; width:${boxWidth}; max-height:100%; }
   .stack { position:relative; width:100%; }
   ${spec.fillTo ? `.headline.fill { background:linear-gradient(100deg, ${spec.fill} 8%, ${spec.fillTo} 78%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }\n  .headline.fill .accent { -webkit-text-fill-color:${spec.accent}; }` : ""}
-  .headline { font-family: var(--font-display); font-weight: ${font.displayWeight};
+  .headline { font-family: var(--font-display); font-weight: ${font.display.weight};
               letter-spacing: var(--tracking); font-size:120px; width:100%;
               word-break:normal; overflow-wrap:normal; hyphens:none;
               text-transform: ${font.textCase === "upper" || preset.textCase === "upper" ? "uppercase" : "none"}; }
   .headline.stroke { position:absolute; inset:0; }
   .headline.fill { position:relative; }
-  .eyebrow, .sub { font-family: var(--font-sans); font-weight: ${font.sansWeight}; }
+  .eyebrow, .sub { font-family: var(--font-sans); font-weight: ${font.sans.weight}; }
   .eyebrow .accent, .sub .accent { color: var(--accent); }
   .eyebrow { text-transform: uppercase; }
   ${preset.css}
@@ -165,6 +171,23 @@ export async function compose(spec: ComposeSpec): Promise<Buffer> {
 
   try {
     await p.setContent(page(spec, preset, font, uri, cutoutUri, overlay), { waitUntil: "load" });
+
+    // Reject silent fallback before accepting output: if the requested family
+    // did not resolve from its bundled bytes, fail naming it (no default-sans
+    // substitution ever reaches a screenshot).
+    const isResolved = new Function(
+      `return ${familyResolvedJs}`,
+    )() as (family: string) => Promise<boolean>;
+    const unresolved: string[] = [];
+    for (const face of [font.display, font.sans]) {
+      if (!(await p.evaluate(isResolved, face.family))) unresolved.push(face.family);
+    }
+    if (unresolved.length) {
+      throw new Error(
+        `Font(s) failed to resolve from bundled bytes: ${unresolved.join(", ")}. ` +
+          `Silent fallback is not allowed — check assets/fonts/.`,
+      );
+    }
 
     // Shrink the headline until it fits its box. This is what makes a 4-word
     // and a 12-word variant both land without hand-tuning.

@@ -1,9 +1,14 @@
-node_modules/
+node_modules
 out/
 test-plate.png
 .env
 .env.local
-# Personal + third-party-licensed assets stay local (creator cutouts, brand logos).
-assets/
+# Personal + third-party-licensed assets stay local (creator cutouts, brand
+# logos). Bundled OFL fonts are repo content and must ship — keep assets/fonts
+# out of this list (see assets/fonts/LICENSE.md).
+assets/cutouts/
+assets/identity/
+assets/logos/
+assets/plates/
 overlays/*.local.json
 .worktrees/

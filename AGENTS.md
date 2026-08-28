@@ -42,6 +42,10 @@ following bugs were invisible in logs:
   colours unless `-webkit-text-fill-color` is restated on the child.
 - In batch sweeps, check the output file list, not just timing — a silenced
   stdout once hid 3 of 4 variants failing to render.
+- An `@font-face` rule inside a `:root {}` block is invalid CSS and ignored
+  silently — every text element then renders in the default serif while
+  layouts and logs look normal. Font-face rules go at the stylesheet's top
+  level (compose.ts), and the render probe re-verifies each family resolves.
 
 ## Assets and provenance
 

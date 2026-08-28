@@ -1,15 +1,25 @@
 /**
  * Type pairings. Each is a display face for the headline plus a humanist sans
- * for the eyebrow and kicker. Every face ships with macOS, so Chromium
- * resolves them with no @font-face and no network.
- *
- * Weights are requested numerically; CoreText picks the nearest real face.
+ * for the eyebrow and kicker. Every face is bundled under assets/fonts/ as an
+ * OFL-licensed TTF (latin subset) and loaded via @font-face from local bytes —
+ * no system fonts, no network. See assets/fonts/LICENSE.md.
  */
+import path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+export interface FontFace {
+  /** The family name the CSS and @font-face rule use. */
+  family: string;
+  /** The face's real weight — the @font-face declaration and the CSS font-weight use it. */
+  weight: number;
+  /** File name under assets/fonts/. */
+  file: string;
+}
+
 export interface Pairing {
-  display: string;
-  displayWeight: number;
-  sans: string;
-  sansWeight: number;
+  display: FontFace;
+  sans: FontFace;
   /** Headline tracking. Condensed blacks want a touch negative. */
   tracking: string;
   /**
@@ -22,95 +32,89 @@ export interface Pairing {
   description: string;
 }
 
-const GILL = { sans: "Gill Sans", sansWeight: 600 };
+const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "fonts");
+
+const SOURCE_SANS = {
+  family: "Source Sans 3",
+  weight: 600,
+  file: "source-sans-3.ttf",
+};
 
 export const PAIRINGS: Record<string, Pairing> = {
   // --- punchy display sans -------------------------------------------------
   condensed: {
-    display: "HelveticaNeue-CondensedBlack",
-    displayWeight: 900,
-    ...GILL,
+    display: { family: "Anton", weight: 400, file: "anton.ttf" },
+    sans: SOURCE_SANS,
     tracking: "-0.02em",
     textCase: "upper",
     strokeScale: 1.35,
-    description: "Helvetica Neue Condensed Black + Gill Sans — most caps per line, heaviest strokes",
+    description: "Anton + Source Sans 3 — most caps per line, heaviest strokes",
   },
   impact: {
-    display: "Impact",
-    displayWeight: 400,
-    ...GILL,
+    display: { family: "Archivo Black", weight: 400, file: "archivo-black.ttf" },
+    sans: SOURCE_SANS,
     tracking: "-0.01em",
     textCase: "upper",
     strokeScale: 1.35,
-    description: "Impact + Gill Sans — the canonical thumbnail face",
+    description: "Archivo Black + Source Sans 3 — the canonical thumbnail face",
   },
   black: {
-    display: "Arial Black",
-    displayWeight: 900,
-    ...GILL,
+    display: { family: "Oswald", weight: 700, file: "oswald.ttf" },
+    sans: SOURCE_SANS,
     tracking: "-0.02em",
     textCase: "upper",
     strokeScale: 1.35,
-    description: "Arial Black + Gill Sans — widest and boldest; fewer words per line",
+    description: "Oswald Bold + Source Sans 3 — tall condensed caps",
   },
   phosphate: {
-    display: "Phosphate",
-    displayWeight: 400,
-    ...GILL,
+    display: { family: "Passion One", weight: 900, file: "passion-one.ttf" },
+    sans: SOURCE_SANS,
     tracking: "0",
     textCase: "upper",
     strokeScale: 1.2,
-    description: "Phosphate Solid + Gill Sans — condensed with more character",
+    description: "Passion One Black + Source Sans 3 — condensed with more character",
   },
   script: {
-    display: "Brush Script MT",
-    displayWeight: 400,
-    ...GILL,
+    display: { family: "Permanent Marker", weight: 400, file: "permanent-marker.ttf" },
+    sans: SOURCE_SANS,
     tracking: "0.01em",
     textCase: "style",
     strokeScale: 0.5,
-    description: "Brush Script MT + Gill Sans — hand-painted brush lettering",
+    description: "Permanent Marker + Source Sans 3 — hand-painted marker lettering",
   },
 
   // --- cartographic serif --------------------------------------------------
   clarendon: {
-    display: "SuperClarendon",
-    displayWeight: 900,
-    ...GILL,
+    display: { family: "Bevan", weight: 400, file: "bevan.ttf" },
+    sans: SOURCE_SANS,
     tracking: "-0.008em",
     textCase: "style",
     strokeScale: 1,
-    description: "Superclarendon Black + Gill Sans — park-sign slab, editorial",
+    description: "Bevan + Source Sans 3 — park-sign slab, editorial",
   },
   iowan: {
-    display: "Iowan Old Style",
-    displayWeight: 900,
-    sans: "Seravek",
-    sansWeight: 700,
+    display: { family: "Lora", weight: 700, file: "lora.ttf" },
+    sans: { family: "Nunito Sans", weight: 700, file: "nunito-sans.ttf" },
     tracking: "-0.005em",
     textCase: "style",
     strokeScale: 1,
-    description: "Iowan Old Style Black + Seravek — warmer, bookish oldstyle",
+    description: "Lora Bold + Nunito Sans Bold — warmer, bookish oldstyle",
   },
   hoefler: {
-    display: "Hoefler Text",
-    displayWeight: 900,
-    sans: "Optima",
-    sansWeight: 600,
+    display: { family: "Alegreya", weight: 900, file: "alegreya.ttf" },
+    sans: { family: "Marcellus", weight: 400, file: "marcellus.ttf" },
     tracking: "0",
     textCase: "style",
     strokeScale: 1,
-    description: "Hoefler Text Black + Optima — engraved and literary; thins out small",
+    description: "Alegreya Black + Marcellus — engraved and literary; thins out small",
   },
   charter: {
-    display: "Charter",
-    displayWeight: 700,
-    sans: "Avenir Next",
-    sansWeight: 600,
+    display: { family: "Bitter", weight: 700, file: "bitter.ttf" },
+    sans: { family: "Montserrat", weight: 600, file: "montserrat.ttf" },
     tracking: "-0.005em",
     textCase: "style",
     strokeScale: 1,
-    description: "Charter Bold + Avenir Next — sturdy, modern, lowest contrast",
+    description: "Bitter Bold + Montserrat — sturdy, modern, lowest contrast",
   },
 };
 
@@ -125,3 +129,65 @@ export function resolvePairing(name: string): Pairing {
   }
   return p;
 }
+
+export function fontAssetPath(face: FontFace): string {
+  return path.join(FONTS_DIR, face.file);
+}
+
+/** Reads the bundled bytes and throws naming the family when they are absent. */
+export function readFontAsset(face: FontFace): { family: string; weight: number; dataUri: string } {
+  const file = fontAssetPath(face);
+  if (!existsSync(file)) {
+    throw new Error(
+      `Font "${face.family}" is not bundled: assets/fonts/${face.file} is missing`,
+    );
+  }
+  const b64 = readFileSync(file).toString("base64");
+  return {
+    family: face.family,
+    weight: face.weight,
+    dataUri: `data:font/ttf;base64,${b64}`,
+  };
+}
+
+/** @font-face rules for the given faces, each from its bundled bytes. */
+export function fontFaceCss(...faces: FontFace[]): string {
+  return faces
+    .map((f) => {
+      const { family, weight, dataUri } = readFontAsset(f);
+      return `@font-face { font-family: "${family}"; font-weight: ${weight}; src: url(${dataUri}) format("truetype"); }`;
+    })
+    .join("\n");
+}
+
+/** Startup validation: every face of the pairing must be bundled. */
+export function assertFontAssets(p: Pairing): void {
+  for (const face of [p.display, p.sans]) {
+    if (!existsSync(fontAssetPath(face))) {
+      throw new Error(
+        `Font "${face.family}" is not bundled: assets/fonts/${face.file} is missing`,
+      );
+    }
+  }
+}
+
+/**
+ * Browser-side family resolution probe, evaluated in the compositor page:
+ * measures a proportional-glyph string with the requested family followed by
+ * monospace in the font stack, then monospace alone; equal widths mean the
+ * family fell through to monospace, i.e. it silently failed to resolve.
+ * The family is force-loaded first so unused faces are not false negatives.
+ */
+export const familyResolvedJs = `(async (family) => {
+  try { await document.fonts.load('32px "' + family + '"'); } catch { return false; }
+  const probe = "mmmmwwwwmmmm";
+  const el = document.createElement("span");
+  el.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font-size:32px;";
+  el.textContent = probe;
+  document.body.appendChild(el);
+  const width = (stack) => { el.style.fontFamily = stack; return el.getBoundingClientRect().width; };
+  const withFamily = width('"' + family + '", monospace');
+  const fallback = width("monospace");
+  el.remove();
+  return withFamily !== fallback;
+})`;

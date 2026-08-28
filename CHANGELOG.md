@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Added
+
+- Bundled font pairing faces: every type pairing now resolves from OFL-licensed TTFs in `assets/fonts/` (Anton, Archivo Black, Oswald, Passion One, Permanent Marker, Bevan, Lora, Alegreya, Bitter + their supporting sans), loaded via `@font-face` from local bytes — no system fonts, no network (#1)
+- Render-time font validation: a thumbnail render fails loudly naming the family when its face cannot resolve, and the CLI asserts bundled bytes exist at startup — a Linux-like environment can no longer silently substitute a default sans (#1)
+
+### Changed
+
+- All 13 macOS-only faces (Helvetica Neue Condensed Black, Impact, Arial Black, Phosphate, Brush Script MT, SuperClarendon, Iowan Old Style, Hoefler Text, Charter, Gill Sans, Seravek, Optima, Avenir Next) replaced by open-license equivalents; pairing keys unchanged (#1). Provenance: `assets/fonts/LICENSE.md`
+
 ## [0.3.0] - 2026-08-27
 
 ### Added
