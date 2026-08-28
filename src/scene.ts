@@ -1,12 +1,16 @@
 /**
  * Scene v1: load, validate, and resolve — the one gate before any render.
  *
- * Validation runs entirely before the browser starts, in two passes over the
- * same document:
+ * Validation runs entirely before the browser starts, in three passes over
+ * the same document:
  *   1. Schema pass (ajv over src/scene-schema.ts) — field shapes, enums,
- *      canvas, opacity/size bounds, unknown properties. Field-specific paths.
- *   2. Semantic pass — everything JSON Schema can't say: duplicate layer ids,
- *      type-specific required fields and misplaced fields, crop sums.
+ *      canvas, opacity/size bounds, per-type required fields, unknown
+ *      properties. Field-specific paths: image/text layers are oneOf branches
+ *      in the schema, and a failed layer is re-validated against the branch
+ *      it claims so errors stay field-specific instead of ajv's opaque
+ *      oneOf error.
+ *   2. Semantic pass — everything JSON Schema can't say: duplicate layer ids
+ *      and crop sums.
  *   3. Resolution pass — assets through the one contract in src/assets.ts
  *      (exact bytes, hash pins), text fonts against the bundled-face registry.
  *
@@ -18,6 +22,8 @@ import type { ErrorObject as AjvError } from "ajv";
 import path from "node:path";
 import { SCENE_SCHEMA } from "./scene-schema.js";
 import {
+  EMPTY_LIBRARY,
+  parseAssetRef,
   resolveAsset,
   type Library,
   type ResolvedAsset,
@@ -84,6 +90,80 @@ export type LoadResult =
 const ajv = new Ajv({ allErrors: true, verbose: true });
 const validateSchema = ajv.compile(SCENE_SCHEMA);
 
+/**
+ * Per-type layer validators, derived from SCENE_SCHEMA's own oneOf branches —
+ * no second home for the layer shape. When a layer fails the oneOf, ajv emits
+ * both branches' errors plus an opaque oneOf error at the layer path; re-running
+ * the branch the layer claims yields field-specific errors (layers[0].asset).
+ */
+const branchValidators = {
+  image: ajv.compile({
+    ...(SCENE_SCHEMA.definitions.imageLayer as unknown as Record<string, unknown>),
+    definitions: SCENE_SCHEMA.definitions,
+  }),
+  text: ajv.compile({
+    ...(SCENE_SCHEMA.definitions.textLayer as unknown as Record<string, unknown>),
+    definitions: SCENE_SCHEMA.definitions,
+  }),
+};
+
+/** `jsonPointerToPath` output relative to a layer, prefixed with `layers[i]`. */
+const layerPath = (at: string, sub: string) => `${at}.${jsonPointerToPath(sub)}`;
+
+/**
+ * Expand a failed oneOf at `layers[i]` into that layer's field-specific schema
+ * errors, dropping both branches' raw inner errors. Non-layer errors pass through.
+ */
+function expandLayerErrors(errors: AjvError[]): SceneError[] {
+  const out: SceneError[] = [];
+  for (const err of errors) {
+    const m = /^\/layers\/(\d+)(\/|$)/.exec(err.instancePath);
+    if (!m) {
+      out.push(describeSchemaError(err));
+      continue;
+    }
+    if (err.keyword !== "oneOf") continue; // branch-internal noise; the oneOf error owns this layer
+    const at = `layers[${m[1]}]`;
+    const layer = err.data as Record<string, unknown> | undefined;
+    const type = layer?.type;
+    if (type !== "image" && type !== "text") {
+      const nonObject = typeof layer !== "object" || layer === null;
+      out.push({
+        path: nonObject ? at : `${at}.type`,
+        message: nonObject
+          ? "each layer must be an image or text object"
+          : `unknown layer type ${JSON.stringify(type)} — supported types: image, text`,
+      });
+      continue;
+    }
+    const validate = branchValidators[type];
+    validate(layer);
+    out.push(
+      ...validate.errors!.map((e): SceneError => {
+        if (e.keyword === "required") {
+          const prop = e.params?.missingProperty as string;
+          return {
+            path: `${at}.${prop}`,
+            message: `"${prop}" is required on ${type} layers`,
+          };
+        }
+        if (e.keyword === "additionalProperties") {
+          const prop = e.params?.additionalProperty as string;
+          return {
+            path: `${at}.${prop}`,
+            message: `"${prop}" is not a valid layer property`,
+          };
+        }
+        return {
+          path: e.instancePath ? layerPath(at, e.instancePath) : at,
+          message: e.message ?? "is invalid",
+        };
+      }),
+    );
+  }
+  return out;
+}
+
 /** JSON pointer `/layers/2/size/width` → field path `layers[2].size.width`. */
 function jsonPointerToPath(pointer: string, leaf?: string): string {
   const parts: string[] = [];
@@ -121,12 +201,6 @@ function describeSchemaError(err: AjvError): SceneError {
       message: `"${prop}" is not a valid layer property`,
     };
   }
-  if (err.keyword === "enum" && err.instancePath.endsWith("/type")) {
-    return {
-      path: jsonPointerToPath(err.instancePath),
-      message: `unknown layer type ${data} — supported types: image, text`,
-    };
-  }
   return {
     path: jsonPointerToPath(err.instancePath),
     message: err.message ?? "is invalid",
@@ -135,9 +209,11 @@ function describeSchemaError(err: AjvError): SceneError {
 
 // --- semantic pass ---------------------------------------------------------------
 
-const IMAGE_ONLY_FIELDS = ["asset", "fit", "crop"] as const;
-const TEXT_ONLY_FIELDS = ["text", "font", "fontSize", "color", "align", "lineHeight"] as const;
-
+/**
+ * Cross-layer and cross-field rules the schema can't express: duplicate layer
+ * ids and crop insets that sum past the source. Per-type required and
+ * misplaced fields are the schema's oneOf branches' job (one home).
+ */
 function semanticErrors(scene: Scene): SceneError[] {
   const errors: SceneError[] = [];
   const firstOwner = new Map<string, number>();
@@ -150,34 +226,18 @@ function semanticErrors(scene: Scene): SceneError[] {
       at("id", `duplicate layer id "${layer.id}" — first used at layers[${owner}]`);
     else firstOwner.set(layer.id, i);
 
-    const raw = layer as unknown as Record<string, unknown>;
-    if (layer.type === "image") {
-      if (typeof raw.asset !== "string")
-        at("asset", "an image layer requires an asset reference");
-      for (const f of TEXT_ONLY_FIELDS)
-        if (raw[f] !== undefined) at(f, `"${f}" applies only to text layers`);
-      if (layer.crop) {
-        const { left, top, right, bottom } = layer.crop;
-        if (left + right >= 100)
-          at(
-            "crop",
-            `crop insets leave no source width (left ${left}% + right ${right}% ≥ 100%)`,
-          );
-        if (top + bottom >= 100)
-          at(
-            "crop",
-            `crop insets leave no source height (top ${top}% + bottom ${bottom}% ≥ 100%)`,
-          );
-      }
-    } else {
-      for (const f of IMAGE_ONLY_FIELDS)
-        if (raw[f] !== undefined) at(f, `"${f}" applies only to image layers`);
-      if (typeof raw.text !== "string")
-        at("text", "a text layer requires text content");
-      if (typeof raw.font !== "string")
-        at("font", "a text layer requires a font family");
-      if (typeof raw.fontSize !== "number")
-        at("fontSize", "a text layer requires a fontSize");
+    if (layer.type === "image" && layer.crop) {
+      const { left, top, right, bottom } = layer.crop;
+      if (left + right >= 100)
+        at(
+          "crop",
+          `crop insets leave no source width (left ${left}% + right ${right}% ≥ 100%)`,
+        );
+      if (top + bottom >= 100)
+        at(
+          "crop",
+          `crop insets leave no source height (top ${top}% + bottom ${bottom}% ≥ 100%)`,
+        );
     }
   });
   return errors;
@@ -187,14 +247,22 @@ function semanticErrors(scene: Scene): SceneError[] {
 
 async function resolutionErrors(
   projectRoot: string,
-  lib: Library,
+  library: () => Promise<Library>,
   scene: Scene,
   assets: Map<string, ResolvedAsset>,
 ): Promise<SceneError[]> {
   const errors: SceneError[] = [];
+  // The library materializes at most once, and only when a scene actually
+  // references a library asset — a project-only scene never scans it.
+  let libPromise: Promise<Library> | undefined;
+  const getLibrary = () => (libPromise ??= library());
   for (const [i, layer] of scene.layers.entries()) {
     if (layer.type === "image") {
       try {
+        const lib =
+          parseAssetRef(layer.asset).scope === "library"
+            ? await getLibrary()
+            : EMPTY_LIBRARY;
         assets.set(layer.id, await resolveAsset(projectRoot, lib, layer.asset));
       } catch (err) {
         errors.push({
@@ -223,22 +291,25 @@ async function resolutionErrors(
  * The single gate every consumer (validate / inspect / render) reads through —
  * all failures land here, before any browser exists.
  *
+ * `library` is a provider, not a value: the repo asset library is scanned at
+ * most once, and only if a layer actually references a library asset.
+ *
  * Project-scope asset references resolve relative to `projectRoot` (the scene
  * file's directory), so a scene plus its local assets is a relocatable bundle.
  */
 export async function loadScene(
   projectRoot: string,
-  lib: Library,
+  library: () => Promise<Library>,
   raw: unknown,
 ): Promise<LoadResult> {
   if (!validateSchema(raw)) {
-    return { ok: false, errors: validateSchema.errors!.map(describeSchemaError) };
+    return { ok: false, errors: expandLayerErrors(validateSchema.errors!) };
   }
   const scene = raw as Scene;
   const errors = semanticErrors(scene);
   const assets = new Map<string, ResolvedAsset>();
   if (errors.length === 0)
-    errors.push(...(await resolutionErrors(path.resolve(projectRoot), lib, scene, assets)));
+    errors.push(...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets)));
   if (errors.length) return { ok: false, errors };
   return { ok: true, resolved: { scene, assets } };
 }

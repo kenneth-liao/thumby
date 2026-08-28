@@ -3,9 +3,14 @@
  *
  * `scene schema` exports this document verbatim as the machine-readable
  * schema, and validation (src/scene.ts, via ajv) enforces it, so the exported
- * schema and the enforced shape cannot drift. The JSON Schema covers field
- * shapes; cross-field semantics (type-specific required fields, asset/font
- * resolution) live in src/scene.ts's semantic pass.
+ * schema and the enforced shape cannot drift. Cross-field rules that JSON
+ * Schema can't express (duplicate ids across layers, crop insets summing past
+ * the source) and content resolution (assets, fonts) live in src/scene.ts.
+ *
+ * Image and Text layers are `oneOf` branches with their own required fields
+ * and `additionalProperties: false`, so the schema itself rejects mixed
+ * image/text properties and per-type missing fields — exactly what
+ * loadScene enforces. Shared property definitions are $ref-ed once.
  *
  * Layer order in `layers` IS the compositing order (later layers on top).
  * Asset references use the one resolution contract from src/assets.ts:
@@ -50,6 +55,29 @@ export const SCENE_SCHEMA = {
     },
   },
   definitions: {
+    id: {
+      type: "string",
+      minLength: 1,
+      description: "Stable unique layer id — the target for agent edits and variants.",
+    },
+    visible: {
+      type: "boolean",
+      description: "Hidden layers stay in the scene but do not render.",
+    },
+    opacity: {
+      type: "number",
+      minimum: 0,
+      maximum: 1,
+      description: "Layer opacity, 0 (transparent) to 1 (opaque).",
+    },
+    rotation: {
+      type: "number",
+      description: "Clockwise rotation in degrees around the layer center.",
+    },
+    mirror: {
+      type: "boolean",
+      description: "Mirror horizontally before rotation.",
+    },
     point: {
       type: "object",
       additionalProperties: false,
@@ -73,7 +101,8 @@ export const SCENE_SCHEMA = {
       additionalProperties: false,
       required: ["left", "top", "right", "bottom"],
       description:
-        "Percent insets cropped off the source image before fitting into the layer box.",
+        "Percent insets cropped off the source image BEFORE fitting. The cropped " +
+        "window is then fitted per `fit` (cover crops further to preserve aspect).",
       properties: {
         left: { type: "number", minimum: 0, maximum: 100 },
         top: { type: "number", minimum: 0, maximum: 100 },
@@ -86,81 +115,84 @@ export const SCENE_SCHEMA = {
       pattern: "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
       description: "Hex color: #rgb, #rrggbb, or #rrggbbaa.",
     },
-    layer: {
+    assetRef: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Asset reference: `library:<id>` or `<id>` (library scope) or a path " +
+        "relative to the scene file (project scope, contained inside it). " +
+        "Suffix `@<sha-256-or-prefix>` to pin exact content.",
+    },
+    imageLayer: {
       type: "object",
-      required: ["id", "type", "position", "size"],
+      required: ["id", "type", "position", "size", "asset"],
       additionalProperties: false,
       properties: {
-        id: {
-          type: "string",
-          minLength: 1,
-          description: "Stable unique layer id — the target for agent edits and variants.",
-        },
-        type: {
-          enum: ["image", "text"],
-          description: "Layer type. Scene v1 supports image and text layers.",
-        },
-        visible: {
-          type: "boolean",
-          description: "Hidden layers stay in the scene but do not render.",
-        },
-        opacity: {
-          type: "number",
-          minimum: 0,
-          maximum: 1,
-          description: "Layer opacity, 0 (transparent) to 1 (opaque).",
-        },
+        id: { $ref: "#/definitions/id" },
+        type: { const: "image" },
+        visible: { $ref: "#/definitions/visible" },
+        opacity: { $ref: "#/definitions/opacity" },
         position: { $ref: "#/definitions/point" },
         size: { $ref: "#/definitions/size" },
-        rotation: {
-          type: "number",
-          description: "Clockwise rotation in degrees around the layer center.",
-        },
-        mirror: {
-          type: "boolean",
-          description: "Mirror horizontally before rotation.",
-        },
+        rotation: { $ref: "#/definitions/rotation" },
+        mirror: { $ref: "#/definitions/mirror" },
         asset: {
-          type: "string",
-          minLength: 1,
-          description:
-            "Image layers only. Asset reference: `library:<id>` or `<id>` (library scope) " +
-            "or a path relative to the scene file (project scope). Suffix `@<sha-256-or-prefix>` " +
-            "to pin exact content.",
+          $ref: "#/definitions/assetRef",
+          description: "The image content this layer composites.",
         },
         fit: {
           enum: ["cover", "contain", "fill", "none"],
-          description: "Image layers only. How the asset fills the layer box.",
+          description:
+            "How the asset (after crop) fills the layer box. Default: cover.",
         },
         crop: { $ref: "#/definitions/crop" },
+      },
+    },
+    textLayer: {
+      type: "object",
+      required: ["id", "type", "position", "size", "text", "font", "fontSize"],
+      additionalProperties: false,
+      properties: {
+        id: { $ref: "#/definitions/id" },
+        type: { const: "text" },
+        visible: { $ref: "#/definitions/visible" },
+        opacity: { $ref: "#/definitions/opacity" },
+        position: { $ref: "#/definitions/point" },
+        size: { $ref: "#/definitions/size" },
+        rotation: { $ref: "#/definitions/rotation" },
+        mirror: { $ref: "#/definitions/mirror" },
         text: {
           type: "string",
           minLength: 1,
-          description: "Text layers only. Content; \n marks an explicit line break.",
+          description: "Content; \n marks an explicit line break.",
         },
         font: {
           type: "string",
           minLength: 1,
           description:
-            "Text layers only. A bundled font family (`bun run scene schema`-adjacent: " +
-            "see README). Unresolvable families fail the render loudly — never silent fallback.",
+            "A bundled font family. Unresolvable families fail the render " +
+            "loudly — never silent fallback.",
         },
         fontSize: {
           type: "number",
           exclusiveMinimum: 0,
-          description: "Text layers only. Font size in px.",
+          description: "Font size in px.",
         },
         color: { $ref: "#/definitions/color" },
         align: {
           enum: ["left", "center", "right"],
-          description: "Text layers only. Horizontal text alignment.",
+          description: "Horizontal text alignment.",
         },
         lineHeight: {
           type: "number",
           exclusiveMinimum: 0,
-          description: "Text layers only. Line height multiplier.",
+          description: "Line height multiplier.",
         },
       },
+    },
+    layer: {
+      oneOf: [{ $ref: "#/definitions/imageLayer" }, { $ref: "#/definitions/textLayer" }],
+      description: "Scene v1 layers: image or text.",
     },
   },
 } as const;

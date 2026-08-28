@@ -4,22 +4,24 @@
 
 ### Added
 
+- One asset-resolution contract for reusable-library and project-local assets: references (`<id>`, `library:<id>`, or a project-relative path) resolve to exact bytes, and `@<sha-256-or-prefix>` pins content so changed bytes create a new identity instead of silently changing old references (#8)
+- `bun run library resolve <ref>` prints an asset's exact content identity; `list` shows the identity prefix per asset; `--cutout` accepts the same reference syntax (#8)
+- Asset scans validate metadata shape (tags, name) and hash image bytes, failing with actionable errors on missing content, identity mismatches, malformed metadata, and duplicate ids (#8)
+- ADR-0002 records the content-identity invariant: identity is the sha-256 of the bytes, derived never stored (#24)
 - Versioned Scene v1 — a validated JSON document of ordered Image/Text layers rendered locally at exactly 1280×720: `bun run scene schema | inspect | validate | render` all return structured JSON with field-specific errors (unsupported versions, duplicate ids, missing assets, invalid transforms, unknown types) rejected before any browser starts (#9)
 - Layers carry stable unique ids plus visibility, position, size, rotation, mirroring, and opacity; image layers add exact-content Asset references (the #8 contract), crop/fit; text layers render bundled fonts by family with explicit line breaks (#9)
 - Scenes are fully offline by construction — fonts and assets load as data URIs, no command touches the network, and nothing starts a Generation Job (#9)
 - One shared headless-Chromium launcher (`src/browser.ts`) now backs both the legacy compose path and Scene rendering (#9)
 
-### Added
-
-- One asset-resolution contract for reusable-library and project-local assets: references (`<id>`, `library:<id>`, or a project-relative path) resolve to exact bytes, and `@<sha-256-or-prefix>` pins content so changed bytes create a new identity instead of silently changing old references (#8)
-- `bun run library resolve <ref>` prints an asset's exact content identity; `list` shows the identity prefix per asset; `--cutout` accepts the same reference syntax (#8)
-- Asset scans validate metadata shape (tags, name) and hash image bytes, failing with actionable errors on missing content, identity mismatches, malformed metadata, and duplicate ids (#8)
-- ADR-0002 records the content-identity invariant: identity is the sha-256 of the bytes, derived never stored (#24)
-
 ### Fixed
 
 - `--cutout <logo-or-plate-id>` silently composited the wrong asset kind where it previously failed loudly — library resolution at the cutout slot is now kind-constrained and rejects non-cutout ids (#24)
 - A one-off `--cutout <path>` bypassed the contract: `run.json` recorded no content hash and jpg/svg paths got invalid media types (`image/jpg`, `image/svg`); path one-offs now resolve through the same contract as ids, and an unsupported extension (e.g. `.gif`) now fails loudly instead of guessing a media type (#24)
+- Scene CLI failures escaped as stack traces instead of the documented `{ok:false,errors}` JSON — `run()` is now an error boundary, and the repo asset library is scanned only when a scene actually references a library asset (#25)
+- Image `crop` was applied with fill semantics regardless of `fit`; the cropped source window is now fitted per `fit` (cover/contain/fill/none) using the asset's measured intrinsic size (#25)
+- Project-scope asset references could read outside the scene directory (`../`, absolute paths, symlinks); resolution is now contained to the scene file's directory (#25)
+- `scene render --out` wrote any path, creating parent directories; output is now constrained to the scene directory, with the default `<scene-dir>/out/<name>.png` (#25)
+- The exported Scene schema advertised image and text properties on one layer type while validation rejected the mix — image/text are now `oneOf` branches, so the schema document itself enforces per-type fields (#25)
 
 ## [0.4.0]
 

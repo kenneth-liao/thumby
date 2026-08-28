@@ -8,12 +8,16 @@
  *   1 — the Scene failed validation, or rendering failed
  *   2 — usage error
  *
+ * run() is the error boundary: unexpected failures (a crashed render, I/O
+ * errors, a corrupt library) land in the same structured shape — nothing
+ * escapes as a raw stack trace.
+ *
  * All operations are offline and local: loading, validating, inspecting, and
  * rendering never touch the network and never start a Generation Job.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { LIBRARY_ROOT, scanLibrary, type Library } from "./assets.js";
+import { LIBRARY_ROOT, scanLibrary } from "./assets.js";
 import { SCENE_SCHEMA, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
 import { renderScene } from "./scene-render.js";
 import { closeBrowser } from "./browser.js";
@@ -27,7 +31,8 @@ thumby scene — versioned, locally rendered thumbnail compositions
   bun run scene render   <scene.json>   Render to PNG (1280×720)
 
 Options
-  --out <path>   Render output path (default: out/<scene-basename>.png)
+  --out <path>   Render output path inside the scene's directory
+                 (default: <scene-dir>/out/<scene-basename>.png)
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
 Exit codes: 0 ok, 1 invalid scene or render failure, 2 usage error.
@@ -112,7 +117,7 @@ function resolvedAssetSummary(resolved: {
   };
 }
 
-export async function run(args: string[]): Promise<CliResult> {
+async function dispatch(args: string[]): Promise<CliResult> {
   const [cmd, file, ...rest] = args;
 
   if (cmd === "schema" && file === undefined) return ok(SCENE_SCHEMA);
@@ -121,17 +126,21 @@ export async function run(args: string[]): Promise<CliResult> {
   if ((cmd === "validate" || cmd === "inspect" || cmd === "render") && file) {
     if (cmd !== "render" && rest.length)
       return usageError(`unexpected arguments: ${rest.join(" ")}`);
-    let outPath: string | undefined;
+    let outArg: string | undefined;
     if (cmd === "render") {
-      if (rest.length === 2 && rest[0] === "--out") outPath = rest[1];
+      if (rest.length === 2 && rest[0] === "--out") outArg = rest[1];
       else if (rest.length !== 0) return usageError("render accepts at most one --out <path>");
     }
 
-    const lib = await scanLibrary(LIBRARY_ROOT);
     const read = await readSceneFile(file);
     if ("errors" in read) return invalid(read.errors);
     // The one validation gate — every failure lands here, before any browser.
-    const result = await loadScene(path.dirname(path.resolve(file)), lib, read.raw);
+    // The library is a provider: scanned only if the scene names a library asset.
+    const result = await loadScene(
+      path.dirname(path.resolve(file)),
+      () => scanLibrary(LIBRARY_ROOT),
+      read.raw,
+    );
     if (!result.ok) return invalid(result.errors);
     const { resolved } = result;
 
@@ -160,10 +169,21 @@ export async function run(args: string[]): Promise<CliResult> {
     }
 
     const sceneFile = path.resolve(file);
-    const output =
-      outPath ?? path.join("out", `${path.basename(sceneFile, ".json")}.png`);
+    const projectDir = path.dirname(sceneFile);
+    const output = outArg
+      ? path.resolve(outArg)
+      : path.join(projectDir, "out", `${path.basename(sceneFile, ".json")}.png`);
+    // Render output belongs beside the scene — the same containment its
+    // project-scope assets obey, so a scene read/write never crosses its directory.
+    const outside =
+      path.relative(projectDir, output).startsWith("..") ||
+      path.isAbsolute(path.relative(projectDir, output));
+    if (outside)
+      return usageError(
+        `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
+      );
     const { png, width, height } = await renderScene(resolved);
-    await mkdir(path.dirname(path.resolve(output)), { recursive: true });
+    await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, png);
     return ok({ ok: true, output, width, height });
   }
@@ -173,6 +193,25 @@ export async function run(args: string[]): Promise<CliResult> {
       ? "missing command — expected schema, inspect, validate, or render"
       : `unknown command "${cmd}" — expected schema, inspect, validate, or render`,
   );
+}
+
+/**
+ * The error boundary every command reads through: an unexpected failure
+ * (render crash, I/O error, corrupt library) is structured JSON like any
+ * other — never a stack trace on stdout's contract.
+ */
+export async function run(args: string[]): Promise<CliResult> {
+  const [cmd] = args;
+  try {
+    return await dispatch(args);
+  } catch (err) {
+    return invalid([
+      {
+        path: cmd ?? "scene",
+        message: (err as Error).message || String(err),
+      },
+    ]);
+  }
 }
 
 if (import.meta.main) {
