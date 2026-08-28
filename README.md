@@ -280,4 +280,6 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
 - **Fonts are bundled and validated.** All faces ship in `assets/fonts/`
   (OFL-licensed; see `assets/fonts/LICENSE.md`) and load via `@font-face` from
   local bytes. A render fails loudly when a requested family cannot resolve —
-  silent fallback to a default sans is not allowed (#1).
+  silent fallback to a default sans is not allowed (#1). One gap until #12:
+  overlay `card.font` (chalk text marks) is not yet bundled or validated and
+  can still fall back silently on Linux.

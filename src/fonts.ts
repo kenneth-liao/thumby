@@ -33,6 +33,7 @@ export interface Pairing {
 }
 
 const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "fonts");
+export { FONTS_DIR };
 
 const SOURCE_SANS = {
   family: "Source Sans 3",
@@ -134,19 +135,39 @@ export function fontAssetPath(face: FontFace): string {
   return path.join(FONTS_DIR, face.file);
 }
 
-/** Reads the bundled bytes and throws naming the family when they are absent. */
-export function readFontAsset(face: FontFace): { family: string; weight: number; dataUri: string } {
+/**
+ * Single gate for bundled bytes: throws the one canonical message naming the
+ * family when its file is absent. Returns the resolved file path.
+ */
+function requireFontAsset(face: FontFace): string {
   const file = fontAssetPath(face);
   if (!existsSync(file)) {
     throw new Error(
       `Font "${face.family}" is not bundled: assets/fonts/${face.file} is missing`,
     );
   }
-  const b64 = readFileSync(file).toString("base64");
+  return file;
+}
+
+// data: URIs are pure per file — encode once, reuse across a batch sweep.
+const dataUriCache = new Map<string, string>();
+
+function fontDataUri(face: FontFace): string {
+  const file = requireFontAsset(face);
+  let uri = dataUriCache.get(file);
+  if (!uri) {
+    uri = `data:font/ttf;base64,${readFileSync(file).toString("base64")}`;
+    dataUriCache.set(file, uri);
+  }
+  return uri;
+}
+
+/** Reads the bundled bytes and throws naming the family when they are absent. */
+export function readFontAsset(face: FontFace): { family: string; weight: number; dataUri: string } {
   return {
     family: face.family,
     weight: face.weight,
-    dataUri: `data:font/ttf;base64,${b64}`,
+    dataUri: fontDataUri(face),
   };
 }
 
@@ -162,13 +183,7 @@ export function fontFaceCss(...faces: FontFace[]): string {
 
 /** Startup validation: every face of the pairing must be bundled. */
 export function assertFontAssets(p: Pairing): void {
-  for (const face of [p.display, p.sans]) {
-    if (!existsSync(fontAssetPath(face))) {
-      throw new Error(
-        `Font "${face.family}" is not bundled: assets/fonts/${face.file} is missing`,
-      );
-    }
-  }
+  for (const face of [p.display, p.sans]) requireFontAsset(face);
 }
 
 /**
@@ -177,17 +192,26 @@ export function assertFontAssets(p: Pairing): void {
  * monospace in the font stack, then monospace alone; equal widths mean the
  * family fell through to monospace, i.e. it silently failed to resolve.
  * The family is force-loaded first so unused faces are not false negatives.
+ * Must stay self-contained — Playwright serializes it into the page.
  */
-export const familyResolvedJs = `(async (family) => {
-  try { await document.fonts.load('32px "' + family + '"'); } catch { return false; }
+export const familyResolved = async (family: string): Promise<boolean> => {
+  try {
+    await document.fonts.load(`32px "${family}"`);
+  } catch {
+    return false;
+  }
   const probe = "mmmmwwwwmmmm";
   const el = document.createElement("span");
-  el.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font-size:32px;";
+  el.style.cssText =
+    "position:absolute;visibility:hidden;white-space:nowrap;font-size:32px;";
   el.textContent = probe;
   document.body.appendChild(el);
-  const width = (stack) => { el.style.fontFamily = stack; return el.getBoundingClientRect().width; };
-  const withFamily = width('"' + family + '", monospace');
+  const width = (stack: string) => {
+    el.style.fontFamily = stack;
+    return el.getBoundingClientRect().width;
+  };
+  const withFamily = width(`"${family}", monospace`);
   const fallback = width("monospace");
   el.remove();
   return withFamily !== fallback;
-})`;
+};

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync, unlinkSync } from "node:fs";
+import path from "node:path";
 import {
   PAIRINGS,
   DEFAULT_PAIRING,
@@ -7,7 +8,8 @@ import {
   fontAssetPath,
   readFontAsset,
   fontFaceCss,
-  familyResolvedJs,
+  familyResolved,
+  FONTS_DIR,
   type FontFace,
 } from "../src/fonts.js";
 import { compose } from "../src/compose.js";
@@ -43,10 +45,6 @@ describe("bundled font pairings", () => {
 });
 
 describe("fallback rejection probe", () => {
-  const isResolved = new Function(
-    `return ${familyResolvedJs}`,
-  )() as (family: string) => Promise<boolean>;
-
   it("accepts a bundled family loaded via @font-face and rejects an unregistered one", async () => {
     const browser = await chromium.launch();
     const page = await browser.newPage();
@@ -55,8 +53,8 @@ describe("fallback rejection probe", () => {
       await page.setContent(
         `<style>${fontFaceCss(p.display)}</style><body>x</body>`,
       );
-      expect(await page.evaluate(isResolved, p.display.family)).toBe(true);
-      expect(await page.evaluate(isResolved, "NoSuch Font")).toBe(false);
+      expect(await page.evaluate(familyResolved, p.display.family)).toBe(true);
+      expect(await page.evaluate(familyResolved, "NoSuch Font")).toBe(false);
     } finally {
       await browser.close();
     }
@@ -73,7 +71,7 @@ describe("fallback rejection probe", () => {
           src: url(data:font/ttf;base64,bm90LWFmb250) format("truetype"); }</style>
           <body>x</body>`,
       );
-      expect(await page.evaluate(isResolved, "Garbage")).toBe(false);
+      expect(await page.evaluate(familyResolved, "Garbage")).toBe(false);
     } finally {
       await browser.close();
     }
@@ -104,6 +102,29 @@ describe("compose with bundled fonts", () => {
       stroke: "#000",
     };
   }
+
+  it("rejects a render whose face registers but never resolves (the Linux failure mode)", async () => {
+    // Garbage bytes: the @font-face rule is emitted but the face never loads,
+    // so only the compose-level probe can catch the silent fallback.
+    const garbageFile = path.join(FONTS_DIR, ".test-garbage.ttf");
+    writeFileSync(garbageFile, "not a font");
+    PAIRINGS[".test-garbage"] = {
+      display: { family: "Garbage", weight: 400, file: ".test-garbage.ttf" },
+      sans: PAIRINGS[DEFAULT_PAIRING].sans,
+      tracking: "0",
+      textCase: "upper",
+      strokeScale: 1.35,
+      description: "test stub",
+    };
+    try {
+      await expect(
+        compose({ ...spec(), type: ".test-garbage" }),
+      ).rejects.toThrow(/Garbage/);
+    } finally {
+      delete PAIRINGS[".test-garbage"];
+      if (existsSync(garbageFile)) unlinkSync(garbageFile);
+    }
+  });
 
   it("renders a thumbnail with the bundled faces", async () => {
     const png = await compose(spec());

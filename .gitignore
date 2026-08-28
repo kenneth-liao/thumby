@@ -4,11 +4,10 @@ test-plate.png
 .env
 .env.local
 # Personal + third-party-licensed assets stay local (creator cutouts, brand
-# logos). Bundled OFL fonts are repo content and must ship — keep assets/fonts
-# out of this list (see assets/fonts/LICENSE.md).
-assets/cutouts/
-assets/identity/
-assets/logos/
-assets/plates/
+# logos) — deny-by-default so nothing private is ever tracked by accident.
+# Bundled OFL fonts are the one carve-out: repo content that must ship
+# (see assets/fonts/LICENSE.md).
+assets/*
+!assets/fonts/
 overlays/*.local.json
 .worktrees/

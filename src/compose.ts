@@ -3,7 +3,7 @@ import { STYLES, type StylePreset } from "./styles.js";
 import {
   resolvePairing,
   fontFaceCss,
-  familyResolvedJs,
+  familyResolved,
   type Pairing,
 } from "./fonts.js";
 import { renderOverlay, type OverlaySpec } from "./overlay.js";
@@ -175,12 +175,9 @@ export async function compose(spec: ComposeSpec): Promise<Buffer> {
     // Reject silent fallback before accepting output: if the requested family
     // did not resolve from its bundled bytes, fail naming it (no default-sans
     // substitution ever reaches a screenshot).
-    const isResolved = new Function(
-      `return ${familyResolvedJs}`,
-    )() as (family: string) => Promise<boolean>;
     const unresolved: string[] = [];
     for (const face of [font.display, font.sans]) {
-      if (!(await p.evaluate(isResolved, face.family))) unresolved.push(face.family);
+      if (!(await p.evaluate(familyResolved, face.family))) unresolved.push(face.family);
     }
     if (unresolved.length) {
       throw new Error(

@@ -94,6 +94,8 @@ async function renderMark(card: OverlayCard): Promise<string> {
   if (card.mark.type === "svg") return inlineSvg(card.mark.file, color);
   const style = [
     `color:${color}`,
+    // Not yet validated against bundled bytes — falls back silently off macOS.
+    // Chalkduster is an Apple font and cannot be bundled; replacement tracks #12.
     card.font ? `font-family:'${card.font}'` : "",
     card.textSize ? `font-size:${card.textSize}vw` : "",
   ]
