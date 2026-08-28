@@ -224,6 +224,38 @@ describe("manifest shape — build and strict read", () => {
     const [err] = (bad as { ok: false; errors: { path: string; message: string }[] }).errors;
     expect(err!.path).toBe("manifestVersion");
     expect(err!.message).toMatch(/manifestVersion 99/);
+    expect(err!.message).toMatch(/versions 1 and 2/);
+  });
+
+  it("reads a version 1 manifest — the pre-optimization schema", async () => {
+    // v2 (this tool) must keep reading what 0.14 wrote: same shape, no
+    // outputs[].optimization, manifestVersion 1.
+    const manifest = buildManifest({
+      manifestDir: fix.projectRoot,
+      sceneFile: fix.sceneFile,
+      sceneSha256: contentHash(fix.sceneBytes),
+      variant: [],
+      outputs: [
+        {
+          output: path.join(fix.projectRoot, "out", "show.png"),
+          width: 1280,
+          height: 720,
+          warnings: [],
+          png: Buffer.alloc(8),
+          resolved: await loadResolved({
+              schemaVersion: 1,
+              canvas: { width: 1280, height: 720 },
+              layers: [],
+            }),
+        },
+      ],
+    });
+    const v1 = JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>;
+    v1.manifestVersion = 1;
+    for (const o of v1.outputs as Record<string, unknown>[]) delete o.optimization;
+    const read = await readManifest("/tmp/x.manifest.json", Buffer.from(JSON.stringify(v1)));
+    expect(read.ok).toBe(true);
+    expect((read as { ok: true; manifest: { manifestVersion: number } }).manifest.manifestVersion).toBe(1);
   });
 
   it("readManifest round-trips what buildManifest wrote", async () => {
@@ -263,7 +295,7 @@ describe("scene render — every render writes its manifest", () => {
     expect(existsSync(manifestFile)).toBe(true);
     expect((output as { manifest: string }).manifest).toBe(manifestFile);
     const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
-    expect(manifest.manifestVersion).toBe(1);
+    expect(manifest.manifestVersion).toBe(MANIFEST_VERSION);
     expect(manifest.scene.path).toBe("../show.json");
     expect(manifest.scene.sha256).toBe(contentHash(fix.sceneBytes));
     expect(manifest.variant).toEqual([]);

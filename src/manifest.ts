@@ -20,8 +20,24 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
+import type { Optimization } from "./finalize.js";
 
-export const MANIFEST_VERSION = 1;
+export const MANIFEST_VERSION = 2;
+
+/**
+ * Versions this reader accepts. v2 added `outputs[].optimization` (the 2 MB
+ * finalization record); v1 manifests predate it and are read unchanged — the
+ * field is optional and self-validating, so one strict gate covers both.
+ * Downgrade limitation, documented in the README: a v1 reader (thumby ≤ 0.14)
+ * rejects v2 manifests naming the version — rerender with the tool version
+ * that wrote the manifest.
+ */
+const SUPPORTED_MANIFEST_VERSIONS = [1, 2] as const;
+/** The manifest schema versions this tool reads — derived from the tuple above. */
+export type ManifestVersion = (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
+
+const isManifestVersion = (v: unknown): v is ManifestVersion =>
+  typeof v === "number" && (SUPPORTED_MANIFEST_VERSIONS as readonly unknown[]).includes(v);
 
 /** sha-256 hex of the exact bytes — the identity a rerender verifies. */
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -92,6 +108,8 @@ export interface ManifestOutput {
   sha256: string;
   warnings: string[];
   assets: ManifestAsset[];
+  /** Present when finalization optimized the render to meet the 2 MB output limit. */
+  optimization?: Optimization;
 }
 
 /** The batch contact sheet, when the render wrote one. */
@@ -104,7 +122,7 @@ export interface ManifestContact {
 
 /** The portable record of one render invocation. */
 export interface RenderManifest {
-  manifestVersion: typeof MANIFEST_VERSION;
+  manifestVersion: ManifestVersion;
   tool: { name: string; version: string };
   schemaVersion: number;
   /** Scene identity: manifest-relative path plus the scene file's exact bytes. */
@@ -124,6 +142,8 @@ export interface ManifestRenderInput {
   png: Buffer;
   /** The resolved scene this output rendered — the source of its asset identities. */
   resolved: ResolvedScene;
+  /** Present when finalization optimized this output (recorded verbatim). */
+  optimization?: Optimization;
 }
 
 /**
@@ -155,6 +175,7 @@ export function buildManifest(opts: {
       sha256: sha256(o.png),
       warnings: o.warnings,
       assets: [...o.resolved.assets.entries()].map(([layer, a]) => assetEntry(layer, a)),
+      ...(o.optimization ? { optimization: o.optimization } : {}),
     })),
     ...(opts.contact
       ? {
@@ -196,7 +217,7 @@ class ManifestErrors {
 }
 
 /** Known keys per object — unknown keys are rejected, never silently ignored. */
-const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets"]);
+const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets", "optimization"]);
 const ASSET_KEYS = new Set(["layer", "scope", "id", "kind", "path", "hash", "mediaType"]);
 
 function checkAsset(at: string, v: unknown, errs: ManifestErrors): void {
@@ -228,6 +249,21 @@ function checkOutput(at: string, v: unknown, errs: ManifestErrors): void {
     errs.at(`${at}.warnings`, `"warnings" must be an array of strings`);
   if (!Array.isArray(v.assets)) errs.at(`${at}.assets`, `"assets" must be an array`);
   else v.assets.forEach((a, i) => checkAsset(`${at}.assets[${i}]`, a, errs));
+  if (v.optimization !== undefined) {
+    const at2 = `${at}.optimization`;
+    if (!isObject(v.optimization)) errs.at(at2, `"optimization" must be an object`);
+    else {
+      for (const k of Object.keys(v.optimization))
+        if (!["stage", "bytesBefore", "bytesAfter"].includes(k))
+          errs.at(`${at2}.${k}`, `"${k}" is not a valid optimization field`);
+      if (v.optimization.stage !== "lossless" && v.optimization.stage !== "quantized")
+        errs.at(`${at2}.stage`, `"stage" must be "lossless" or "quantized"`);
+      if (!isPosInt(v.optimization.bytesBefore))
+        errs.at(`${at2}.bytesBefore`, `"bytesBefore" must be a positive integer`);
+      if (!isPosInt(v.optimization.bytesAfter))
+        errs.at(`${at2}.bytesAfter`, `"bytesAfter" must be a positive integer`);
+    }
+  }
 }
 
 /**
@@ -262,10 +298,10 @@ export async function readManifest(
     )
       errs.at(k, `"${k}" is not a valid manifest field`);
 
-  if (raw.manifestVersion !== MANIFEST_VERSION)
+  if (!isManifestVersion(raw.manifestVersion))
     errs.at(
       "manifestVersion",
-      `unsupported manifestVersion ${JSON.stringify(raw.manifestVersion)} — this tool supports version ${MANIFEST_VERSION} only`,
+      `unsupported manifestVersion ${JSON.stringify(raw.manifestVersion)} — this tool reads versions ${SUPPORTED_MANIFEST_VERSIONS.join(" and ")} only`,
     );
   if (!isObject(raw.tool)) errs.at("tool", `"tool" must be an object with "name" and "version"`);
   else {

@@ -32,6 +32,7 @@ import {
   readManifest,
   writeManifest,
 } from "./manifest.js";
+import { finalizeRender, type Optimization } from "./finalize.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
@@ -44,7 +45,12 @@ thumby scene — versioned, locally rendered thumbnail compositions
   bun run scene inspect  <scene.json>   Structured layer summary (resolved asset hashes,
                                         theme-pinned identity, effective values)
   bun run scene validate <scene.json>   Validate: field-specific errors before any render
-  bun run scene render   <scene.json>   Render to PNG (1280×720)
+  bun run scene render   <scene.json>   Render to PNG (1280×720). The output must fit
+                                        YouTube's 2 MB limit: compliant renders pass
+                                        through untouched; oversized ones are optimized
+                                        locally (lossless first, then deterministic
+                                        palette quantization — dimensions never change);
+                                        a render that cannot comply fails with its size.
   bun run scene rerender <manifest.json>
                          Re-render from a Render manifest: verifies the scene
                          bytes and every recorded Asset identity first — a
@@ -259,6 +265,7 @@ async function renderVariants(
     warnings: string[];
     output: string;
     resolved: ResolvedScene;
+    optimization?: Optimization;
   }[] = [];
   for (const name of names) {
     const applied = resolveVariant(raw, name);
@@ -272,7 +279,20 @@ async function renderVariants(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
     const { png, width, height, warnings } = await renderScene(result.resolved);
-    rendered.push({ name, png, width, height, warnings, output, resolved: result.resolved });
+    // Finalization happens in phase 1: an uncompliant render leaves out/
+    // untouched instead of half-updating it.
+    const fin = finalizeRender(png, { at: output });
+    if (!fin.ok) return invalid(fin.errors);
+    rendered.push({
+      name,
+      png: fin.png,
+      width,
+      height,
+      warnings,
+      output,
+      resolved: result.resolved,
+      ...(fin.optimization ? { optimization: fin.optimization } : {}),
+    });
   }
   // Phase 2 — every render succeeded: write the outputs and the batch's
   // contact sheet (every output at 168px wide, labeled with its name), then
@@ -282,7 +302,15 @@ async function renderVariants(
   for (const r of rendered) {
     await mkdir(path.dirname(r.output), { recursive: true });
     await writeFile(r.output, r.png);
-    outputs.push({ variant: r.name, output: r.output, width: r.width, height: r.height, warnings: r.warnings });
+    outputs.push({
+      variant: r.name,
+      output: r.output,
+      width: r.width,
+      height: r.height,
+      bytes: r.png.length,
+      warnings: r.warnings,
+      ...(r.optimization ? { optimization: r.optimization } : {}),
+    });
     sheets.push({ label: r.name, png: r.png });
   }
   let contact: Record<string, unknown> | undefined;
@@ -311,6 +339,7 @@ async function renderVariants(
       warnings: r.warnings,
       png: r.png,
       resolved: r.resolved,
+      ...(r.optimization ? { optimization: r.optimization } : {}),
     })),
     ...(contactInput ? { contact: contactInput } : {}),
   });
@@ -508,8 +537,10 @@ async function dispatch(args: string[]): Promise<CliResult> {
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
     const { png, width, height, warnings } = await renderScene(resolved);
+    const fin = finalizeRender(png, { at: output });
+    if (!fin.ok) return invalid(fin.errors);
     await mkdir(path.dirname(output), { recursive: true });
-    await writeFile(output, png);
+    await writeFile(output, fin.png);
     const manifestFile = manifestPathFor(output);
     await writeManifest(
       manifestFile,
@@ -518,10 +549,29 @@ async function dispatch(args: string[]): Promise<CliResult> {
         sceneFile,
         sceneSha256: contentHash(read.bytes),
         variant: [],
-        outputs: [{ output, width, height, warnings, png, resolved }],
+        outputs: [
+          {
+            output,
+            width,
+            height,
+            warnings,
+            png: fin.png,
+            resolved,
+            ...(fin.optimization ? { optimization: fin.optimization } : {}),
+          },
+        ],
       }),
     );
-    return ok({ ok: true, output, width, height, warnings, manifest: manifestFile });
+    return ok({
+      ok: true,
+      output,
+      width,
+      height,
+      bytes: fin.png.length,
+      warnings,
+      manifest: manifestFile,
+      ...(fin.optimization ? { optimization: fin.optimization } : {}),
+    });
   }
 
   if (cmd === "rerender" && file && rest.length === 0) return rerenderManifest(file);
@@ -624,6 +674,7 @@ export async function rerenderManifest(
     width: number;
     height: number;
     warnings: string[];
+    optimization?: Optimization;
   }[] = [];
   for (const [i, name] of selected.entries()) {
     let doc = raw;
@@ -657,12 +708,18 @@ export async function rerenderManifest(
         ]);
     }
     const { png, width, height, warnings } = await renderScene(result.resolved, opts);
+    const output = path.resolve(manifestDir, manifest.outputs[i]!.output);
+    // Rerender publishes the same final contract: every rewritten output must
+    // still satisfy the 2 MB limit, through the same deterministic pipeline.
+    const fin = finalizeRender(png, { at: output });
+    if (!fin.ok) return invalid(fin.errors);
     rendered.push({
-      output: path.resolve(manifestDir, manifest.outputs[i]!.output),
-      png,
+      output,
+      png: fin.png,
       width,
       height,
       warnings,
+      ...(fin.optimization ? { optimization: fin.optimization } : {}),
     });
   }
   for (const r of rendered) {
@@ -688,7 +745,9 @@ export async function rerenderManifest(
       output: r.output,
       width: r.width,
       height: r.height,
+      bytes: r.png.length,
       warnings: r.warnings,
+      ...(r.optimization ? { optimization: r.optimization } : {}),
     })),
     ...(contact ? { contact } : {}),
   });
