@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "gradient-headline",
+      "type": "text",
+      "font": "Bevan",
+      "fontSize": 76,
+      "lineHeight": 1.1,
+      "casing": "upper",
+      "fill": { "from": "#ffb347", "to": "#c0182b", "angle": 12 },
+      "spans": [
+        { "text": "every " },
+        { "text": "span", "color": "#00c2ff" },
+        { "text": " keeps " },
+        { "text": "its own", "font": "Archivo Black", "fontSize": 60, "weight": 800 },
+        { "text": " color ", "casing": "lower", "tracking": 0.05 },
+        { "text": "over the fill" }
+      ],
+      "stroke": { "width": 3, "color": "#14100b" },
+      "shadows": [{ "x": 3, "y": 5, "blur": 14, "color": "#241a0e" }],
+      "position": { "x": 70, "y": 120 },
+      "size": { "width": 1140, "height": 420 },
+      "align": "center"
+    },
+    {
+      "id": "kicker",
+      "type": "text",
+      "text": "mixed-span fixture — gradient fill, span font/size/weight/casing overrides",
+      "font": "Source Sans 3",
+      "fontSize": 30,
+      "tracking": 0.2,
+      "casing": "upper",
+      "color": "#5a6572",
+      "position": { "x": 60, "y": 620 },
+      "size": { "width": 1160, "height": 50 },
+      "align": "center"
+    }
+  ]
+}

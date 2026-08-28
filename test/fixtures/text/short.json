@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "headline",
+      "type": "text",
+      "text": "Ship it",
+      "font": "Archivo Black",
+      "fontSize": 160,
+      "weight": 400,
+      "tracking": -0.02,
+      "casing": "upper",
+      "color": "#101318",
+      "stroke": { "width": 10, "color": "#ffd400" },
+      "shadows": [
+        { "x": 0, "y": 10, "blur": 0, "color": "#101318" },
+        { "x": 4, "y": 4, "blur": 24, "color": "#8899aa" }
+      ],
+      "position": { "x": 80, "y": 250 },
+      "size": { "width": 1120, "height": 240 },
+      "align": "center"
+    },
+    {
+      "id": "kicker",
+      "type": "text",
+      "text": "short fixture — solid fill, stroke, two shadows",
+      "font": "Source Sans 3",
+      "fontSize": 34,
+      "tracking": 0.24,
+      "casing": "upper",
+      "color": "#5a6572",
+      "position": { "x": 80, "y": 560 },
+      "size": { "width": 1120, "height": 60 },
+      "align": "center"
+    }
+  ]
+}

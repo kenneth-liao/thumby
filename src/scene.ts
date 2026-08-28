@@ -57,12 +57,39 @@ export interface ImageLayer extends BaseLayer {
   crop?: { left: number; top: number; right: number; bottom: number };
 }
 
+/** One styled run inside a text layer; unset fields inherit the layer's values. */
+export interface TextSpan {
+  text: string;
+  font?: string;
+  fontSize?: number;
+  weight?: number;
+  color?: string;
+  tracking?: number;
+  casing?: "upper" | "lower" | "none";
+}
+
 export interface TextLayer extends BaseLayer {
   type: "text";
-  text: string;
+  /** Plain content — mutually exclusive with `spans` (semantic pass). */
+  text?: string;
+  /** Styled runs — mutually exclusive with `text` (semantic pass). */
+  spans?: TextSpan[];
   font: string;
-  fontSize: number;
+  /** Fixed size — mutually exclusive with `autoFit` (semantic pass). */
+  fontSize?: number;
+  /** Shrink-to-fit range — mutually exclusive with `fontSize` (semantic pass). */
+  autoFit?: { min: number; max: number };
+  /** CSS font weight; default is the bundled face's natural weight. */
+  weight?: number;
+  /** Letter spacing in em. */
+  tracking?: number;
+  casing?: "upper" | "lower" | "none";
+  /** Solid fill — mutually exclusive with `fill` (semantic pass). */
   color?: string;
+  /** Linear gradient fill — mutually exclusive with `color` (semantic pass). */
+  fill?: { from: string; to: string; angle?: number };
+  stroke?: { width: number; color: string };
+  shadows?: { x: number; y: number; blur: number; color: string }[];
   align?: "left" | "center" | "right";
   lineHeight?: number;
 }
@@ -107,6 +134,40 @@ const branchValidators = {
   }),
 };
 
+/**
+ * The text contract — exactly one of text/spans, exactly one of
+ * fontSize/autoFit, at most one of color/fill — with its one set of friendly
+ * messages. The schema document enforces the rules itself (the textLayer
+ * `allOf` block), so this is only where a violation's opaque oneOf/not
+ * failure gets its message. Paths are layer-relative.
+ */
+function textContractErrors(layer: TextLayer): SceneError[] {
+  const errors: SceneError[] = [];
+  if (layer.text !== undefined && layer.spans !== undefined)
+    errors.push({
+      path: "spans",
+      message: `"spans" and "text" are mutually exclusive — content lives in one place`,
+    });
+  else if (layer.text === undefined && layer.spans === undefined)
+    errors.push({ path: "text", message: `text layers need "text" or "spans"` });
+  if (layer.fontSize !== undefined && layer.autoFit !== undefined)
+    errors.push({
+      path: "autoFit",
+      message: `"autoFit" and "fontSize" are mutually exclusive — one sizing mode per layer`,
+    });
+  else if (layer.fontSize === undefined && layer.autoFit === undefined)
+    errors.push({
+      path: "fontSize",
+      message: `text layers need "fontSize" or "autoFit"`,
+    });
+  if (layer.color !== undefined && layer.fill !== undefined)
+    errors.push({
+      path: "fill",
+      message: `"fill" and "color" are mutually exclusive — one fill per layer`,
+    });
+  return errors;
+}
+
 /** `jsonPointerToPath` output relative to a layer, prefixed with `layers[i]`. */
 const layerPath = (at: string, sub: string) => `${at}.${jsonPointerToPath(sub)}`;
 
@@ -138,28 +199,48 @@ function expandLayerErrors(errors: AjvError[]): SceneError[] {
     }
     const validate = branchValidators[type];
     validate(layer);
+    const branchErrors = validate.errors!;
+    // The schema's `allOf` block carries the text contract; its raw
+    // oneOf/not failures (and their branch noise) expand to the one friendly
+    // message home instead.
+    const inContract = (e: AjvError) => e.schemaPath.includes("/allOf/");
+    const contractHit = branchErrors.some(inContract);
     out.push(
-      ...validate.errors!.map((e): SceneError => {
-        if (e.keyword === "required") {
-          const prop = e.params?.missingProperty as string;
+      ...branchErrors
+        .filter((e) => !inContract(e))
+        .map((e): SceneError => {
+          // Nested hosts (spans) land their required/unknown-field errors on
+          // the offending span field, not the layer root.
+          const host = e.instancePath ? layerPath(at, e.instancePath) : at;
+          const inSpans = /^\/spans(\/|$)/.test(e.instancePath);
+          if (e.keyword === "required") {
+            const prop = e.params?.missingProperty as string;
+            return {
+              path: `${host}.${prop}`,
+              message: `"${prop}" is required on ${inSpans ? "spans" : `${type} layers`}`,
+            };
+          }
+          if (e.keyword === "additionalProperties") {
+            const prop = e.params?.additionalProperty as string;
+            return {
+              path: `${host}.${prop}`,
+              message: `"${prop}" is not a valid ${inSpans ? "span" : "layer"} property`,
+            };
+          }
           return {
-            path: `${at}.${prop}`,
-            message: `"${prop}" is required on ${type} layers`,
+            path: e.instancePath ? layerPath(at, e.instancePath) : at,
+            message: e.message ?? "is invalid",
           };
-        }
-        if (e.keyword === "additionalProperties") {
-          const prop = e.params?.additionalProperty as string;
-          return {
-            path: `${at}.${prop}`,
-            message: `"${prop}" is not a valid layer property`,
-          };
-        }
-        return {
-          path: e.instancePath ? layerPath(at, e.instancePath) : at,
-          message: e.message ?? "is invalid",
-        };
-      }),
+        }),
     );
+    if (contractHit) {
+      out.push(
+        ...textContractErrors(layer as unknown as TextLayer).map((e) => ({
+          ...e,
+          path: `${at}.${e.path}`,
+        })),
+      );
+    }
   }
   return out;
 }
@@ -239,6 +320,17 @@ function semanticErrors(scene: Scene): SceneError[] {
           `crop insets leave no source height (top ${top}% + bottom ${bottom}% ≥ 100%)`,
         );
     }
+
+    if (layer.type === "text") {
+      // The content/sizing/fill contract is the schema's (textContractErrors
+      // owns its messages); an inverted autoFit range is this pass's — no
+      // JSON Schema keyword compares two sibling values.
+      if (layer.autoFit && layer.autoFit.min > layer.autoFit.max)
+        at(
+          "autoFit",
+          `autoFit min (${layer.autoFit.min}px) exceeds max (${layer.autoFit.max}px)`,
+        );
+    }
   });
   return errors;
 }
@@ -271,14 +363,17 @@ async function resolutionErrors(
         });
       }
     } else {
-      try {
-        resolveFace(layer.font);
-      } catch (err) {
-        errors.push({
-          path: `layers[${i}].font`,
-          message: (err as Error).message,
-        });
-      }
+      const checkFont = (at: string, family: string) => {
+        try {
+          resolveFace(family);
+        } catch (err) {
+          errors.push({ path: at, message: (err as Error).message });
+        }
+      };
+      checkFont(`layers[${i}].font`, layer.font);
+      (layer.spans ?? []).forEach((span, j) => {
+        if (span.font) checkFont(`layers[${i}].spans[${j}].font`, span.font);
+      });
     }
   }
   return errors;

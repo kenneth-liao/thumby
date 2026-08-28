@@ -1,9 +1,10 @@
 {
   "name": "thumby",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "bun test --isolate",
     "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
     "library": "bun run src/library-cli.ts"

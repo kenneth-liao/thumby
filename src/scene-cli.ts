@@ -35,7 +35,9 @@ Options
                  (default: <scene-dir>/out/<scene-basename>.png)
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
-Exit codes: 0 ok, 1 invalid scene or render failure, 2 usage error.
+Successful renders carry a "warnings" array (e.g. an auto-fit layer that
+could not fit at its min floor). Exit codes: 0 ok, 1 invalid scene or render
+failure, 2 usage error.
 Rendering, validation, and inspection are offline and never start generation.
 `;
 
@@ -89,10 +91,18 @@ function summarizeLayer(layer: Record<string, unknown>): Record<string, unknown>
     if (layer.fit !== undefined) summary.fit = layer.fit;
     if (layer.crop !== undefined) summary.crop = layer.crop;
   } else {
-    summary.text = layer.text;
+    if (layer.text !== undefined) summary.text = layer.text;
+    if (layer.spans !== undefined) summary.spans = layer.spans;
     summary.font = layer.font;
-    summary.fontSize = layer.fontSize;
+    if (layer.fontSize !== undefined) summary.fontSize = layer.fontSize;
+    if (layer.autoFit !== undefined) summary.autoFit = layer.autoFit;
+    if (layer.weight !== undefined) summary.weight = layer.weight;
+    if (layer.tracking !== undefined) summary.tracking = layer.tracking;
+    if (layer.casing !== undefined) summary.casing = layer.casing;
     if (layer.color !== undefined) summary.color = layer.color;
+    if (layer.fill !== undefined) summary.fill = layer.fill;
+    if (layer.stroke !== undefined) summary.stroke = layer.stroke;
+    if (layer.shadows !== undefined) summary.shadows = layer.shadows;
     if (layer.align !== undefined) summary.align = layer.align;
     if (layer.lineHeight !== undefined) summary.lineHeight = layer.lineHeight;
   }
@@ -182,10 +192,10 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
-    const { png, width, height } = await renderScene(resolved);
+    const { png, width, height, warnings } = await renderScene(resolved);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, png);
-    return ok({ ok: true, output, width, height });
+    return ok({ ok: true, output, width, height, warnings });
   }
 
   return usageError(

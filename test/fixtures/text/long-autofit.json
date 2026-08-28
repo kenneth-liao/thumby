@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "fitted",
+      "type": "text",
+      "text": "This long headline must shrink into its box without spilling a single glyph outside",
+      "font": "Anton",
+      "autoFit": { "min": 24, "max": 220 },
+      "color": "#0c1a33",
+      "position": { "x": 60, "y": 90 },
+      "size": { "width": 1160, "height": 300 },
+      "align": "center"
+    },
+    {
+      "id": "capped",
+      "type": "text",
+      "text": "Same box, max 54 — the range caps the size",
+      "font": "Anton",
+      "autoFit": { "min": 24, "max": 54 },
+      "color": "#7a2f2f",
+      "position": { "x": 60, "y": 430 },
+      "size": { "width": 1160, "height": 120 },
+      "align": "center"
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "text": "long fixture — auto-fit picks the largest size that fits",
+      "font": "Source Sans 3",
+      "fontSize": 30,
+      "tracking": 0.2,
+      "casing": "upper",
+      "color": "#5a6572",
+      "position": { "x": 60, "y": 620 },
+      "size": { "width": 1160, "height": 50 },
+      "align": "center"
+    }
+  ]
+}

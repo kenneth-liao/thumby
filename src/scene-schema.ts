@@ -115,6 +115,84 @@ export const SCENE_SCHEMA = {
       pattern: "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
       description: "Hex color: #rgb, #rrggbb, or #rrggbbaa.",
     },
+    weight: {
+      type: "number",
+      minimum: 1,
+      maximum: 1000,
+      description:
+        "CSS font weight. Default: the bundled face's natural weight. Bundled " +
+        "faces ship one weight each; a weight off the face renders through " +
+        "Chromium's synthetic bold — deterministic in the renderer's pinned " +
+        "browser, but synthesized glyphs, not a second shipped face.",
+    },
+    tracking: {
+      type: "number",
+      description: "Letter spacing in em (negative tightens). Default: 0.",
+    },
+    casing: {
+      enum: ["upper", "lower", "none"],
+      description: "Text transform. Default: none — content renders as written.",
+    },
+    fill: {
+      type: "object",
+      additionalProperties: false,
+      required: ["from", "to"],
+      description:
+        "Linear gradient fill across the glyphs — mutually exclusive with " +
+        "color. Angle in CSS degrees; default 90 (to right).",
+      properties: {
+        from: { $ref: "#/definitions/color" },
+        to: { $ref: "#/definitions/color" },
+        angle: {
+          type: "number",
+          description: "Gradient direction in CSS degrees; default 90 (to right).",
+        },
+      },
+    },
+    stroke: {
+      type: "object",
+      additionalProperties: false,
+      required: ["width", "color"],
+      description:
+        "Outline drawn around the glyphs. The stroke paints outside the fill " +
+        "(paint-order: stroke fill), so glyphs stay readable.",
+      properties: {
+        width: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description: "Stroke width in px.",
+        },
+        color: { $ref: "#/definitions/color" },
+      },
+    },
+    shadows: {
+      type: "array",
+      minItems: 1,
+      description: "Text shadows under the glyphs, listed back to front.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["x", "y", "blur", "color"],
+        properties: {
+          x: { type: "number", description: "Horizontal offset in px." },
+          y: { type: "number", description: "Vertical offset in px." },
+          blur: { type: "number", minimum: 0, description: "Blur radius in px." },
+          color: { $ref: "#/definitions/color" },
+        },
+      },
+    },
+    autoFit: {
+      type: "object",
+      additionalProperties: false,
+      required: ["min", "max"],
+      description:
+        "Shrink-to-fit range — mutually exclusive with fontSize. The render " +
+        "picks the largest size in [min, max] whose text fits the layer box.",
+      properties: {
+        min: { type: "number", exclusiveMinimum: 0, description: "Smallest size in px." },
+        max: { type: "number", exclusiveMinimum: 0, description: "Largest size in px." },
+      },
+    },
     assetRef: {
       type: "string",
       minLength: 1,
@@ -150,8 +228,18 @@ export const SCENE_SCHEMA = {
     },
     textLayer: {
       type: "object",
-      required: ["id", "type", "position", "size", "text", "font", "fontSize"],
+      required: ["id", "type", "position", "size", "font"],
       additionalProperties: false,
+      // The text contract is enforced here so the published schema document
+      // is self-sufficient — a schema-only consumer rejects exactly what
+      // thumby rejects. src/scene.ts maps violations to friendly messages.
+      // Content and sizing are exactly-one (oneOf); fill is at-most-one,
+      // since a layer with neither falls back to the default color.
+      allOf: [
+        { oneOf: [{ required: ["text"] }, { required: ["spans"] }] },
+        { oneOf: [{ required: ["fontSize"] }, { required: ["autoFit"] }] },
+        { not: { allOf: [{ required: ["color"] }, { required: ["fill"] }] } },
+      ],
       properties: {
         id: { $ref: "#/definitions/id" },
         type: { const: "text" },
@@ -164,7 +252,18 @@ export const SCENE_SCHEMA = {
         text: {
           type: "string",
           minLength: 1,
-          description: "Content; \n marks an explicit line break.",
+          description:
+            "Content; \n marks an explicit line break. Mutually exclusive " +
+            "with spans — content lives in one place.",
+        },
+        spans: {
+          type: "array",
+          minItems: 1,
+          description:
+            "Independently styled runs replacing plain text — mutually " +
+            "exclusive with text. Each span inherits the layer's typography " +
+            "and overrides any span-styleable field.",
+          items: { $ref: "#/definitions/textSpan" },
         },
         font: {
           type: "string",
@@ -176,9 +275,18 @@ export const SCENE_SCHEMA = {
         fontSize: {
           type: "number",
           exclusiveMinimum: 0,
-          description: "Font size in px.",
+          description:
+            "Fixed font size in px. Mutually exclusive with autoFit — exactly " +
+            "one sizing mode per layer.",
         },
+        autoFit: { $ref: "#/definitions/autoFit" },
+        weight: { $ref: "#/definitions/weight" },
+        tracking: { $ref: "#/definitions/tracking" },
+        casing: { $ref: "#/definitions/casing" },
         color: { $ref: "#/definitions/color" },
+        fill: { $ref: "#/definitions/fill" },
+        stroke: { $ref: "#/definitions/stroke" },
+        shadows: { $ref: "#/definitions/shadows" },
         align: {
           enum: ["left", "center", "right"],
           description: "Horizontal text alignment.",
@@ -188,6 +296,32 @@ export const SCENE_SCHEMA = {
           exclusiveMinimum: 0,
           description: "Line height multiplier.",
         },
+      },
+    },
+    textSpan: {
+      type: "object",
+      required: ["text"],
+      additionalProperties: false,
+      properties: {
+        text: {
+          type: "string",
+          minLength: 1,
+          description: "Span content; \n breaks lines like layer text does.",
+        },
+        font: {
+          type: "string",
+          minLength: 1,
+          description: "Bundled family override for this span.",
+        },
+        fontSize: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description: "Absolute size override for this span (px).",
+        },
+        weight: { $ref: "#/definitions/weight" },
+        color: { $ref: "#/definitions/color" },
+        tracking: { $ref: "#/definitions/tracking" },
+        casing: { $ref: "#/definitions/casing" },
       },
     },
     layer: {
