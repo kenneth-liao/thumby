@@ -1,4 +1,3 @@
-import { chromium, type Browser } from "playwright";
 import { STYLES, type StylePreset } from "./styles.js";
 import {
   resolvePairing,
@@ -7,6 +6,7 @@ import {
   type Pairing,
 } from "./fonts.js";
 import { renderOverlay, type OverlaySpec } from "./overlay.js";
+import { getBrowser } from "./browser.js";
 import type { TextZone } from "./generate.js";
 
 export const WIDTH = 1280;
@@ -137,16 +137,6 @@ function page(
 </body></html>`;
 }
 
-let shared: Browser | null = null;
-async function browser(): Promise<Browser> {
-  if (!shared) shared = await chromium.launch();
-  return shared;
-}
-export async function closeBrowser() {
-  await shared?.close();
-  shared = null;
-}
-
 export async function compose(spec: ComposeSpec): Promise<Buffer> {
   const preset = STYLES[spec.style];
   if (!preset) {
@@ -163,7 +153,7 @@ export async function compose(spec: ComposeSpec): Promise<Buffer> {
   const cutoutUri = spec.cutout
     ? `data:${spec.cutout.mediaType};base64,${Buffer.from(spec.cutout.bytes).toString("base64")}`
     : null;
-  const ctx = await (await browser()).newContext({
+  const ctx = await (await getBrowser()).newContext({
     viewport: { width: WIDTH, height: HEIGHT },
     deviceScaleFactor: 1,
   });

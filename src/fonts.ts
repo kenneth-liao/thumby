@@ -121,6 +121,31 @@ export const PAIRINGS: Record<string, Pairing> = {
 
 export const DEFAULT_PAIRING = "condensed";
 
+/**
+ * Every bundled face keyed by family — derived from PAIRINGS, the single home
+ * of font facts. Scene text layers resolve their `font` family through this
+ * registry, so a Scene can only ever name fonts the renderer ships bytes for.
+ */
+export const BUNDLED_FACES: ReadonlyMap<string, FontFace> = (() => {
+  const faces = new Map<string, FontFace>();
+  for (const p of Object.values(PAIRINGS))
+    for (const f of [p.display, p.sans])
+      if (!faces.has(f.family)) faces.set(f.family, f);
+  return faces;
+})();
+
+/**
+ * Resolve a text layer's font family to its bundled face. Throws naming the
+ * available families when nothing matches, so a Scene never falls back silently.
+ */
+export function resolveFace(family: string): FontFace {
+  const hit = BUNDLED_FACES.get(family);
+  if (hit) return hit;
+  throw new Error(
+    `unknown font family "${family}" — bundled families: ${[...BUNDLED_FACES.keys()].join(", ")}`,
+  );
+}
+
 export function resolvePairing(name: string): Pairing {
   const p = PAIRINGS[name];
   if (!p) {

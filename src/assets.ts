@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,9 @@ export interface Library {
   plates: LibraryEntry<PlateMeta>[];
   cutouts: LibraryEntry<CutoutMeta>[];
 }
+
+/** The canonical empty library — for callers resolving project-scope refs only. */
+export const EMPTY_LIBRARY: Library = { logos: [], plates: [], cutouts: [] };
 
 const KIND_DIRS = ["logos", "plates", "cutouts"] as const;
 type KindDir = (typeof KIND_DIRS)[number];
@@ -235,7 +238,8 @@ export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta
 //
 // One runtime-validated contract for both scopes: reusable-library assets
 // (`<id>` / `library:<id>`) and project-local assets (a project-relative
-// path). A reference may pin exact content with `@<hash>` — the sha-256 of
+// path, contained inside the project root — symlinks included). A reference
+// may pin exact content with `@<hash>` — the sha-256 of
 // the bytes, full or an unambiguous prefix. The file's bytes are the single
 // source of truth: the hash is always derived, never stored in meta.json, so
 // changing the bytes creates a different identity and old pinned references
@@ -407,7 +411,8 @@ export async function resolveAsset(
     };
   }
 
-  const abs = path.resolve(projectRoot, parsed.path!);
+  const root = path.resolve(projectRoot);
+  const abs = path.resolve(root, parsed.path!);
   let bytes: Uint8Array;
   try {
     bytes = new Uint8Array(await readFile(abs));
@@ -419,8 +424,19 @@ export async function resolveAsset(
       );
     throw err;
   }
+  // Containment: the file actually read (symlinks resolved) must live inside
+  // the project root — a scene is an externally authored document, and its
+  // project scope must never reach past the scene directory it ships with.
+  const rel = path.relative(root, abs).split(path.sep).join("/");
+  const realRoot = await realpath(root);
+  const realFile = await realpath(abs);
+  const relReal = path.relative(realRoot, realFile);
+  if (relReal === "" || relReal.startsWith("..") || path.isAbsolute(relReal))
+    throw new Error(
+      `project asset "${parsed.path}" escapes the project directory (${root}) — ` +
+        `scene assets must live inside the scene file's directory`,
+    );
   const hash = contentHash(bytes);
-  const rel = path.relative(projectRoot, abs).split(path.sep).join("/");
   verifyIdentity(rel, parsed.hash, hash);
   return { scope: "project", path: rel, bytes, mediaType: mediaTypeFor(abs), hash };
 }
