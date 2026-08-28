@@ -18,13 +18,20 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { LIBRARY_ROOT, scanLibrary, type Library, type ResolvedAsset } from "./assets.js";
-import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
+import type { Page } from "playwright";
+import { LIBRARY_ROOT, scanLibrary, contentHash, type Library, type ResolvedAsset } from "./assets.js";
+import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError, type ResolvedScene } from "./scene.js";
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
 import { renderScene, renderContactSheet, countLayers } from "./scene-render.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
+import {
+  buildManifest,
+  manifestPathFor,
+  readManifest,
+  writeManifest,
+} from "./manifest.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
@@ -38,6 +45,13 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         theme-pinned identity, effective values)
   bun run scene validate <scene.json>   Validate: field-specific errors before any render
   bun run scene render   <scene.json>   Render to PNG (1280×720)
+  bun run scene rerender <manifest.json>
+                         Re-render from a Render manifest: verifies the scene
+                         bytes and every recorded Asset identity first — a
+                         missing or changed input fails instead of silently
+                         resolving newer content — then rewrites the recorded
+                         outputs at their recorded paths. Works after moving
+                         the whole project directory.
 
 Options
   --out <path>   init: where to write the Scene — inside the current
@@ -65,9 +79,14 @@ Themes and templates
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
 Successful renders carry a "warnings" array (e.g. an auto-fit layer that
-could not fit at its min floor). Exit codes: 0 ok, 1 invalid scene or render
-failure, 2 usage error.
-Rendering, validation, and inspection are offline and never start generation.
+could not fit at its min floor) and write a Render manifest beside the
+output(s) (<out>.manifest.json) recording the scene identity, selected
+variants, exact Asset identities, tool version, and outputs — every path
+in it is relative to the manifest itself, so the project can be relocated
+and re-rendered offline via "scene rerender". Exit codes: 0 ok, 1 invalid
+scene or render failure, 2 usage error.
+Rendering, validation, inspection, and rerendering are offline and never
+start generation.
 `;
 
 interface CliResult {
@@ -88,17 +107,17 @@ const invalid = (errors: SceneError[]): CliResult => ({
 /** Read and parse a scene file. Parse failures are structured errors too. */
 async function readSceneFile(
   file: string,
-): Promise<{ raw: unknown } | { errors: SceneError[] }> {
-  let text: string;
+): Promise<{ raw: unknown; bytes: Buffer } | { errors: SceneError[] }> {
+  let bytes: Buffer;
   try {
-    text = await readFile(file, "utf8");
+    bytes = await readFile(file);
   } catch (err) {
     return {
       errors: [{ path: file, message: `cannot read scene file: ${(err as Error).message}` }],
     };
   }
   try {
-    return { raw: JSON.parse(text) };
+    return { raw: JSON.parse(bytes.toString("utf8")), bytes };
   } catch (err) {
     return { errors: [{ path: file, message: `invalid JSON: ${(err as Error).message}` }] };
   }
@@ -207,6 +226,11 @@ const outsideDir = (dir: string, target: string): boolean => {
  * gate; every output lands in the scene's out/ directory named after its
  * variant. A batch also writes one contact sheet — every output at 168px
  * wide with its name — the full-size PNGs remain the review originals.
+ * The invocation writes one Render manifest beside the outputs: a
+ * single-variant render pairs with its PNG (<scene>.<variant>.manifest.json),
+ * a batch writes <scene>.variants.manifest.json covering every output and
+ * the contact sheet (a variant name can never contain a dot, so the two
+ * names can never collide).
  */
 async function renderVariants(
   projectDir: string,
@@ -215,6 +239,8 @@ async function renderVariants(
   raw: unknown,
   names: string[],
   outArg: string | undefined,
+  sceneFile: string,
+  sceneSha256: string,
 ): Promise<CliResult> {
   if (names.length === 0 || names.some((n) => !n))
     return usageError("--variant needs at least one variant name");
@@ -225,7 +251,15 @@ async function renderVariants(
   // Phase 1 — resolve, gate, and render everything before any file is
   // written: a failing variant leaves the out/ directory untouched instead
   // of silently half-updated.
-  const rendered: { name: string; png: Buffer; width: number; height: number; warnings: string[]; output: string }[] = [];
+  const rendered: {
+    name: string;
+    png: Buffer;
+    width: number;
+    height: number;
+    warnings: string[];
+    output: string;
+    resolved: ResolvedScene;
+  }[] = [];
   for (const name of names) {
     const applied = resolveVariant(raw, name);
     if (!applied.ok) return invalid(applied.errors);
@@ -238,10 +272,11 @@ async function renderVariants(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
     const { png, width, height, warnings } = await renderScene(result.resolved);
-    rendered.push({ name, png, width, height, warnings, output });
+    rendered.push({ name, png, width, height, warnings, output, resolved: result.resolved });
   }
   // Phase 2 — every render succeeded: write the outputs and the batch's
-  // contact sheet (every output at 168px wide, labeled with its name).
+  // contact sheet (every output at 168px wide, labeled with its name), then
+  // the manifest that records exactly what was written.
   const outputs: Record<string, unknown>[] = [];
   const sheets: { label: string; png: Buffer }[] = [];
   for (const r of rendered) {
@@ -251,14 +286,41 @@ async function renderVariants(
     sheets.push({ label: r.name, png: r.png });
   }
   let contact: Record<string, unknown> | undefined;
+  let contactInput: Parameters<typeof buildManifest>[0]["contact"];
   if (sheets.length > 1) {
     const sheet = await renderContactSheet(sheets);
     const contactPath = path.join(projectDir, "out", `${baseName}.contact.png`);
     await mkdir(path.dirname(contactPath), { recursive: true });
     await writeFile(contactPath, sheet.png);
     contact = { output: contactPath, width: sheet.width, height: sheet.height };
+    contactInput = { output: contactPath, width: sheet.width, height: sheet.height, png: sheet.png };
   }
-  return ok({ ok: true, outputs, ...(contact ? { contact } : {}) });
+  const manifestFile =
+    rendered.length === 1
+      ? manifestPathFor(rendered[0]!.output)
+      : path.join(projectDir, "out", `${baseName}.variants.manifest.json`);
+  const manifest = buildManifest({
+    manifestDir: path.dirname(manifestFile),
+    sceneFile,
+    sceneSha256,
+    variant: rendered.map((r) => r.name),
+    outputs: rendered.map((r) => ({
+      output: r.output,
+      width: r.width,
+      height: r.height,
+      warnings: r.warnings,
+      png: r.png,
+      resolved: r.resolved,
+    })),
+    ...(contactInput ? { contact: contactInput } : {}),
+  });
+  await writeManifest(manifestFile, manifest);
+  return ok({
+    ok: true,
+    outputs,
+    manifest: manifestFile,
+    ...(contact ? { contact } : {}),
+  });
 }
 
 async function dispatch(args: string[]): Promise<CliResult> {
@@ -370,7 +432,6 @@ async function dispatch(args: string[]): Promise<CliResult> {
     const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), read.raw);
     if (!result.ok) return invalid(result.errors);
     const { resolved } = result;
-
     if (cmd === "validate") {
       return ok({
         ok: true,
@@ -390,6 +451,8 @@ async function dispatch(args: string[]): Promise<CliResult> {
         read.raw,
         variantArg.split(","),
         outArg,
+        path.resolve(file),
+        contentHash(read.bytes),
       );
 
     if (cmd === "inspect") {
@@ -447,14 +510,188 @@ async function dispatch(args: string[]): Promise<CliResult> {
     const { png, width, height, warnings } = await renderScene(resolved);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, png);
-    return ok({ ok: true, output, width, height, warnings });
+    const manifestFile = manifestPathFor(output);
+    await writeManifest(
+      manifestFile,
+      buildManifest({
+        manifestDir: path.dirname(manifestFile),
+        sceneFile,
+        sceneSha256: contentHash(read.bytes),
+        variant: [],
+        outputs: [{ output, width, height, warnings, png, resolved }],
+      }),
+    );
+    return ok({ ok: true, output, width, height, warnings, manifest: manifestFile });
   }
+
+  if (cmd === "rerender" && file && rest.length === 0) return rerenderManifest(file);
+  if (cmd === "rerender")
+    return usageError(`"scene rerender" takes exactly one manifest path`);
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, or render"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, or render`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, render, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, render, or rerender`,
   );
+}
+
+/**
+ * Re-render from a Render manifest. Every recorded identity is verified
+ * before anything is written: the scene file's exact bytes (the manifest's
+ * scene.sha256), then each output's resolved Asset identities against a
+ * fresh pass through the load gate. A missing input fails at the gate with
+ * its field error; a changed input — including an unpinned reference that
+ * now resolves to newer content — fails identity verification here instead
+ * of silently rendering different pixels. All paths resolve relative to the
+ * manifest file's own directory, so moving the whole project directory
+ * changes nothing; outputs stay contained in the scene's directory, the
+ * same rule `render --out` enforces.
+ *
+ * `page` is a test seam: rendering in an existing (e.g. route-blocked) page.
+ */
+export async function rerenderManifest(
+  manifestFile: string,
+  opts?: { page?: Page },
+): Promise<CliResult> {
+  const read = await readManifest(manifestFile);
+  if (!read.ok) return invalid(read.errors);
+  const manifest = read.manifest;
+  const manifestDir = path.dirname(path.resolve(manifestFile));
+  const sceneFile = path.resolve(manifestDir, manifest.scene.path);
+  const sceneDir = path.dirname(sceneFile);
+  // Output containment: the recorded outputs must land inside the scene's
+  // directory — the same rule render --out enforces, so a manifest can never
+  // direct a write outside the project even if hand-edited.
+  const contained = (rel: string, at: string): SceneError | undefined =>
+    outsideDir(sceneDir, path.resolve(manifestDir, rel))
+      ? {
+          path: at,
+          message: `"${rel}" escapes the scene's directory (${sceneDir}) — manifest outputs must stay beside the scene`,
+        }
+      : undefined;
+  for (const [i, o] of manifest.outputs.entries()) {
+    const bad = contained(o.output, `outputs[${i}].output`);
+    if (bad) return invalid([bad]);
+  }
+  if (manifest.contact) {
+    const bad = contained(manifest.contact.output, "contact.output");
+    if (bad) return invalid([bad]);
+  }
+
+  // Scene identity: the exact bytes the render used, or nothing proceeds.
+  let sceneBytes: Buffer;
+  try {
+    sceneBytes = await readFile(sceneFile);
+  } catch (err) {
+    return invalid([
+      {
+        path: "scene.path",
+        message: `cannot read the manifest's scene file "${manifest.scene.path}": ${(err as Error).message}`,
+      },
+    ]);
+  }
+  const sceneHash = contentHash(sceneBytes);
+  if (sceneHash !== manifest.scene.sha256)
+    return invalid([
+      {
+        path: "scene.sha256",
+        message:
+          `the scene file changed since this render: the manifest recorded ${manifest.scene.sha256.slice(0, 12)}… ` +
+          `but it now hashes to ${sceneHash.slice(0, 12)}….\n` +
+          `Rerender would not reproduce the recorded outputs — edit the scene and render normally instead.`,
+      },
+    ]);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(sceneBytes.toString("utf8"));
+  } catch (err) {
+    return invalid([{ path: "scene.path", message: `invalid JSON: ${(err as Error).message}` }]);
+  }
+
+  // One resolved render per output, in recorded order: the i-th output is the
+  // render of variant[i] (or the base Scene when no variant was selected).
+  const selected = manifest.variant.length ? manifest.variant : [null];
+  if (selected.length !== manifest.outputs.length)
+    return invalid([
+      {
+        path: "outputs",
+        message: `${manifest.outputs.length} outputs recorded for ${manifest.variant.length} selected variants — the manifest is inconsistent`,
+      },
+    ]);
+  const rendered: {
+    output: string;
+    png: Buffer;
+    width: number;
+    height: number;
+    warnings: string[];
+  }[] = [];
+  for (const [i, name] of selected.entries()) {
+    let doc = raw;
+    if (name !== null) {
+      const applied = resolveVariant(raw, name);
+      if (!applied.ok) return invalid(applied.errors);
+      doc = applied.raw;
+    }
+    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), doc);
+    if (!result.ok) return invalid(result.errors);
+    // Asset identity verification — the manifest is the exactness contract:
+    // every recorded layer must still resolve to the very bytes it rendered.
+    for (const [j, a] of manifest.outputs[i]!.assets.entries()) {
+      const resolved = result.resolved.assets.get(a.layer);
+      if (!resolved)
+        return invalid([
+          {
+            path: `outputs[${i}].assets[${j}].layer`,
+            message: `layer "${a.layer}" is recorded in the manifest but has no resolved asset in this scene`,
+          },
+        ]);
+      if (resolved.hash !== a.hash)
+        return invalid([
+          {
+            path: `outputs[${i}].assets[${j}].hash`,
+            message:
+              `asset identity mismatch for layer "${a.layer}": the manifest recorded ${a.hash.slice(0, 12)}… ` +
+              `but the input now resolves to ${resolved.hash.slice(0, 12)}….\n` +
+              `The content changed since the render — re-render normally to refresh the manifest.`,
+          },
+        ]);
+    }
+    const { png, width, height, warnings } = await renderScene(result.resolved, opts);
+    rendered.push({
+      output: path.resolve(manifestDir, manifest.outputs[i]!.output),
+      png,
+      width,
+      height,
+      warnings,
+    });
+  }
+  for (const r of rendered) {
+    await mkdir(path.dirname(r.output), { recursive: true });
+    await writeFile(r.output, r.png);
+  }
+  let contact: Record<string, unknown> | undefined;
+  if (manifest.contact) {
+    const sheet = await renderContactSheet(
+      rendered.map((r, i) => ({ label: selected[i] ?? "base", png: r.png })),
+    );
+    const contactPath = path.resolve(manifestDir, manifest.contact.output);
+    await mkdir(path.dirname(contactPath), { recursive: true });
+    await writeFile(contactPath, sheet.png);
+    contact = { output: contactPath, width: sheet.width, height: sheet.height };
+  }
+  return ok({
+    ok: true,
+    manifest: path.resolve(manifestFile),
+    variant: manifest.variant,
+    outputs: rendered.map((r, i) => ({
+      ...(selected[i] !== null ? { variant: selected[i] } : {}),
+      output: r.output,
+      width: r.width,
+      height: r.height,
+      warnings: r.warnings,
+    })),
+    ...(contact ? { contact } : {}),
+  });
 }
 
 /**
