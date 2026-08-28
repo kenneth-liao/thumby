@@ -478,12 +478,11 @@ function* layerEntries(
  */
 function semanticErrors(scene: Scene): SceneError[] {
   const errors: SceneError[] = [];
-  // Connector targets name top-level layers or groups. Connectors themselves
-  // are excluded — they have no box to anchor to. First occurrence wins; a
-  // duplicated id is its own error below either way.
+  // Connector targets name top-level layers or groups. Every top-level id is
+  // in the map — connectors included — and the kind is checked at the one
+  // lookup below, so "connectors are not targets" has a single home.
   const topLevel = new Map<string, SceneLayer>();
-  for (const layer of scene.layers)
-    if (layer.type !== "connector" && !topLevel.has(layer.id)) topLevel.set(layer.id, layer);
+  for (const layer of scene.layers) if (!topLevel.has(layer.id)) topLevel.set(layer.id, layer);
   const firstOwner = new Map<string, string>();
   for (const { layer, at: here, topLevel: atTop } of layerEntries(scene.layers, (i) => `layers[${i}]`)) {
     const field = (name: string, message: string) =>

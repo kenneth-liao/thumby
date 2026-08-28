@@ -151,7 +151,7 @@ describe("connector layers — validation", () => {
       scene([connectorLayer(), connectorLayer({ id: "chain", to: "line" }), shapeLayer(), shapeLayer({ id: "target" })]),
     );
     expect(errors[0]!.path).toBe("layers[1].to");
-    expect(errors[0]!.message).toMatch(/connector/);
+    expect(errors[0]!.message).toMatch(/targets connector/);
   });
 
   it("rejects a connector nested inside a group — geometry resolves in frame coordinates", async () => {
