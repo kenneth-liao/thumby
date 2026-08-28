@@ -10,7 +10,7 @@ import { compose, closeBrowser, WIDTH, HEIGHT } from "./compose.js";
 import type { OverlaySpec } from "./overlay.js";
 import { MODELS, DEFAULT_MODEL, resolveModel } from "./models.js";
 import { STYLES, DEFAULT_STYLE } from "./styles.js";
-import { PAIRINGS, DEFAULT_PAIRING } from "./fonts.js";
+import { PAIRINGS, DEFAULT_PAIRING, assertFontAssets } from "./fonts.js";
 import { loadLibrary } from "./overlay.js";
 import { resolveCutout } from "./assets.js";
 
@@ -200,6 +200,12 @@ if (!STYLES[values.style!]) {
 }
 if (!PAIRINGS[values.type!]) {
   fail(`Unknown --type "${values.type}". Options: ${Object.keys(PAIRINGS).join(", ")}`);
+}
+// Startup validation: never start generating for an output that can't render.
+try {
+  assertFontAssets(PAIRINGS[values.type!]);
+} catch (e) {
+  fail((e as Error).message);
 }
 if (!process.env.AI_GATEWAY_API_KEY && !values.bg) {
   fail(

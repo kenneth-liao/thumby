@@ -9,6 +9,13 @@ assets are gitignored, so this doc is the standard others can copy.
 The final thumbnail is always **1280×720** (YouTube 720p, 16:9). Every sizing
 rule below derives from that canvas.
 
+## Fonts
+
+Thumbnail faces must be OFL-licensed and bundled as TTF bytes under
+`assets/fonts/` — see `assets/fonts/LICENSE.md` for the manifest and
+provenance. Never ship Apple or Microsoft system fonts; never fetch fonts at
+render time.
+
 ## Logos
 
 ### Resolution — SVG first, else ≥512×512

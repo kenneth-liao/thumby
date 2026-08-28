@@ -66,26 +66,28 @@ type pairing and style. `--help` covers the rest of the flags.
 ## Type
 
 Every pairing is a display face for the headline plus a humanist sans for the
-eyebrow and kicker. All ship with macOS — no `@font-face`, no network fetch,
-no licensing to think about.
+eyebrow and kicker. All faces are OFL-licensed TTFs bundled under
+`assets/fonts/` and loaded through `@font-face` from local bytes — no system
+fonts, no network fetch, identical rendering on any machine. If a requested
+family fails to resolve, the render fails loudly instead of falling back.
 
 **Punchy display sans** — pinned to caps, heavier outline:
 
 | `--type` | Pairing | |
 |---|---|---|
-| `condensed` *(default)* | Helvetica Neue Condensed Black + Gill Sans | Most caps per line at a given size, heaviest strokes. |
-| `impact` | Impact + Gill Sans | The canonical thumbnail face. |
-| `black` | Arial Black + Gill Sans | Widest and boldest; fewer words per line. |
-| `phosphate` | Phosphate Solid + Gill Sans | Condensed with more character. |
+| `condensed` *(default)* | Anton + Source Sans 3 | Most caps per line at a given size, heaviest strokes. |
+| `impact` | Archivo Black + Source Sans 3 | The canonical thumbnail face. |
+| `black` | Oswald Bold + Source Sans 3 | Tall condensed caps. |
+| `phosphate` | Passion One Black + Source Sans 3 | Condensed with more character. |
 
 **Cartographic serif** — editorial, follows each style's own casing:
 
 | `--type` | Pairing | |
 |---|---|---|
-| `clarendon` | Superclarendon Black + Gill Sans | Park-sign slab. |
-| `iowan` | Iowan Old Style Black + Seravek | Warmer, bookish oldstyle. |
-| `hoefler` | Hoefler Text Black + Optima | Engraved; thins out at small sizes. |
-| `charter` | Charter Bold + Avenir Next | Sturdy, modern, lowest contrast. |
+| `clarendon` | Bevan + Source Sans 3 | Park-sign slab. |
+| `iowan` | Lora Bold + Nunito Sans Bold | Warmer, bookish oldstyle. |
+| `hoefler` | Alegreya Black + Marcellus | Engraved; thins out at small sizes. |
+| `charter` | Bitter Bold + Montserrat | Sturdy, modern, lowest contrast. |
 
 A pairing carries two overrides so both families look right through the same
 preset: display sans pins to uppercase and multiplies the stroke by 1.35,
@@ -97,7 +99,7 @@ since serif brackets disappear under an outline that heavy.
 |---|---|
 | `src/models.ts` | Gateway model registry — id, call shape, cost, reference-image support |
 | `src/generate.ts` | Builds the plate prompt and calls the Gateway |
-| `src/fonts.ts` | The four type pairings — serif, sans, weights, tracking |
+| `src/fonts.ts` | The type pairings — bundled OFL faces, weights, tracking, font validation |
 | `src/styles.ts` | The four layout presets. **Edit this to make it look like you.** |
 | `src/compose.ts` | Renders text over the plate in Chromium, auto-fits, screenshots |
 | `src/cli.ts` | Flags, orchestration, contact sheet |
@@ -275,7 +277,9 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
   both dimensions divisible by 16, which it requires.
 - `--eyebrow` is where the humanist sans does its work. Without it the pairing
   is carrying only one voice.
-- **Fonts are macOS system fonts.** On Linux/CI every pairing silently falls
-  back to a default sans with no error — output looks wrong. Productionising
-  requires bundled font files + a startup assertion that the family resolved
-  (#1).
+- **Fonts are bundled and validated.** All faces ship in `assets/fonts/`
+  (OFL-licensed; see `assets/fonts/LICENSE.md`) and load via `@font-face` from
+  local bytes. A render fails loudly when a requested family cannot resolve —
+  silent fallback to a default sans is not allowed (#1). One gap until #12:
+  overlay `card.font` (chalk text marks) is not yet bundled or validated and
+  can still fall back silently on Linux.
