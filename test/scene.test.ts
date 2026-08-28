@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
-import { inflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
@@ -16,6 +15,7 @@ import {
 } from "../src/scene.js";
 import { scenePageHtml, renderScene, type ImageSize } from "../src/scene-render.js";
 import { run as cliRun } from "../src/scene-cli.js";
+import { decodePng } from "./png.js";
 
 // --- fixtures -------------------------------------------------------------
 
@@ -122,67 +122,7 @@ async function htmlOf(layers: SceneLayer[], natural?: Map<string, ImageSize>): P
 
 // --- pixel decoding -----------------------------------------------------------
 
-/**
- * Minimal PNG reader for 8-bit non-interlaced RGB/RGBA screenshots:
- * inflates the IDAT stream and unfilters scanlines so tests can assert on
- * actual composited pixels, not just header dimensions.
- */
-function decodePng(buf: Buffer): {
-  width: number;
-  height: number;
-  px: (x: number, y: number) => number[];
-} {
-  const width = buf.readUInt32BE(16);
-  const height = buf.readUInt32BE(20);
-  const colorType = buf[25]!;
-  const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : NaN;
-  if (!Number.isInteger(bpp)) throw new Error(`unsupported PNG color type ${colorType}`);
-
-  const idat: Buffer[] = [];
-  let off = 8;
-  while (off + 12 <= buf.length) {
-    const len = buf.readUInt32BE(off);
-    if (buf.toString("ascii", off + 4, off + 8) === "IDAT")
-      idat.push(buf.subarray(off + 8, off + 8 + len));
-    off += 12 + len;
-  }
-  const raw = inflateSync(Buffer.concat(idat));
-
-  const stride = width * bpp;
-  const out = Buffer.alloc(height * stride);
-  const paeth = (a: number, b: number, c: number) => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-  let pos = 0;
-  for (let y = 0; y < height; y++) {
-    const filter = raw[pos++]!;
-    const cur = out.subarray(y * stride, (y + 1) * stride);
-    const prev = y > 0 ? out.subarray((y - 1) * stride, y * stride) : null;
-    for (let x = 0; x < stride; x++) {
-      const a = x >= bpp ? cur[x - bpp]! : 0;
-      const b = prev ? prev[x]! : 0;
-      const c = prev && x >= bpp ? prev[x - bpp]! : 0;
-      let v = raw[pos + x]!;
-      if (filter === 1) v += a;
-      else if (filter === 2) v += b;
-      else if (filter === 3) v += (a + b) >> 1;
-      else if (filter === 4) v += paeth(a, b, c);
-      cur[x] = v & 0xff;
-    }
-    pos += stride;
-  }
-  return {
-    width,
-    height,
-    px: (x, y) => {
-      const at = y * stride + x * bpp;
-      const rgb = Array.from(out.subarray(at, at + bpp));
-      return bpp === 3 ? [...rgb, 255] : rgb;
-    },
-  };
-}
+/** Pixel assertions decode the composited screenshot — one reader in test/png.ts. */
 
 // --- validation ---------------------------------------------------------------
 
@@ -229,9 +169,9 @@ describe("scene validation", () => {
   });
 
   it("rejects unknown layer types", async () => {
-    const errors = await loadErrors(scene([{ ...imageLayer(), type: "shape" }]));
+    const errors = await loadErrors(scene([{ ...imageLayer(), type: "connector" }]));
     expect(errors[0]!.path).toBe("layers[0].type");
-    expect(errors[0]!.message).toMatch(/unknown layer type "shape"/);
+    expect(errors[0]!.message).toMatch(/unknown layer type "connector"/);
   });
 
   it("rejects unknown layer properties", async () => {
@@ -341,27 +281,31 @@ describe("scene validation", () => {
     expect(errors[0]!.message).toMatch(/"text" is not a valid layer property/);
   });
 
-  it("exports image and text as separate oneOf branches — the schema matches enforcement", async () => {
+  it("exports every layer type as a separate oneOf branch — the schema matches enforcement", async () => {
     const layer = (SCENE_SCHEMA.definitions as Record<string, any>).layer;
-    expect(layer.oneOf).toHaveLength(2);
+    expect(layer.oneOf).toHaveLength(4);
     expect(layer.oneOf.map((b: { $ref: string }) => b.$ref)).toEqual([
       "#/definitions/imageLayer",
       "#/definitions/textLayer",
+      "#/definitions/shapeLayer",
+      "#/definitions/groupLayer",
     ]);
     // Each branch is closed and requires its own type's fields.
-    for (const name of ["imageLayer", "textLayer"] as const) {
+    for (const name of ["imageLayer", "textLayer", "shapeLayer", "groupLayer"] as const) {
       const branch = (SCENE_SCHEMA.definitions as Record<string, any>)[name];
       expect(branch.additionalProperties).toBe(false);
       expect(branch.required).toContain("type");
     }
     expect((SCENE_SCHEMA.definitions as Record<string, any>).imageLayer.required).toContain("asset");
     expect((SCENE_SCHEMA.definitions as Record<string, any>).textLayer.required).toContain("font");
+    expect((SCENE_SCHEMA.definitions as Record<string, any>).shapeLayer.required).toContain("shape");
+    expect((SCENE_SCHEMA.definitions as Record<string, any>).groupLayer.required).toContain("layers");
   });
 
   it("rejects a non-object layer", async () => {
     const errors = await loadErrors(scene(["nope" as unknown as SceneLayer]));
     expect(errors[0]!.path).toBe("layers[0]");
-    expect(errors[0]!.message).toMatch(/image or text object/);
+    expect(errors[0]!.message).toMatch(/image, text, shape, or group object/);
   });
 
   it("rejects crop insets that leave no source width or height", async () => {
@@ -1119,7 +1063,7 @@ describe("scene cli", () => {
     expect(exitCode).toBe(0);
     const schema = output as typeof SCENE_SCHEMA;
     const layer = schema.definitions?.layer as { oneOf?: { $ref: string }[] };
-    expect(layer.oneOf).toHaveLength(2);
+    expect(layer.oneOf).toHaveLength(4);
     expect(schema.properties?.layers?.type).toBe("array");
   });
 

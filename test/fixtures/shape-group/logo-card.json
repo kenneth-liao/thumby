@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    {
+      "id": "backdrop",
+      "type": "shape",
+      "shape": "rect",
+      "fill": { "from": "#0f172a", "to": "#1e293b", "angle": 120 },
+      "position": { "x": 0, "y": 0 },
+      "size": { "width": 1280, "height": 720 }
+    },
+    {
+      "id": "logo-card",
+      "type": "group",
+      "position": { "x": 400, "y": 220 },
+      "size": { "width": 480, "height": 270 },
+      "effects": { "shadow": { "x": 10, "y": 14, "blur": 28, "color": "#020617" } },
+      "layers": [
+        {
+          "id": "card-bg",
+          "type": "shape",
+          "shape": "rect",
+          "radius": 24,
+          "color": "#101820",
+          "border": { "width": 2, "color": "#334155" },
+          "position": { "x": 0, "y": 0 },
+          "size": { "width": 480, "height": 270 }
+        },
+        {
+          "id": "card-logo",
+          "type": "shape",
+          "shape": "ellipse",
+          "color": "#22d3ee",
+          "position": { "x": 24, "y": 24 },
+          "size": { "width": 120, "height": 120 }
+        },
+        {
+          "id": "card-label",
+          "type": "text",
+          "text": "LOGO",
+          "font": "Anton",
+          "fontSize": 64,
+          "color": "#ffffff",
+          "position": { "x": 180, "y": 90 },
+          "size": { "width": 270, "height": 90 }
+        },
+        {
+          "id": "card-tag",
+          "type": "shape",
+          "shape": "triangle",
+          "color": "#f59e0b",
+          "position": { "x": 420, "y": 230 },
+          "size": { "width": 40, "height": 30 }
+        }
+      ]
+    }
+  ]
+}

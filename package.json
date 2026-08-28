@@ -1,10 +1,10 @@
 {
   "name": "thumby",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test --isolate",
+    "test": "for f in test/*.test.ts; do bun test --isolate \"$f\" || exit 1; done",
     "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
     "library": "bun run src/library-cli.ts"

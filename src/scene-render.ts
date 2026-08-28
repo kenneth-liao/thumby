@@ -17,7 +17,15 @@ import {
   resolveFace,
   type FontFace,
 } from "./fonts.js";
-import type { ResolvedScene, ImageLayer, TextLayer, TextSpan } from "./scene.js";
+import type {
+  ResolvedScene,
+  ImageLayer,
+  TextLayer,
+  ShapeLayer,
+  TextSpan,
+  SceneLayer,
+  Effects,
+} from "./scene.js";
 
 export interface SceneRenderResult {
   png: Buffer;
@@ -46,6 +54,14 @@ const esc = (s: string) =>
 /** Rounding that keeps geometry readable without visible drift. */
 const n = (v: number) => Number(v.toFixed(4));
 
+/** Every layer in the scene tree, depth-first — groups yield their children. */
+export function* layerTree(layers: SceneLayer[]): Generator<SceneLayer> {
+  for (const layer of layers) {
+    yield layer;
+    if (layer.type === "group") yield* layerTree(layer.layers);
+  }
+}
+
 /** The bundled faces a scene's text layers and spans name, deduped in scene order. */
 export function sceneFaces(resolved: ResolvedScene): FontFace[] {
   const faces: FontFace[] = [];
@@ -53,7 +69,7 @@ export function sceneFaces(resolved: ResolvedScene): FontFace[] {
     const face = resolveFace(family);
     if (!faces.includes(face)) faces.push(face);
   };
-  for (const layer of resolved.scene.layers) {
+  for (const layer of layerTree(resolved.scene.layers)) {
     if (layer.type !== "text") continue;
     add(layer.font);
     for (const span of layer.spans ?? []) if (span.font) add(span.font);
@@ -61,8 +77,15 @@ export function sceneFaces(resolved: ResolvedScene): FontFace[] {
   return faces;
 }
 
-function transformCss(layer: { rotation?: number; mirror?: boolean }): string {
+function transformCss(layer: {
+  rotation?: number;
+  mirror?: boolean;
+  scale?: number;
+}): string {
   const parts: string[] = [];
+  // Scale first in the list — CSS applies right-to-left, so a group mirrors,
+  // then rotates, then scales; a uniform scale commutes with both.
+  if (layer.scale !== undefined && layer.scale !== 1) parts.push(`scale(${layer.scale})`);
   if (layer.rotation) parts.push(`rotate(${layer.rotation}deg)`);
   if (layer.mirror) parts.push("scaleX(-1)");
   return parts.length ? ` transform:${parts.join(" ")};` : "";
@@ -196,6 +219,100 @@ function textMarkup(layer: TextLayer): string {
 const CASING_CSS = { upper: "uppercase", lower: "lowercase" } as const;
 
 /**
+ * The effects object as one CSS filter chain, in the documented order
+ * blur → colorAdjust → glow → shadow: blur and the adjustments grade the
+ * content, then glow and shadow are drop-shadows computed from that result,
+ * following its alpha. Only set fields emit — unset fields are the CSS
+ * defaults (unchanged), so the markup states exactly the scene's values.
+ */
+function effectsFilter(effects: Effects | undefined): string {
+  if (!effects) return "";
+  const parts: string[] = [];
+  if (effects.blur !== undefined) parts.push(`blur(${effects.blur}px)`);
+  const c = effects.colorAdjust;
+  if (c) {
+    if (c.brightness !== undefined) parts.push(`brightness(${c.brightness})`);
+    if (c.contrast !== undefined) parts.push(`contrast(${c.contrast})`);
+    if (c.saturate !== undefined) parts.push(`saturate(${c.saturate})`);
+    if (c.hueRotate !== undefined) parts.push(`hue-rotate(${c.hueRotate}deg)`);
+  }
+  if (effects.glow)
+    parts.push(`drop-shadow(0px 0px ${effects.glow.radius}px ${effects.glow.color})`);
+  if (effects.shadow)
+    parts.push(
+      `drop-shadow(${effects.shadow.x}px ${effects.shadow.y}px ${effects.shadow.blur}px ${effects.shadow.color})`,
+    );
+  return parts.length ? `filter:${parts.join(" ")}` : "";
+}
+
+/**
+ * Per-page linearGradient factory: converts the CSS-gradient `angle` contract
+ * (0° = to top, clockwise) into objectBoundingBox coordinates. Direction
+ * vector (sin θ, −cos θ) centered on the box: 90° (the default) runs
+ * left→right, 0° bottom→top. Ids are numbered per page in layer order, so
+ * every gradient in one document has a unique anchor.
+ */
+function gradientFactory(): (
+  fill: { from: string; to: string; angle?: number },
+) => { defs: string; fill: string } {
+  let next = 0;
+  return (fill) => {
+    const id = `grad-${++next}`;
+    const a = ((fill.angle ?? 90) * Math.PI) / 180;
+    const dx = Math.sin(a) / 2;
+    const dy = -Math.cos(a) / 2;
+    return {
+      defs:
+        `<defs><linearGradient id="${id}" x1="${n(0.5 - dx)}" y1="${n(0.5 - dy)}" ` +
+        `x2="${n(0.5 + dx)}" y2="${n(0.5 + dy)}">` +
+        `<stop offset="0" stop-color="${fill.from}"/><stop offset="1" stop-color="${fill.to}"/>` +
+        `</linearGradient></defs>`,
+      fill: `url(#${id})`,
+    };
+  };
+}
+
+/**
+ * One shape as an inline SVG sized exactly to its layer box (viewBox = box),
+ * so shape geometry needs no scaling math: rect fills the box, ellipse is
+ * inscribed, triangle has its apex top-center. `overflow:visible` lets a
+ * centered border stroke paint outside the box — the same outside-the-glyphs
+ * contract text stroke has.
+ */
+function shapeMarkup(
+  layer: ShapeLayer,
+  gradient: ReturnType<typeof gradientFactory>,
+): string {
+  const W = n(layer.size.width);
+  const H = n(layer.size.height);
+  let fill = layer.color ?? "#000";
+  let defs = "";
+  if (layer.fill) {
+    const g = gradient(layer.fill);
+    defs = g.defs;
+    fill = g.fill;
+  }
+  const border = layer.border
+    ? ` stroke="${layer.border.color}" stroke-width="${layer.border.width}"`
+    : "";
+  // Clamp here with CSS border-radius semantics — radius ≥ half the shorter
+  // side is a pill — rather than the browser's SVG clamp, which narrows only
+  // the axis it hits and would not round into a pill.
+  const r = layer.radius !== undefined ? Math.min(layer.radius, W / 2, H / 2) : 0;
+  const radius = layer.shape === "rect" && r > 0 ? ` rx="${n(r)}" ry="${n(r)}"` : "";
+  const geom =
+    layer.shape === "rect"
+      ? `<rect x="0" y="0" width="${W}" height="${H}"${radius}`
+      : layer.shape === "ellipse"
+        ? `<ellipse cx="${n(W / 2)}" cy="${n(H / 2)}" rx="${n(W / 2)}" ry="${n(H / 2)}"`
+        : `<polygon points="${n(W / 2)},0 0,${H} ${W},${H}"`;
+  return (
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;overflow:visible;display:block">` +
+    `${defs}${geom} fill="${fill}"${border}/></svg>`
+  );
+}
+
+/**
  * One span as an inline element carrying only its overrides — everything
  * unset inherits the layer element's inline styles through CSS inheritance.
  */
@@ -217,8 +334,9 @@ function spanMarkup(span: TextSpan, layerHasGradient: boolean): string {
 
 function layerMarkup(
   resolved: ResolvedScene,
-  layer: ImageLayer | TextLayer,
+  layer: SceneLayer,
   natural: Map<string, ImageSize>,
+  gradient: ReturnType<typeof gradientFactory>,
 ): string {
   const { position, size, opacity, visible } = layer;
   const styles = [
@@ -229,14 +347,25 @@ function layerMarkup(
   ];
   if (opacity !== undefined) styles.push(`opacity:${opacity}`);
   if (visible === false) styles.push("display:none");
+  if (layer.type === "image" || layer.type === "group") {
+    const filter = effectsFilter(layer.effects);
+    if (filter) styles.push(filter);
+  }
   const crop = layer.type === "image" && layer.crop ? "overflow:hidden;" : "";
-  const inner =
-    layer.type === "image"
-      ? imageMarkup(layer, imageUri(resolved, layer.id), natural.get(layer.id))
-      : textMarkup(layer);
+  // A group is a positioned container: children render at their group-local
+  // coordinates inside it and transform with it. Nothing flattens — every
+  // child stays an addressable layer element.
+  const children =
+    layer.type === "group"
+      ? layer.layers.map((c) => layerMarkup(resolved, c, natural, gradient)).join("")
+      : layer.type === "image"
+        ? imageMarkup(layer, imageUri(resolved, layer.id), natural.get(layer.id))
+        : layer.type === "shape"
+          ? shapeMarkup(layer, gradient)
+          : textMarkup(layer);
   return `<div class="scene-layer" data-layer-id="${esc(layer.id)}" style="position:absolute;${crop}${styles.join(
     ";",
-  )};${transformCss(layer)}">${inner}</div>`;
+  )};${transformCss(layer)}">${children}</div>`;
 }
 
 function imageUri(resolved: ResolvedScene, layerId: string): string {
@@ -255,13 +384,14 @@ export function scenePageHtml(
 ): string {
   const { scene } = resolved;
   const fontCss = fontFaceCss(...sceneFaces(resolved));
+  const gradient = gradientFactory();
   return `<!doctype html><html><head><meta charset="utf-8"><style>
   * { margin:0; padding:0; box-sizing:border-box; }
   ${fontCss}
   body { width:${scene.canvas.width}px; height:${scene.canvas.height}px; overflow:hidden; position:relative; background:#fff; }
   .scene-layer { transform-origin:center; }
 </style></head><body>
-  ${scene.layers.map((layer) => layerMarkup(resolved, layer, natural)).join("\n  ")}
+  ${scene.layers.map((layer) => layerMarkup(resolved, layer, natural, gradient)).join("\n  ")}
 </body></html>`;
 }
 
@@ -277,13 +407,13 @@ const loadImageSize = (uri: string): Promise<{ w: number; h: number }> =>
     img.src = uri;
   });
 
-/** Intrinsic sizes for every cropped image layer, measured from the real bytes. */
+/** Intrinsic sizes for every cropped image layer (at any depth), measured from the real bytes. */
 async function measureCroppedImages(
   page: Page,
   resolved: ResolvedScene,
 ): Promise<Map<string, ImageSize>> {
   const natural = new Map<string, ImageSize>();
-  for (const layer of resolved.scene.layers) {
+  for (const layer of layerTree(resolved.scene.layers)) {
     if (layer.type !== "image" || !layer.crop || natural.has(layer.id)) continue;
     const { w, h } = await page.evaluate(loadImageSize, imageUri(resolved, layer.id));
     if (!w || !h)
@@ -388,7 +518,7 @@ export async function renderScene(
     // see final glyph metrics, not fallback shapes. A layer that cannot fit
     // even at its `min` floor still renders — but is reported, never silent.
     const warnings: string[] = [];
-    for (const layer of resolved.scene.layers) {
+    for (const layer of layerTree(resolved.scene.layers)) {
       if (layer.type !== "text" || !layer.autoFit) continue;
       const fitted = await page.evaluate(fitTextLayer, {
         id: layer.id,

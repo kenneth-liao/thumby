@@ -54,6 +54,8 @@ export interface ImageLayer extends BaseLayer {
   type: "image";
   asset: string;
   fit?: "cover" | "contain" | "fill" | "none";
+  /** Editable visual effects applied to the image's rendered alpha. */
+  effects?: Effects;
   crop?: { left: number; top: number; right: number; bottom: number };
 }
 
@@ -94,7 +96,53 @@ export interface TextLayer extends BaseLayer {
   lineHeight?: number;
 }
 
-export type SceneLayer = ImageLayer | TextLayer;
+export type ShapeKind = "rect" | "ellipse" | "triangle";
+
+/**
+ * Editable visual effects for image and group content — emitted as one CSS
+ * filter chain in a fixed order (blur → colorAdjust → glow → shadow); glow
+ * and shadow follow the content's alpha.
+ */
+export interface Effects {
+  blur?: number;
+  colorAdjust?: {
+    brightness?: number;
+    contrast?: number;
+    saturate?: number;
+    hueRotate?: number;
+  };
+  glow?: { radius: number; color: string };
+  shadow?: { x: number; y: number; blur: number; color: string };
+}
+
+export interface ShapeLayer extends BaseLayer {
+  type: "shape";
+  shape: ShapeKind;
+  /** Corner radius in px — rect only (semantic pass). Clamped to half the shorter side in markup. */
+  radius?: number;
+  /** Solid fill — mutually exclusive with `fill`; default #000 when neither is set. */
+  color?: string;
+  /** Linear gradient fill — mutually exclusive with `color` (semantic pass). */
+  fill?: { from: string; to: string; angle?: number };
+  /** Outline centered on the shape's edge. */
+  border?: { width: number; color: string };
+}
+
+export interface GroupLayer extends BaseLayer {
+  type: "group";
+  /**
+   * Resize factor for the whole group, applied around its center. Children
+   * are authored in group-local px and never flattened; 1 (default) renders
+   * them at their authored sizes.
+   */
+  scale?: number;
+  /** Editable visual effects applied to the whole composed subtree. */
+  effects?: Effects;
+  /** Nested layers in group-local px; array order is compositing order. */
+  layers: SceneLayer[];
+}
+
+export type SceneLayer = ImageLayer | TextLayer | ShapeLayer | GroupLayer;
 
 export interface Scene {
   schemaVersion: number;
@@ -132,6 +180,21 @@ const branchValidators = {
     ...(SCENE_SCHEMA.definitions.textLayer as unknown as Record<string, unknown>),
     definitions: SCENE_SCHEMA.definitions,
   }),
+  shape: ajv.compile({
+    ...(SCENE_SCHEMA.definitions.shapeLayer as unknown as Record<string, unknown>),
+    definitions: SCENE_SCHEMA.definitions,
+  }),
+  group: ajv.compile({
+    ...(SCENE_SCHEMA.definitions.groupLayer as unknown as Record<string, unknown>),
+    definitions: SCENE_SCHEMA.definitions,
+  }),
+};
+
+type LayerType = keyof typeof branchValidators;
+
+const claimedType = (layer: unknown): LayerType | undefined => {
+  const t = (layer as Record<string, unknown> | null | undefined)?.type;
+  return t === "image" || t === "text" || t === "shape" || t === "group" ? t : undefined;
 };
 
 /**
@@ -168,79 +231,122 @@ function textContractErrors(layer: TextLayer): SceneError[] {
   return errors;
 }
 
+/**
+ * The shape fill contract — at most one of color/fill — with its friendly
+ * message, mirroring the shapeLayer `allOf` block the way textContractErrors
+ * mirrors the text one. Paths are layer-relative.
+ */
+function shapeContractErrors(layer: ShapeLayer): SceneError[] {
+  if (layer.color !== undefined && layer.fill !== undefined)
+    return [
+      {
+        path: "fill",
+        message: `"fill" and "color" are mutually exclusive — one fill per shape`,
+      },
+    ];
+  return [];
+}
+
 /** `jsonPointerToPath` output relative to a layer, prefixed with `layers[i]`. */
 const layerPath = (at: string, sub: string) => `${at}.${jsonPointerToPath(sub)}`;
 
+/** A JSON pointer chain of layer indices: a layer node at some nesting depth. */
+const LAYER_POINTER = /^(?:\/layers\/\d+)+$/;
+
 /**
- * Expand a failed oneOf at `layers[i]` into that layer's field-specific schema
- * errors, dropping both branches' raw inner errors. Non-layer errors pass through.
+ * Expand a failed layer oneOf into field-specific schema errors, recursing
+ * into nested group children so a failure three groups deep still names
+ * `layers[1].layers[0].layers[2].asset`. Scene-level errors pass through.
  */
 function expandLayerErrors(errors: AjvError[]): SceneError[] {
+  return expandBranch(errors, undefined, "");
+}
+
+/**
+ * Map one claimed layer node's branch errors. `at` is the node's field path
+ * ("" for the scene root); branch errors and nested failed-child oneOf errors
+ * are relative to it. `allOf` contract violations expand to the per-type
+ * friendly message home.
+ */
+function expandBranch(errors: AjvError[], root: unknown, at: string): SceneError[] {
   const out: SceneError[] = [];
-  for (const err of errors) {
-    const m = /^\/layers\/(\d+)(\/|$)/.exec(err.instancePath);
-    if (!m) {
-      out.push(describeSchemaError(err));
+  const type = root === undefined ? undefined : claimedType(root);
+  const inContract = (e: AjvError) => e.schemaPath.includes("/allOf/");
+  const contractHit = type !== undefined && errors.some(inContract);
+  const fieldErrors = errors.filter((e) => !inContract(e));
+
+  const failedChild = new Set<string>();
+  for (const e of fieldErrors)
+    if (e.keyword === "oneOf" && LAYER_POINTER.test(e.instancePath))
+      failedChild.add(e.instancePath);
+  const ownedByFailedChild = (p: string) =>
+    [...failedChild].some((f) => p.startsWith(f) && (p.length === f.length || p[f.length] === "/"));
+
+  for (const e of fieldErrors) {
+    if (e.keyword === "oneOf" && failedChild.has(e.instancePath)) {
+      const data = e.data;
+      const childType = claimedType(data);
+      const childAt = at === "" ? jsonPointerToPath(e.instancePath) : layerPath(at, e.instancePath);
+      if (!childType) {
+        const nonObject = typeof data !== "object" || data === null;
+        out.push({
+          path: nonObject ? childAt : `${childAt}.type`,
+          message: nonObject
+            ? "each layer must be an image, text, shape, or group object"
+            : `unknown layer type ${JSON.stringify(
+                (data as Record<string, unknown> | null)?.type,
+              )} — supported types: image, text, shape, group`,
+        });
+        continue;
+      }
+      const validate = branchValidators[childType];
+      validate(data);
+      out.push(...expandBranch(validate.errors!, data, childAt));
       continue;
     }
-    if (err.keyword !== "oneOf") continue; // branch-internal noise; the oneOf error owns this layer
-    const at = `layers[${m[1]}]`;
-    const layer = err.data as Record<string, unknown> | undefined;
-    const type = layer?.type;
-    if (type !== "image" && type !== "text") {
-      const nonObject = typeof layer !== "object" || layer === null;
+    if (ownedByFailedChild(e.instancePath)) continue; // noise under a failed child; its own expansion owns it
+    if (root === undefined) {
+      out.push(describeSchemaError(e));
+      continue;
+    }
+    // Branch-internal errors of the claimed node at `at`.
+    const host = e.instancePath ? layerPath(at, e.instancePath) : at;
+    const inSpans = /^\/spans(\/|$)/.test(e.instancePath);
+    if (e.keyword === "required") {
+      const prop = e.params?.missingProperty as string;
       out.push({
-        path: nonObject ? at : `${at}.type`,
-        message: nonObject
-          ? "each layer must be an image or text object"
-          : `unknown layer type ${JSON.stringify(type)} — supported types: image, text`,
+        path: `${host}.${prop}`,
+        message: `"${prop}" is required on ${inSpans ? "spans" : `${type} layers`}`,
       });
       continue;
     }
-    const validate = branchValidators[type];
-    validate(layer);
-    const branchErrors = validate.errors!;
-    // The schema's `allOf` block carries the text contract; its raw
-    // oneOf/not failures (and their branch noise) expand to the one friendly
-    // message home instead.
-    const inContract = (e: AjvError) => e.schemaPath.includes("/allOf/");
-    const contractHit = branchErrors.some(inContract);
-    out.push(
-      ...branchErrors
-        .filter((e) => !inContract(e))
-        .map((e): SceneError => {
-          // Nested hosts (spans) land their required/unknown-field errors on
-          // the offending span field, not the layer root.
-          const host = e.instancePath ? layerPath(at, e.instancePath) : at;
-          const inSpans = /^\/spans(\/|$)/.test(e.instancePath);
-          if (e.keyword === "required") {
-            const prop = e.params?.missingProperty as string;
-            return {
-              path: `${host}.${prop}`,
-              message: `"${prop}" is required on ${inSpans ? "spans" : `${type} layers`}`,
-            };
-          }
-          if (e.keyword === "additionalProperties") {
-            const prop = e.params?.additionalProperty as string;
-            return {
-              path: `${host}.${prop}`,
-              message: `"${prop}" is not a valid ${inSpans ? "span" : "layer"} property`,
-            };
-          }
-          return {
-            path: e.instancePath ? layerPath(at, e.instancePath) : at,
-            message: e.message ?? "is invalid",
-          };
-        }),
-    );
-    if (contractHit) {
-      out.push(
-        ...textContractErrors(layer as unknown as TextLayer).map((e) => ({
-          ...e,
-          path: `${at}.${e.path}`,
-        })),
-      );
+    if (e.keyword === "additionalProperties") {
+      const prop = e.params?.additionalProperty as string;
+      out.push({
+        path: `${host}.${prop}`,
+        message: `"${prop}" is not a valid ${inSpans ? "span" : "layer"} property`,
+      });
+      continue;
     }
+    if (e.keyword === "enum" && e.params?.allowedValues) {
+      const allowed = (e.params.allowedValues as unknown[]).join(", ");
+      out.push({
+        path: host,
+        message: `${JSON.stringify(e.data)} is not one of: ${allowed}`,
+      });
+      continue;
+    }
+    out.push({ path: host, message: e.message ?? "is invalid" });
+  }
+
+  if (contractHit && type) {
+    const contract =
+      type === "text"
+        ? textContractErrors(root as unknown as TextLayer)
+        : type === "shape"
+          ? shapeContractErrors(root as unknown as ShapeLayer)
+          : [];
+    out.push(...contract.map((e) => ({ ...e, path: at === "" ? e.path : `${at}.${e.path}` })));
   }
   return out;
 }
@@ -291,47 +397,70 @@ function describeSchemaError(err: AjvError): SceneError {
 // --- semantic pass ---------------------------------------------------------------
 
 /**
+ * Every layer in the tree with its field path — the one walk both post-schema
+ * passes share, so the path format (`layers[1].layers[0]`) has a single home.
+ */
+function* layerEntries(
+  layers: SceneLayer[],
+  at: (i: number) => string,
+): Generator<{ layer: SceneLayer; at: string }> {
+  for (const [i, layer] of layers.entries()) {
+    const here = at(i);
+    yield { layer, at: here };
+    if (layer.type === "group") yield* layerEntries(layer.layers, (j) => `${here}.layers[${j}]`);
+  }
+}
+
+/**
  * Cross-layer and cross-field rules the schema can't express: duplicate layer
- * ids and crop insets that sum past the source. Per-type required and
- * misplaced fields are the schema's oneOf branches' job (one home).
+ * ids (across the whole layer tree — nested children are stable ids too),
+ * crop insets that sum past the source, rect-only radius, and inverted
+ * autoFit ranges. Per-type required and misplaced fields are the schema's
+ * oneOf branches' job (one home).
  */
 function semanticErrors(scene: Scene): SceneError[] {
   const errors: SceneError[] = [];
-  const firstOwner = new Map<string, number>();
-  scene.layers.forEach((layer, i) => {
-    const at = (field: string, message: string) =>
-      errors.push({ path: `layers[${i}].${field}`, message });
+  const firstOwner = new Map<string, string>();
+  for (const { layer, at: here } of layerEntries(scene.layers, (i) => `layers[${i}]`)) {
+    const field = (name: string, message: string) =>
+      errors.push({ path: `${here}.${name}`, message });
 
     const owner = firstOwner.get(layer.id);
     if (owner !== undefined)
-      at("id", `duplicate layer id "${layer.id}" — first used at layers[${owner}]`);
-    else firstOwner.set(layer.id, i);
+      field("id", `duplicate layer id "${layer.id}" — first used at ${owner}`);
+    else firstOwner.set(layer.id, here);
 
     if (layer.type === "image" && layer.crop) {
       const { left, top, right, bottom } = layer.crop;
       if (left + right >= 100)
-        at(
+        field(
           "crop",
           `crop insets leave no source width (left ${left}% + right ${right}% ≥ 100%)`,
         );
       if (top + bottom >= 100)
-        at(
+        field(
           "crop",
           `crop insets leave no source height (top ${top}% + bottom ${bottom}% ≥ 100%)`,
         );
     }
+
+    if (layer.type === "shape" && layer.radius !== undefined && layer.shape !== "rect")
+      field(
+        "radius",
+        `"radius" applies to rect shapes only — a ${layer.shape} has no corners to round`,
+      );
 
     if (layer.type === "text") {
       // The content/sizing/fill contract is the schema's (textContractErrors
       // owns its messages); an inverted autoFit range is this pass's — no
       // JSON Schema keyword compares two sibling values.
       if (layer.autoFit && layer.autoFit.min > layer.autoFit.max)
-        at(
+        field(
           "autoFit",
           `autoFit min (${layer.autoFit.min}px) exceeds max (${layer.autoFit.max}px)`,
         );
     }
-  });
+  }
   return errors;
 }
 
@@ -348,8 +477,10 @@ async function resolutionErrors(
   // references a library asset — a project-only scene never scans it.
   let libPromise: Promise<Library> | undefined;
   const getLibrary = () => (libPromise ??= library());
-  for (const [i, layer] of scene.layers.entries()) {
+  for (const { layer, at } of layerEntries(scene.layers, (i) => `layers[${i}]`)) {
     if (layer.type === "image") {
+      // Ids are globally unique (the semantic pass owns that), so resolved
+      // assets key by layer id at any depth.
       try {
         const lib =
           parseAssetRef(layer.asset).scope === "library"
@@ -358,11 +489,11 @@ async function resolutionErrors(
         assets.set(layer.id, await resolveAsset(projectRoot, lib, layer.asset));
       } catch (err) {
         errors.push({
-          path: `layers[${i}].asset`,
+          path: `${at}.asset`,
           message: (err as Error).message,
         });
       }
-    } else {
+    } else if (layer.type === "text") {
       const checkFont = (at: string, family: string) => {
         try {
           resolveFace(family);
@@ -370,9 +501,9 @@ async function resolutionErrors(
           errors.push({ path: at, message: (err as Error).message });
         }
       };
-      checkFont(`layers[${i}].font`, layer.font);
+      checkFont(`${at}.font`, layer.font);
       (layer.spans ?? []).forEach((span, j) => {
-        if (span.font) checkFont(`layers[${i}].spans[${j}].font`, span.font);
+        if (span.font) checkFont(`${at}.spans[${j}].font`, span.font);
       });
     }
   }
