@@ -170,10 +170,10 @@ describe("scene validation", () => {
 
   it("rejects unknown layer types", async () => {
     const errors = await loadErrors(
-      scene([{ ...imageLayer(), type: "connector" } as unknown as SceneLayer]),
+      scene([{ ...imageLayer(), type: "emitter" } as unknown as SceneLayer]),
     );
     expect(errors[0]!.path).toBe("layers[0].type");
-    expect(errors[0]!.message).toMatch(/unknown layer type "connector"/);
+    expect(errors[0]!.message).toMatch(/unknown layer type "emitter"/);
   });
 
   it("rejects unknown layer properties", async () => {
@@ -285,15 +285,16 @@ describe("scene validation", () => {
 
   it("exports every layer type as a separate oneOf branch — the schema matches enforcement", async () => {
     const layer = (SCENE_SCHEMA.definitions as Record<string, any>).layer;
-    expect(layer.oneOf).toHaveLength(4);
+    expect(layer.oneOf).toHaveLength(5);
     expect(layer.oneOf.map((b: { $ref: string }) => b.$ref)).toEqual([
       "#/definitions/imageLayer",
       "#/definitions/textLayer",
       "#/definitions/shapeLayer",
       "#/definitions/groupLayer",
+      "#/definitions/connectorLayer",
     ]);
     // Each branch is closed and requires its own type's fields.
-    for (const name of ["imageLayer", "textLayer", "shapeLayer", "groupLayer"] as const) {
+    for (const name of ["imageLayer", "textLayer", "shapeLayer", "groupLayer", "connectorLayer"] as const) {
       const branch = (SCENE_SCHEMA.definitions as Record<string, any>)[name];
       expect(branch.additionalProperties).toBe(false);
       expect(branch.required).toContain("type");
@@ -307,7 +308,7 @@ describe("scene validation", () => {
   it("rejects a non-object layer", async () => {
     const errors = await loadErrors(scene(["nope" as unknown as SceneLayer]));
     expect(errors[0]!.path).toBe("layers[0]");
-    expect(errors[0]!.message).toMatch(/image, text, shape, or group object/);
+    expect(errors[0]!.message).toMatch(/image, text, shape, group, or connector object/);
   });
 
   it("rejects crop insets that leave no source width or height", async () => {
@@ -1065,7 +1066,7 @@ describe("scene cli", () => {
     expect(exitCode).toBe(0);
     const schema = output as typeof SCENE_SCHEMA;
     const layer = schema.definitions?.layer as unknown as { oneOf?: { $ref: string }[] };
-    expect(layer.oneOf).toHaveLength(4);
+    expect(layer.oneOf).toHaveLength(5);
     expect(schema.properties?.layers?.type).toBe("array");
   });
 

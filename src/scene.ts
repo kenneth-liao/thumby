@@ -146,7 +146,31 @@ export interface GroupLayer extends BaseLayer {
   layers: SceneLayer[];
 }
 
-export type SceneLayer = ImageLayer | TextLayer | ShapeLayer | GroupLayer;
+export type SceneLayer = ImageLayer | TextLayer | ShapeLayer | GroupLayer | ConnectorLayer;
+
+/**
+ * A Connector/path layer between two stable top-level targets. It has no
+ * position or size of its own — geometry resolves from the targets' boxes in
+ * frame coordinates, so connectors are top-level layers only (validated in
+ * the semantic pass).
+ */
+export interface ConnectorLayer {
+  id: string;
+  type: "connector";
+  visible?: boolean;
+  opacity?: number;
+  /** Source target: a top-level layer or Group id in this scene. */
+  from: string;
+  /** Destination target — the arrowhead lands at its box edge when `arrow`. */
+  to: string;
+  /** Perpendicular bow in frame px; positive curves clockwise from from→to. */
+  bow?: number;
+  /** Dash pattern in frame px; absent renders solid. */
+  dash?: number[];
+  color?: string;
+  width?: number;
+  arrow?: boolean;
+}
 
 export interface Scene {
   schemaVersion: number;
@@ -176,6 +200,7 @@ export const LAYER_DEFAULTS = {
   lineHeight: 1.1,
   color: "#000",
   fillAngle: 90,
+  connectorWidth: 3,
 } as const;
 
 export type LoadResult =
@@ -210,13 +235,19 @@ const branchValidators = {
     ...(SCENE_SCHEMA.definitions.groupLayer as unknown as Record<string, unknown>),
     definitions: SCENE_SCHEMA.definitions,
   }),
+  connector: ajv.compile({
+    ...(SCENE_SCHEMA.definitions.connectorLayer as unknown as Record<string, unknown>),
+    definitions: SCENE_SCHEMA.definitions,
+  }),
 };
 
 type LayerType = keyof typeof branchValidators;
 
 const claimedType = (layer: unknown): LayerType | undefined => {
   const t = (layer as Record<string, unknown> | null | undefined)?.type;
-  return t === "image" || t === "text" || t === "shape" || t === "group" ? t : undefined;
+  return t === "image" || t === "text" || t === "shape" || t === "group" || t === "connector"
+    ? t
+    : undefined;
 };
 
 /**
@@ -314,10 +345,10 @@ function expandBranch(errors: AjvError[], root: unknown, at: string): SceneError
         out.push({
           path: nonObject ? childAt : `${childAt}.type`,
           message: nonObject
-            ? "each layer must be an image, text, shape, or group object"
+            ? "each layer must be an image, text, shape, group, or connector object"
             : `unknown layer type ${JSON.stringify(
                 (data as Record<string, unknown> | null)?.type,
-              )} — supported types: image, text, shape, group`,
+              )} — supported types: image, text, shape, group, connector`,
         });
         continue;
       }
@@ -421,15 +452,20 @@ function describeSchemaError(err: AjvError): SceneError {
 /**
  * Every layer in the tree with its field path — the one walk both post-schema
  * passes share, so the path format (`layers[1].layers[0]`) has a single home.
+ * `topLevel` distinguishes scene-level layers from group children: connector
+ * geometry resolves in frame coordinates, so only top-level layers may be
+ * connectors or connector targets.
  */
 function* layerEntries(
   layers: SceneLayer[],
   at: (i: number) => string,
-): Generator<{ layer: SceneLayer; at: string }> {
+  topLevel = true,
+): Generator<{ layer: SceneLayer; at: string; topLevel: boolean }> {
   for (const [i, layer] of layers.entries()) {
     const here = at(i);
-    yield { layer, at: here };
-    if (layer.type === "group") yield* layerEntries(layer.layers, (j) => `${here}.layers[${j}]`);
+    yield { layer, at: here, topLevel };
+    if (layer.type === "group")
+      yield* layerEntries(layer.layers, (j) => `${here}.layers[${j}]`, false);
   }
 }
 
@@ -442,8 +478,14 @@ function* layerEntries(
  */
 function semanticErrors(scene: Scene): SceneError[] {
   const errors: SceneError[] = [];
+  // Connector targets name top-level layers or groups. Connectors themselves
+  // are excluded — they have no box to anchor to. First occurrence wins; a
+  // duplicated id is its own error below either way.
+  const topLevel = new Map<string, SceneLayer>();
+  for (const layer of scene.layers)
+    if (layer.type !== "connector" && !topLevel.has(layer.id)) topLevel.set(layer.id, layer);
   const firstOwner = new Map<string, string>();
-  for (const { layer, at: here } of layerEntries(scene.layers, (i) => `layers[${i}]`)) {
+  for (const { layer, at: here, topLevel: atTop } of layerEntries(scene.layers, (i) => `layers[${i}]`)) {
     const field = (name: string, message: string) =>
       errors.push({ path: `${here}.${name}`, message });
 
@@ -452,6 +494,39 @@ function semanticErrors(scene: Scene): SceneError[] {
       field("id", `duplicate layer id "${layer.id}" — first used at ${owner}`);
     else firstOwner.set(layer.id, here);
 
+    if (layer.type === "connector") {
+      if (!atTop) {
+        field(
+          "type",
+          `connector "${layer.id}" is nested inside a group — connectors live at the ` +
+            `scene's top level because their geometry resolves in frame coordinates`,
+        );
+        continue;
+      }
+      for (const end of ["from", "to"] as const) {
+        const target = layer[end];
+        if (target === layer.id) {
+          field(end, `a connector cannot target itself`);
+          continue;
+        }
+        const targetLayer = topLevel.get(target);
+        if (!targetLayer)
+          field(
+            end,
+            `"${target}" is not a layer in this scene — connector targets must ` +
+              `name a top-level layer or group id`,
+          );
+        else if (targetLayer.type === "connector")
+          field(
+            end,
+            `connector "${layer.id}" targets connector "${target}" — connectors have no ` +
+              `box to anchor to; target an image, text, shape, or group layer`,
+          );
+      }
+      continue;
+    }
+    // The target walk above owns connector fields; the per-type rules below
+    // apply to the box-carrying layer types.
     if (layer.type === "image" && layer.crop) {
       const { left, top, right, bottom } = layer.crop;
       if (left + right >= 100)

@@ -4,6 +4,12 @@
 
 ### Added
 
+- Connector/path layers between stable top-layer or Group targets — `from`/`to` name layer ids, and dangling targets, self-targets, connector-to-connector targets, and connectors nested in groups all fail validation naming the field, before any browser starts (#12)
+- Connector styling in frame coordinates: `width` (px, default 3), `color` (default `#000`), `dash` (SVG stroke-dasharray pattern, absent is solid), `bow` (perpendicular midpoint offset, positive curves clockwise from from→to), and `arrow` (auto-oriented arrowhead at the `to` end, colored with the line, sized off the stroke width); the path runs between target box centers, trimmed to the box edges, and renders as pixel-space full-canvas SVG (#12)
+- Connectors composite at their array position like any layer — z-order around the Creator Asset is explicit scene order, replacing the overlay's fixed connectors-below-cards rule (#12)
+- `bun run scene inspect` summarizes connectors (targets, bow, dash, effective color/width/arrow) and no longer reports `position`/`size` for the position-less connector layer (#12)
+- The constellation fixture `test/fixtures/constellation/constellation.json` — glass-tile card Groups, a creator Image layer, and Connectors rebuilt from generic layers only, with the creator overlapping the behind card and its connector (#12)
+
 - Bundled named themes with optional style-property defaults per layer type (`text`, `image`, `shape`, `group`) — a Scene pins one with `theme: {name, revision}` where the revision is the sha-256 of the theme's content, re-derived at load so a changed theme fails loudly instead of silently changing an old Render (#2)
 - One documented precedence rule for defaults — explicit layer value, then theme default, then the renderer's built-in default — applied at the load gate, contract-aware (a theme `color` applies only where a layer sets neither `color` nor `fill`; a theme `radius` only to rects), recursing into group children (#2)
 - Bundled scene templates and `bun run scene init <template> [--out <path>]` — init bakes plain layers with stable ids (no runtime template reference), pins the template's theme to its current revision, and validates the result through the load gate before emitting (#2)
@@ -32,6 +38,7 @@
 
 ### Changed
 
+- The Scene schema's layer `oneOf` gains a fifth branch — scenes authored with `type: "connector"` fail to load on thumby ≤ 0.9.0 as an unknown layer type (#12)
 - `bun run scene inspect` reports effective values: `visible`, `opacity`, image `fit`, text `weight`/`align`/`lineHeight`, and `color` (or gradient `fill` with a surfaced `angle`) are now always present — authored, theme-resolved, or built-in default — instead of appearing only when authored (#2)
 - `bun run scene validate` and `inspect` report `layerCount` for the whole layer tree — group children included — instead of top-level layers only (#11)
 

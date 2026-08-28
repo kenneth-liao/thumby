@@ -207,7 +207,7 @@ directory is relocated.
 ## Scenes
 
 A **Scene** is the declarative alternative to the long-form command: a versioned
-JSON document of ordered layers (image, text, shape, and group), rendered locally to
+JSON document of ordered layers (image, text, shape, group, and connector), rendered locally to
 exactly 1280×720. Array order is compositing order — later layers on top.
 Scenes, layers, and assets are the vocabulary the design spec (#7) builds on.
 
@@ -323,6 +323,32 @@ restyle the logo disc inside a moved card:
 against; `scale` is the resize control (a pure renderer cannot infer child
 scaling from a changed `size`, so resizing is an explicit, editable value).
 
+A **connector** draws a line or arrow between two stable targets — the
+constellation's dashed arrows, representable with no privileged overlay path.
+Targets name top-level layer or Group ids (`from`/`to`); dangling targets,
+self-targets, and connectors targeting connectors fail validation naming the
+field. Connectors have no `position`/`size` of their own: the path runs
+between the targets' box centers, trimmed to where it exits the source box
+and enters the target box (authored, unrotated boxes), and everything
+resolves in frame coordinates — so a connector is a top-level layer, never a
+group child. Styling is `width` (px, default 3), `color` (default `#000`),
+`dash` (a dash/gap pattern in px, SVG stroke-dasharray; absent is solid),
+`bow` (perpendicular midpoint offset in px — positive curves clockwise from
+the from→to direction), and `arrow` (an auto-oriented arrowhead at the `to`
+end, colored with the line, sized relative to the stroke width). Connectors
+composite at their array position like any layer — putting one before the
+creator image is what makes an arrow pass behind the person:
+
+```json
+{ "id": "conn-claude", "type": "connector",
+  "from": "choice-card", "to": "claude-card",
+  "color": "#F2F2F2", "width": 3.2, "dash": [10, 9], "arrow": true }
+```
+
+The constellation rebuilt from generic layers only — card groups, creator
+image, connectors, z-order — lives at
+`test/fixtures/constellation/constellation.json`.
+
 Image and group content take an `effects` object, emitted as one CSS filter
 chain in a fixed order (blur → colorAdjust → glow → shadow); glow and shadow
 follow the content's alpha — a grouped card's shadow follows the card, not
@@ -392,6 +418,11 @@ URIs, validation and rendering never touch the network, and nothing here ever
 starts a Generation Job.
 
 ## Overlay cards
+
+> **Superseded for new work:** the constellation is now representable as a
+> plain Scene — card Groups, a creator Image layer, and Connectors at explicit
+> array positions (see [Scenes](#scenes)). The overlay path below remains for
+> the legacy command until visual parity is inspected (#12, #22).
 
 `--overlay <spec.json>` draws floating glass tiles joined by dashed connectors
 — the logo-constellation look. Positions are percentages of the frame measured
@@ -492,6 +523,6 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
 - **Fonts are bundled and validated.** All faces ship in `assets/fonts/`
   (OFL-licensed; see `assets/fonts/LICENSE.md`) and load via `@font-face` from
   local bytes. A render fails loudly when a requested family cannot resolve —
-  silent fallback to a default sans is not allowed (#1). One gap until #12:
-  overlay `card.font` (chalk text marks) is not yet bundled or validated and
-  can still fall back silently on Linux.
+  silent fallback to a default sans is not allowed (#1). Remaining gap: the
+  legacy overlay's `card.font` (chalk text marks) is still not bundled or
+  validated; Scenes have no such gap — text marks render from bundled faces.
