@@ -62,6 +62,23 @@ describe("scene themes", () => {
     expect((layer as { color?: string }).color).toEqual(theme.text!.color);
   });
 
+  it("resolves themes as a pure transform — the caller's document is not mutated", async () => {
+    const theme = getTheme("midnight");
+    const scene = {
+      schemaVersion: 1,
+      canvas: { width: 1280, height: 720 },
+      theme: { name: "midnight", revision: themeRevision(theme) },
+      layers: [textLayer()],
+    };
+    const result = await load(scene);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The resolved scene is themed...
+    expect((result.resolved.scene.layers[0] as { color?: string }).color).toBeDefined();
+    // ...but the caller's object keeps exactly what was authored.
+    expect((scene.layers[0] as { color?: string }).color).toBeUndefined();
+  });
+
   it("lets explicit layer values win over theme defaults", async () => {
     const theme = getTheme("midnight");
     const scene = {
@@ -229,6 +246,36 @@ describe("scene themes", () => {
     expect(themeRevision({ ...theme, shape: undefined, group: undefined })).toEqual(
       themeRevision({ ...theme, group: undefined, shape: undefined }),
     );
+    // A content change does change the identity — drift is detectable.
+    expect(themeRevision({ ...theme, shape: { ...theme.shape, color: "#000001" } })).not.toEqual(
+      themeRevision(theme),
+    );
+    // A new defaults section joins the identity by construction — it can
+    // never silently escape version locking.
+    expect(themeRevision({ ...theme, video: { color: "#101010" } } as never)).not.toEqual(
+      themeRevision(theme),
+    );
+  });
+
+  it("initializes plain layers — theme values are not baked in beside the pin", async () => {
+    const init = await cliRun(["init", "headline-card"]);
+    expect(init.exitCode).toEqual(0);
+    const scene = (init.output as { scene: { layers: Record<string, unknown>[]; theme: unknown } }).scene;
+    // The theme pin is set...
+    expect(scene.theme).toEqual({
+      name: "midnight",
+      revision: themeRevision(getTheme("midnight")),
+    });
+    // ...but the layers stay as authored — no theme-derived copies beside it.
+    const scrim = scene.layers.find((l) => l.id === "scrim");
+    expect(scrim).toBeDefined();
+    expect(scrim!.color).toBeUndefined();
+    for (const id of ["eyebrow", "headline"]) {
+      const layer = scene.layers.find((l) => l.id === id);
+      expect(layer).toBeDefined();
+      expect(layer!.color).toBeUndefined();
+      expect(layer!.shadows).toBeUndefined();
+    }
   });
 
   it("keeps every bundled template loadable", async () => {
@@ -268,11 +315,30 @@ describe("scene themes", () => {
     expect(unknown.exitCode).toEqual(2);
     expect(JSON.stringify(unknown.output)).toContain("unknown template");
 
-    const file = path.join(projectRoot, "inited.json");
-    const out = await cliRun(["init", "stat-banner", "--out", file]);
-    expect(out.exitCode).toEqual(0);
-    const written = JSON.parse(await readFile(file, "utf8"));
-    expect((await load(written)).ok).toBe(true);
+    // --out writes only inside the current directory, and never clobbers
+    // silently — same containment discipline as render --out.
+    const prevCwd = process.cwd();
+    const sandbox = await mkdtemp(path.join(prevCwd, ".init-test-"));
+    try {
+      process.chdir(sandbox);
+      const out = await cliRun(["init", "stat-banner", "--out", "inited.json"]);
+      expect(out.exitCode).toEqual(0);
+      const written = JSON.parse(await readFile("inited.json", "utf8"));
+      expect((await load(written)).ok).toBe(true);
+
+      const clobber = await cliRun(["init", "stat-banner", "--out", "inited.json"]);
+      expect(clobber.exitCode).toEqual(2);
+      expect(JSON.stringify(clobber.output)).toContain("already exists");
+      const forced = await cliRun(["init", "stat-banner", "--out", "inited.json", "--force"]);
+      expect(forced.exitCode).toEqual(0);
+
+      const escape = await cliRun(["init", "stat-banner", "--out", "../escaped.json"]);
+      expect(escape.exitCode).toEqual(2);
+      expect(JSON.stringify(escape.output)).toContain("must stay inside");
+    } finally {
+      process.chdir(prevCwd);
+      await rm(sandbox, { recursive: true, force: true });
+    }
   });
 
   it("inspect shows the effective values a render will use", async () => {

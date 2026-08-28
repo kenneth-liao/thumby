@@ -16,6 +16,7 @@
  * rendering never touch the network and never start a Generation Job.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { LIBRARY_ROOT, scanLibrary, type ResolvedAsset } from "./assets.js";
 import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
@@ -38,9 +39,12 @@ thumby scene — versioned, locally rendered thumbnail compositions
   bun run scene render   <scene.json>   Render to PNG (1280×720)
 
 Options
-  --out <path>   init: where to write the Scene (default: print as "scene")
+  --out <path>   init: where to write the Scene — inside the current
+                 directory; an existing file needs --force
+                 (default: print as "scene")
                  render: output path inside the scene's directory
                  (default: <scene-dir>/out/<scene-basename>.png)
+  --force        init: allow --out to overwrite an existing file
 
 Themes and templates
   A Scene may pin a bundled theme: "theme": { "name", "revision" }. Precedence
@@ -97,6 +101,9 @@ function summarizeLayer(
 ): Record<string, unknown> {
   // Effective values: authored + theme-resolved (the load gate filled theme
   // defaults in) + the renderer's built-in defaults — what a render will use.
+  // Built-in defaults surface for visible, opacity, fit, align, lineHeight,
+  // color, and fill angle; properties with no built-in (radius, border,
+  // stroke, shadows, scale, effects) appear only when set.
   const summary: Record<string, unknown> = {
     id: layer.id,
     type: layer.type,
@@ -199,8 +206,12 @@ async function dispatch(args: string[]): Promise<CliResult> {
 
   if (cmd === "init" && file) {
     let outArg: string | undefined;
-    if (rest.length === 2 && rest[0] === "--out") outArg = rest[1];
-    else if (rest.length !== 0) return usageError("init accepts at most one --out <path>");
+    let force = false;
+    for (let i = 0; i < rest.length; i += 2) {
+      if (rest[i] === "--out" && rest[i + 1] !== undefined) outArg = rest[i + 1];
+      else if (rest[i] === "--force") (force = true), (i -= 1);
+      else return usageError("init accepts --out <path> and --force");
+    }
     let template;
     try {
       template = getTemplate(file);
@@ -218,6 +229,15 @@ async function dispatch(args: string[]): Promise<CliResult> {
     if (!result.ok) return invalid(result.errors);
     if (!outArg) return ok({ ok: true, scene });
     const output = path.resolve(outArg);
+    // init's project root is the current directory — the same containment
+    // discipline render --out applies to the scene directory. An existing
+    // file is never clobbered silently; --force is the explicit intent.
+    const cwd = process.cwd();
+    const relative = path.relative(cwd, output);
+    if (relative.startsWith("..") || path.isAbsolute(relative))
+      return usageError(`--out "${outArg}" must stay inside the current directory (${cwd})`);
+    if (!force && existsSync(output))
+      return usageError(`--out "${outArg}" already exists — pass --force to overwrite it`);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, JSON.stringify(scene, null, 2) + "\n");
     return ok({

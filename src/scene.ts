@@ -587,7 +587,10 @@ export async function loadScene(
   if (!validateSchema(raw)) {
     return { ok: false, errors: expandLayerErrors(validateSchema.errors!) };
   }
-  const scene = raw as Scene;
+  // Resolution (theme defaults) mutates — work on a copy so the caller's
+  // document keeps exactly what was authored and `resolved.scene` is the
+  // only themed copy.
+  const scene = structuredClone(raw) as Scene;
   const errors = semanticErrors(scene);
   if (errors.length === 0) errors.push(...themeErrorsAndApply(scene));
   const assets = new Map<string, ResolvedAsset>();

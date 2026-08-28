@@ -367,6 +367,10 @@ derived never stored (the same identity shape as Assets — ADR-0002). Loading
 re-derives the hash and fails loudly on drift, so later theme edits can never
 silently change an old Scene's render — re-pin or accept the new content.
 
+Rollback note: `schemaVersion` is unchanged, but `theme` is a new root
+property — a Scene authored with it fails to load on thumby ≤ 0.8.0 with a
+generic unknown-property error (`theme`), before any render.
+
 **Templates** are bundled Scene skeletons (`bun run scene templates`,
 `bun run scene init <template> [--out <path>]`). Init bakes the template's
 layers into a plain Scene with stable ids — no runtime template reference

@@ -100,14 +100,15 @@ function canonical(value: unknown): string {
 }
 
 /**
- * sha-256 of the theme's rendering-relevant content — its defaults sections,
- * canonically serialized. Descriptions and names are excluded: they cannot
- * change a render, so editing them must not invalidate pinned Scenes.
+ * sha-256 of the theme's rendering-relevant content — canonically serialized.
+ * `name` and `description` are excluded by construction: they cannot change a
+ * render, so editing them must not invalidate pinned Scenes. Every other
+ * field — present or added later — joins the identity, so a new defaults
+ * section can never silently escape version locking.
  */
 export function themeRevision(theme: Theme): string {
-  return createHash("sha256")
-    .update(canonical({ text: theme.text, image: theme.image, shape: theme.shape, group: theme.group }))
-    .digest("hex");
+  const { name: _name, description: _description, ...content } = theme;
+  return createHash("sha256").update(canonical(content)).digest("hex");
 }
 
 type FillFamily = { color?: string; fill?: { from: string; to: string; angle?: number } };

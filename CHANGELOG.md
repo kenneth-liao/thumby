@@ -10,8 +10,7 @@
 - `bun run scene themes` and `bun run scene templates` list the bundled registries as structured JSON with descriptions and revisions (#2)
 - `bun run scene inspect` reports effective values — authored, theme-resolved, and the renderer's built-in defaults — plus the locked `theme` identity, so an agent sees what a render will use (#2)
 - ADR-0003 records the revision-locking invariant and the load-gate precedence boundary (#2)
-- Shape layers draw common geometry inscribed in the layer box — `rect` (with per-axis-clamped `radius`), `ellipse`, `triangle` — with a solid `color` or gradient `fill` and a `border` stroked centered on the shape's edge (#11)
-- Group layers wrap nested layers into one editable component: children keep group-local coordinates, transform with the group, and composite in array order inside it; `scale` resizes the whole component around its center and nothing flattens or clips — every child keeps its stable id (#11)
+- Shape layers draw common geometry inscribed in the layer box — `rect` (with per-axis-clamped `radius`), `ellipse`, `triangle` — with a solid `color` or gradient `fill` and a `border` stroked centered on the shape's edge (#11)- Group layers wrap nested layers into one editable component: children keep group-local coordinates, transform with the group, and composite in array order inside it; `scale` resizes the whole component around its center and nothing flattens or clips — every child keeps its stable id (#11)
 - Editable `effects` on image and group content — `blur`, `colorAdjust` (unmasked brightness/contrast/saturate/hue-rotate), `glow`, and `shadow` — emitted as one CSS filter chain in a fixed order (blur → colorAdjust → glow → shadow) with glow and shadow following the content's alpha (#11)
 - Validation recurses into groups: duplicate ids are detected across the whole layer tree and nested failures carry full field paths (`layers[1].layers[0].asset`); `inspect` summarizes shapes, groups (with nested child summaries and resolved assets), and effects (#11)
 - The grouped logo-card fixture `test/fixtures/shape-group/logo-card.json` — moved, resized, hidden, and restyled as one component in tests (#11)
@@ -32,6 +31,7 @@
 
 ### Changed
 
+- `bun run scene inspect` reports effective values: `visible`, `opacity`, image `fit`, text `weight`/`align`/`lineHeight`, and `color` (or gradient `fill` with a surfaced `angle`) are now always present — authored, theme-resolved, or built-in default — instead of appearing only when authored (#2)
 - `bun run scene validate` and `inspect` report `layerCount` for the whole layer tree — group children included — instead of top-level layers only (#11)
 
 ### Fixed
