@@ -11,9 +11,10 @@ import {
   type Library,
   type CutoutMeta,
 } from "./assets.js";
+import { parseFacets, IDENTITY_KIT_DIR } from "./identity.js";
 
 const HELP = `
-library — the reusable asset library (plates + logos + cutouts)
+library — the reusable asset library (plates + logos + cutouts + identity sources)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
   bun run library resolve <ref> [options]     Resolve an asset reference to its exact content identity.
@@ -26,6 +27,15 @@ project-local assets: "<id>" or "library:<id>" resolves a library asset
 (logos answer to aliases); "<project-relative path>" resolves a file in a
 project. Add "@<sha-256-or-prefix>" to pin exact bytes — if the content
 changes, pinned references fail loudly instead of silently changing.
+
+Identity sources (the tagged headshot kit) are searchable by role facet:
+
+  bun run library list --facets pose=frontal --facets expression=teeth-smile
+
+  --facets <a=v>   list only: identity facet filter, repeatable. Facets on
+                   the same axis are alternatives; different axes must all
+                   match. Axes and values come from the kit index (pose,
+                   facing, expression, gesture, extras, outfit, framing).
 
 Options
   --name <str>     Display name (defaults to the id)
@@ -42,7 +52,8 @@ Options
 
 Library lives at ${LIBRARY_ROOT}. One directory per asset:
 logos/<id>/ holds logo.svg|png + meta.json; plates/<id>/ holds plate.png +
-meta.json; cutouts/<id>/ holds cutout.png + meta.json.
+meta.json; cutouts/<id>/ holds cutout.png + meta.json. Identity sources live
+in identity/kenny-headshots/ with their index.json as canonical metadata.
 `;
 
 function fail(msg: string): never {
@@ -65,6 +76,7 @@ const parse = () =>
       "derived-from": { type: "string" },
       "edit-prompt": { type: "string" },
       project: { type: "string" },
+      facets: { type: "string", multiple: true },
       sheet: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -80,6 +92,8 @@ const command = positionals[0]!;
 if (!["list", "resolve", "add-logo", "adopt", "add-cutout"].includes(command)) {
   fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout`);
 }
+if (command !== "list" && values.facets?.length)
+  fail(`--facets applies to "list" only`);
 const csv = (s: string) => s.split(",").map((t) => t.trim()).filter(Boolean);
 
 const idPattern = /^[a-z0-9][a-z0-9-]*$/;
@@ -101,9 +115,13 @@ async function scanOrDie(): Promise<Library> {
 
 /** Write an HTML contact sheet of everything in the library. */
 async function writeSheet(lib: Library) {
-  if (lib.logos.length === 0 && lib.plates.length === 0 && lib.cutouts.length === 0) return;
+  const identity = lib.identity.present ? lib.identity.entries : [];
+  if (lib.logos.length === 0 && lib.plates.length === 0 && lib.cutouts.length === 0 && identity.length === 0)
+    return;
   const figure = (kind: string, id: string, file: string, caption: string) =>
     `<figure><a href="file://${path.join(LIBRARY_ROOT, kind, id, file)}"><img class="${kind === "plates" ? "plate-img" : kind === "cutouts" ? "cutout-img" : ""}" src="file://${path.join(LIBRARY_ROOT, kind, id, file)}"></a><figcaption>${caption}</figcaption></figure>`;
+  const identityFigure = (s: (typeof identity)[number]) =>
+    `<figure><a href="file://${s.imagePath}"><img class="cutout-img" src="file://${s.imagePath}"></a><figcaption>${s.meta.id} [${s.meta.tags.join(", ")}]</figcaption></figure>`;
   const section = (
     title: string,
     html: string,
@@ -124,7 +142,7 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 img.plate-img{max-width:100%;max-height:none;width:100%}
 img.cutout-img{max-width:180px;max-height:180px;object-fit:contain}
 .empty{color:#5c5c64;font-size:12px;margin:8px 4px}
-</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length}</h1>
+</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length + identity.length}</h1>
 ${section(
   "logos",
   lib.logos
@@ -157,6 +175,11 @@ ${section(
     .join("\n"),
   "(none — add one with bun run library add-cutout <cutout.png> --id <name>)",
 )}
+${section(
+  "identity sources",
+  identity.map(identityFigure).join("\n"),
+  "(none — the identity kit is absent or holds no sources)",
+)}
 </body>`;
   await writeFile(path.join(LIBRARY_ROOT, "index.html"), html);
 }
@@ -164,7 +187,20 @@ ${section(
 if (command === "list") {
   const lib = await scanOrDie();
   const query = positionals.slice(1).join(" ");
-  const found = await searchLibrary(lib, query);
+  let facets: Record<string, string[]> | undefined;
+  if (values.facets?.length) {
+    try {
+      facets = parseFacets(values.facets);
+    } catch (err) {
+      fail((err as Error).message);
+    }
+  }
+  let found: Library;
+  try {
+    found = await searchLibrary(lib, query, { facets });
+  } catch (err) {
+    fail((err as Error).message);
+  }
 
   if (values.sheet) await writeSheet(found);
 
@@ -188,7 +224,27 @@ if (command === "list") {
       `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}  @${c.hash.slice(0, 12)}`,
     );
   }
-  if (values.sheet && (found.logos.length || found.plates.length || found.cutouts.length))
+  console.log(`\n  Identity sources (${found.identity.entries.length})`);
+  if (!lib.identity.present) {
+    console.log(`    (no identity kit in this library — ${IDENTITY_KIT_DIR} is absent)`);
+  } else if (found.identity.entries.length === 0) {
+    // Explicit empty: a requested combination with no source is reported,
+    // never inferred or invented (REQ-016).
+    console.log(
+      query.trim() || facets
+        ? `    (none — no identity source matches the requested combination)`
+        : `    (the identity kit index lists no sources)`,
+    );
+  }
+  for (const s of found.identity.entries) {
+    console.log(
+      `    ${s.meta.id.padEnd(22)} [${s.meta.tags.join(", ")}]  @${s.hash.slice(0, 12)}`,
+    );
+  }
+  if (
+    values.sheet &&
+    (found.logos.length || found.plates.length || found.cutouts.length || found.identity.entries.length)
+  )
     console.log(`\n  sheet    ${path.relative(process.cwd(), path.join(LIBRARY_ROOT, "index.html"))}`);
   console.log("");
   process.exit(0);
