@@ -18,10 +18,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { LIBRARY_ROOT, scanLibrary, type ResolvedAsset } from "./assets.js";
+import { LIBRARY_ROOT, scanLibrary, type Library, type ResolvedAsset } from "./assets.js";
 import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError } from "./scene.js";
+import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
-import { renderScene, countLayers } from "./scene-render.js";
+import { renderScene, renderContactSheet, countLayers } from "./scene-render.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { closeBrowser } from "./browser.js";
@@ -43,7 +44,15 @@ Options
                  directory; an existing file needs --force
                  (default: print as "scene")
                  render: output path inside the scene's directory
-                 (default: <scene-dir>/out/<scene-basename>.png)
+                 (default: <scene-dir>/out/<scene-basename>.png;
+                 with one --variant: <scene-dir>/out/<scene>.<variant>.png)
+  --variant <name[,name...]>
+                 render: render one or more named Variants instead of the
+                 base Scene. One variant renders alone; several render as a
+                 batch plus a contact sheet (<scene-dir>/out/<scene>.contact.png)
+                 showing every output at 168px wide with its name.
+                 inspect: inspect the Scene resolved with that Variant —
+                 the variant's stored sparse changes come back verbatim.
   --force        init: allow --out to overwrite an existing file
 
 Themes and templates
@@ -186,6 +195,72 @@ function resolvedAssetSummary(resolved: {
   };
 }
 
+/** True when `target` escapes `dir` — the containment rule render outputs obey. */
+const outsideDir = (dir: string, target: string): boolean => {
+  const relative = path.relative(dir, target);
+  return relative.startsWith("..") || path.isAbsolute(relative);
+};
+
+/**
+ * Render one or more named Variants of an already-gated Scene document.
+ * Each Variant resolves (sparse patch over the base) and re-enters the one
+ * gate; every output lands in the scene's out/ directory named after its
+ * variant. A batch also writes one contact sheet — every output at 168px
+ * wide with its name — the full-size PNGs remain the review originals.
+ */
+async function renderVariants(
+  projectDir: string,
+  baseName: string,
+  library: () => Promise<Library>,
+  raw: unknown,
+  names: string[],
+  outArg: string | undefined,
+): Promise<CliResult> {
+  if (names.length === 0 || names.some((n) => !n))
+    return usageError("--variant needs at least one variant name");
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) return usageError(`variant "${dup}" is listed more than once`);
+  if (names.length > 1 && outArg)
+    return usageError("--out applies to a single-variant render — batches name their own outputs");
+  // Phase 1 — resolve, gate, and render everything before any file is
+  // written: a failing variant leaves the out/ directory untouched instead
+  // of silently half-updated.
+  const rendered: { name: string; png: Buffer; width: number; height: number; warnings: string[]; output: string }[] = [];
+  for (const name of names) {
+    const applied = resolveVariant(raw, name);
+    if (!applied.ok) return invalid(applied.errors);
+    const result = await loadScene(projectDir, library, applied.raw);
+    if (!result.ok) return invalid(result.errors);
+    const output =
+      outArg ?? path.join(projectDir, "out", `${baseName}.${name}.png`);
+    if (outsideDir(projectDir, output))
+      return usageError(
+        `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
+      );
+    const { png, width, height, warnings } = await renderScene(result.resolved);
+    rendered.push({ name, png, width, height, warnings, output });
+  }
+  // Phase 2 — every render succeeded: write the outputs and the batch's
+  // contact sheet (every output at 168px wide, labeled with its name).
+  const outputs: Record<string, unknown>[] = [];
+  const sheets: { label: string; png: Buffer }[] = [];
+  for (const r of rendered) {
+    await mkdir(path.dirname(r.output), { recursive: true });
+    await writeFile(r.output, r.png);
+    outputs.push({ variant: r.name, output: r.output, width: r.width, height: r.height, warnings: r.warnings });
+    sheets.push({ label: r.name, png: r.png });
+  }
+  let contact: Record<string, unknown> | undefined;
+  if (sheets.length > 1) {
+    const sheet = await renderContactSheet(sheets);
+    const contactPath = path.join(projectDir, "out", `${baseName}.contact.png`);
+    await mkdir(path.dirname(contactPath), { recursive: true });
+    await writeFile(contactPath, sheet.png);
+    contact = { output: contactPath, width: sheet.width, height: sheet.height };
+  }
+  return ok({ ok: true, outputs, ...(contact ? { contact } : {}) });
+}
+
 async function dispatch(args: string[]): Promise<CliResult> {
   const [cmd, file, ...rest] = args;
 
@@ -259,23 +334,40 @@ async function dispatch(args: string[]): Promise<CliResult> {
   }
 
   if ((cmd === "validate" || cmd === "inspect" || cmd === "render") && file) {
-    if (cmd !== "render" && rest.length)
-      return usageError(`unexpected arguments: ${rest.join(" ")}`);
     let outArg: string | undefined;
+    let variantArg: string | undefined;
+    // Strict flag parsing: a flag is never consumed as a value, and no flag
+    // repeats — ambiguity between two homes for one option is a usage error.
+    const setFlag = (flag: string, value: string | undefined): string | undefined => {
+      if (value === undefined || value.startsWith("--"))
+        return `missing value after "${flag}"`;
+      return undefined;
+    };
     if (cmd === "render") {
-      if (rest.length === 2 && rest[0] === "--out") outArg = rest[1];
-      else if (rest.length !== 0) return usageError("render accepts at most one --out <path>");
-    }
+      for (let i = 0; i < rest.length; i += 2) {
+        if (rest[i] === "--out" && outArg === undefined) {
+          const bad = setFlag("--out", rest[i + 1]);
+          if (bad) return usageError(bad);
+          outArg = rest[i + 1];
+        } else if (rest[i] === "--variant" && variantArg === undefined) {
+          const bad = setFlag("--variant", rest[i + 1]);
+          if (bad) return usageError(bad);
+          variantArg = rest[i + 1];
+        } else
+          return usageError("render accepts --out <path> and --variant <name[,name...]>, each at most once");
+      }
+    } else if (cmd === "inspect") {
+      if (rest.length === 2 && rest[0] === "--variant") variantArg = rest[1];
+      else if (rest.length !== 0)
+        return usageError("inspect accepts at most one --variant <name>");
+    } else if (rest.length) return usageError(`unexpected arguments: ${rest.join(" ")}`);
 
     const read = await readSceneFile(file);
     if ("errors" in read) return invalid(read.errors);
     // The one validation gate — every failure lands here, before any browser.
     // The library is a provider: scanned only if the scene names a library asset.
-    const result = await loadScene(
-      path.dirname(path.resolve(file)),
-      () => scanLibrary(LIBRARY_ROOT),
-      read.raw,
-    );
+    const sceneDir = path.dirname(path.resolve(file));
+    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), read.raw);
     if (!result.ok) return invalid(result.errors);
     const { resolved } = result;
 
@@ -284,10 +376,51 @@ async function dispatch(args: string[]): Promise<CliResult> {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         layerCount: countLayers(resolved.scene.layers),
+        ...(resolved.scene.variants
+          ? { variantCount: Object.keys(resolved.scene.variants).length }
+          : {}),
       });
     }
 
+    if (cmd === "render" && variantArg !== undefined)
+      return renderVariants(
+        sceneDir,
+        path.basename(file, ".json"),
+        () => scanLibrary(LIBRARY_ROOT),
+        read.raw,
+        variantArg.split(","),
+        outArg,
+      );
+
     if (cmd === "inspect") {
+      // Variant inspection: the merged Scene resolved through the same gate,
+      // plus the Variant's stored changes verbatim — unchanged facts appear
+      // only in the base layers, never duplicated in variant storage.
+      if (variantArg !== undefined) {
+        const applied = resolveVariant(read.raw, variantArg);
+        if (!applied.ok) return invalid(applied.errors);
+        const vResult = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), applied.raw);
+        if (!vResult.ok) return invalid(vResult.errors);
+        // Both assertions hold by construction: the base gate validated the
+        // document (so variants exist and are structurally sound) and
+        // resolveVariant just succeeded on this same name.
+        const stored = resolved.scene.variants![variantArg]!;
+        return ok({
+          ok: true,
+          schemaVersion: SCHEMA_VERSION,
+          canvas: vResult.resolved.scene.canvas,
+          ...(vResult.resolved.scene.theme ? { theme: vResult.resolved.scene.theme } : {}),
+          variant: {
+            name: variantArg,
+            ...(stored.description !== undefined ? { description: stored.description } : {}),
+            changes: stored.changes,
+          },
+          layerCount: countLayers(vResult.resolved.scene.layers),
+          layers: vResult.resolved.scene.layers.map((layer) =>
+            summarizeLayer(layer as unknown as Record<string, unknown>, vResult.resolved.assets),
+          ),
+        });
+      }
       return ok({
         ok: true,
         schemaVersion: SCHEMA_VERSION,
@@ -307,10 +440,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
       : path.join(projectDir, "out", `${path.basename(sceneFile, ".json")}.png`);
     // Render output belongs beside the scene — the same containment its
     // project-scope assets obey, so a scene read/write never crosses its directory.
-    const outside =
-      path.relative(projectDir, output).startsWith("..") ||
-      path.isAbsolute(path.relative(projectDir, output));
-    if (outside)
+    if (outsideDir(projectDir, output))
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );

@@ -53,6 +53,22 @@ export const SCENE_SCHEMA = {
         "Ordered layers — array order is the compositing order, last on top.",
       items: { $ref: "#/definitions/layer" },
     },
+    variants: {
+      type: "object",
+      minProperties: 1,
+      propertyNames: {
+        pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+        description:
+          "Variant names become render output file names — filesystem-safe characters only.",
+      },
+      additionalProperties: { $ref: "#/definitions/variant" },
+      description:
+        "Named sparse changes over this base Scene. The Scene stays canonical: " +
+        "a Variant stores only the fields it changes, addressed to stable layer " +
+        "ids, and resolves as base + patch — unchanged facts are never duplicated. " +
+        "A change's `set` replaces whole fields; patching is validated against the " +
+        "target layer's own schema branch at load.",
+    },
     theme: {
       type: "object",
       additionalProperties: false,
@@ -78,6 +94,52 @@ export const SCENE_SCHEMA = {
     },
   },
   definitions: {
+    variant: {
+      type: "object",
+      additionalProperties: false,
+      required: ["changes"],
+      description:
+        "One named Variant: what it changes, and nothing else. Unchanged Scene " +
+        "facts live only in the base Scene.",
+      properties: {
+        description: {
+          type: "string",
+          description: "Human-readable intent, surfaced in inspection and review.",
+        },
+        changes: {
+          type: "array",
+          minItems: 1,
+          description:
+            "The sparse patches. One change per layer — multiple fields for the " +
+            "same layer go in one change's `set`.",
+          items: { $ref: "#/definitions/change" },
+        },
+      },
+    },
+    change: {
+      type: "object",
+      additionalProperties: false,
+      required: ["layer", "set"],
+      description:
+        "A patch for one target layer. `set` overrides whole fields — arrays like " +
+        "spans or shadows replace as a unit, never merge. `id` and `type` are the " +
+        "layer's identity and cannot be patched.",
+      properties: {
+        layer: {
+          $ref: "#/definitions/id",
+          description: "Target layer id — any layer in the scene tree, at any depth.",
+        },
+        set: {
+          type: "object",
+          minProperties: 1,
+          description:
+            "Sparse field overrides, validated against the target layer's type. " +
+            "Every value must be valid on that layer type; the merged Scene must " +
+            "still satisfy its contracts. Never patchable: the layer's identity " +
+            "(id, type) and a group's layers — edit group children by their own ids.",
+        },
+      },
+    },
     id: {
       type: "string",
       minLength: 1,
