@@ -4,6 +4,12 @@
 
 ### Added
 
+- Bundled named themes with optional style-property defaults per layer type (`text`, `image`, `shape`, `group`) — a Scene pins one with `theme: {name, revision}` where the revision is the sha-256 of the theme's content, re-derived at load so a changed theme fails loudly instead of silently changing an old Render (#2)
+- One documented precedence rule for defaults — explicit layer value, then theme default, then the renderer's built-in default — applied at the load gate, contract-aware (a theme `color` applies only where a layer sets neither `color` nor `fill`; a theme `radius` only to rects), recursing into group children (#2)
+- Bundled scene templates and `bun run scene init <template> [--out <path>]` — init bakes plain layers with stable ids (no runtime template reference), pins the template's theme to its current revision, and validates the result through the load gate before emitting (#2)
+- `bun run scene themes` and `bun run scene templates` list the bundled registries as structured JSON with descriptions and revisions (#2)
+- `bun run scene inspect` reports effective values — authored, theme-resolved, and the renderer's built-in defaults — plus the locked `theme` identity, so an agent sees what a render will use (#2)
+- ADR-0003 records the revision-locking invariant and the load-gate precedence boundary (#2)
 - Shape layers draw common geometry inscribed in the layer box — `rect` (with per-axis-clamped `radius`), `ellipse`, `triangle` — with a solid `color` or gradient `fill` and a `border` stroked centered on the shape's edge (#11)
 - Group layers wrap nested layers into one editable component: children keep group-local coordinates, transform with the group, and composite in array order inside it; `scale` resizes the whole component around its center and nothing flattens or clips — every child keeps its stable id (#11)
 - Editable `effects` on image and group content — `blur`, `colorAdjust` (unmasked brightness/contrast/saturate/hue-rotate), `glow`, and `shadow` — emitted as one CSS filter chain in a fixed order (blur → colorAdjust → glow → shadow) with glow and shadow following the content's alpha (#11)
@@ -26,6 +32,7 @@
 
 ### Changed
 
+- `bun run scene inspect` reports effective values: `visible`, `opacity`, image `fit`, text `weight`/`align`/`lineHeight`, and `color` (or gradient `fill` with a surfaced `angle`) are now always present — authored, theme-resolved, or built-in default — instead of appearing only when authored (#2)
 - `bun run scene validate` and `inspect` report `layerCount` for the whole layer tree — group children included — instead of top-level layers only (#11)
 
 ### Fixed

@@ -11,6 +11,9 @@
  *      oneOf error.
  *   2. Semantic pass — everything JSON Schema can't say: duplicate layer ids
  *      and crop sums.
+ *   2b. Theme pass — verify the Scene's theme pin (content-derived revision,
+ *      src/themes.ts) and apply the theme's defaults: explicit layer value >
+ *      theme default > renderer built-in default (LAYER_DEFAULTS).
  *   3. Resolution pass — assets through the one contract in src/assets.ts
  *      (exact bytes, hash pins), text fonts against the bundled-face registry.
  *
@@ -29,6 +32,7 @@ import {
   type ResolvedAsset,
 } from "./assets.js";
 import { resolveFace } from "./fonts.js";
+import { applyThemeToLayer, getTheme, themeRevision } from "./themes.js";
 
 export { SCENE_SCHEMA };
 export const SCHEMA_VERSION = 1;
@@ -147,6 +151,8 @@ export type SceneLayer = ImageLayer | TextLayer | ShapeLayer | GroupLayer;
 export interface Scene {
   schemaVersion: number;
   canvas: { width: number; height: number };
+  /** Named theme defaults, pinned to an exact revision. */
+  theme?: { name: string; revision: string };
   layers: SceneLayer[];
 }
 
@@ -155,6 +161,22 @@ export interface ResolvedScene {
   /** Exact bytes per image layer, keyed by layer id — the asset identities a render used. */
   assets: Map<string, ResolvedAsset>;
 }
+
+/**
+ * The renderer's built-in per-property defaults — the one home, shared by the
+ * renderer (which applies them) and the inspector (which surfaces them as the
+ * effective values an agent will render). Theme defaults slot above these and
+ * explicit Scene values above those: one precedence rule.
+ */
+export const LAYER_DEFAULTS = {
+  visible: true,
+  opacity: 1,
+  fit: "cover",
+  align: "left",
+  lineHeight: 1.1,
+  color: "#000",
+  fillAngle: 90,
+} as const;
 
 export type LoadResult =
   | { ok: true; resolved: ResolvedScene }
@@ -510,6 +532,40 @@ async function resolutionErrors(
   return errors;
 }
 
+// --- theme resolution -----------------------------------------------------------
+
+/**
+ * Verify the Scene's theme pin and apply the theme's defaults through the
+ * whole layer tree, in place. This is the one precedence boundary: explicit
+ * layer values win, then theme defaults, then the renderer's built-in
+ * defaults. Defaults never fight the fill contracts — a theme color applies
+ * only where the layer sets neither color nor fill, and shape radius only
+ * to rects.
+ */
+function themeErrorsAndApply(scene: Scene): SceneError[] {
+  if (!scene.theme) return [];
+  const { name, revision } = scene.theme;
+  let theme: ReturnType<typeof getTheme>;
+  try {
+    theme = getTheme(name);
+  } catch (err) {
+    return [{ path: "theme.name", message: (err as Error).message }];
+  }
+  const actual = themeRevision(theme);
+  if (!actual.startsWith(revision))
+    return [
+      {
+        path: "theme.revision",
+        message:
+          `theme "${name}" is pinned to revision "${revision}" but now hashes to "${actual}".\n` +
+          `The theme changed; re-pin it to "${actual}" or drop the pin to accept the new content.`,
+      },
+    ];
+  for (const { layer } of layerEntries(scene.layers, (i) => `layers[${i}]`))
+    applyThemeToLayer(layer, theme);
+  return [];
+}
+
 // --- the one gate -----------------------------------------------------------------
 
 /**
@@ -531,8 +587,12 @@ export async function loadScene(
   if (!validateSchema(raw)) {
     return { ok: false, errors: expandLayerErrors(validateSchema.errors!) };
   }
-  const scene = raw as Scene;
+  // Resolution (theme defaults) mutates — work on a copy so the caller's
+  // document keeps exactly what was authored and `resolved.scene` is the
+  // only themed copy.
+  const scene = structuredClone(raw) as Scene;
   const errors = semanticErrors(scene);
+  if (errors.length === 0) errors.push(...themeErrorsAndApply(scene));
   const assets = new Map<string, ResolvedAsset>();
   if (errors.length === 0)
     errors.push(...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets)));

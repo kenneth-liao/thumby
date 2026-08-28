@@ -53,6 +53,29 @@ export const SCENE_SCHEMA = {
         "Ordered layers — array order is the compositing order, last on top.",
       items: { $ref: "#/definitions/layer" },
     },
+    theme: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "revision"],
+      description:
+        "Named theme defaults, locked to an exact revision. Precedence is one " +
+        "rule: an explicit layer value wins, then the theme default, then the " +
+        "renderer's built-in default. The revision is the sha-256 prefix of the " +
+        "theme's content — load re-derives it and fails loudly on drift, so an " +
+        "old Scene never renders with silently changed theme content.",
+      properties: {
+        name: {
+          type: "string",
+          minLength: 1,
+          description: "A bundled theme name.",
+        },
+        revision: {
+          type: "string",
+          pattern: "^[0-9a-f]{8,64}$",
+          description: "sha-256 of the theme's content (full hex or a prefix).",
+        },
+      },
+    },
   },
   definitions: {
     id: {
