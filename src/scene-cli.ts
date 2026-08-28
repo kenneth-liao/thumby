@@ -109,9 +109,10 @@ function summarizeLayer(
     type: layer.type,
     visible: layer.visible ?? LAYER_DEFAULTS.visible,
     opacity: layer.opacity ?? LAYER_DEFAULTS.opacity,
-    position: layer.position,
-    size: layer.size,
   };
+  // A connector has no position/size — its geometry derives from its targets.
+  if (layer.position !== undefined) summary.position = layer.position;
+  if (layer.size !== undefined) summary.size = layer.size;
   if (layer.rotation !== undefined) summary.rotation = layer.rotation;
   if (layer.mirror !== undefined) summary.mirror = layer.mirror;
   if (layer.effects !== undefined) summary.effects = layer.effects;
@@ -133,6 +134,14 @@ function summarizeLayer(
     summary.layers = (layer.layers as Record<string, unknown>[]).map((child) =>
       summarizeLayer(child, assets),
     );
+  } else if (layer.type === "connector") {
+    summary.from = layer.from;
+    summary.to = layer.to;
+    if (layer.bow !== undefined) summary.bow = layer.bow;
+    if (layer.dash !== undefined) summary.dash = layer.dash;
+    summary.color = layer.color ?? LAYER_DEFAULTS.color;
+    summary.width = layer.width ?? LAYER_DEFAULTS.connectorWidth;
+    summary.arrow = layer.arrow ?? false;
   } else {
     if (layer.text !== undefined) summary.text = layer.text;
     if (layer.spans !== undefined) summary.spans = layer.spans;

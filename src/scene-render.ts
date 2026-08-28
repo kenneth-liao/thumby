@@ -25,6 +25,7 @@ import type {
   TextSpan,
   SceneLayer,
   Effects,
+  ConnectorLayer,
 } from "./scene.js";
 import { LAYER_DEFAULTS } from "./scene.js";
 
@@ -54,6 +55,59 @@ const esc = (s: string) =>
 
 /** Rounding that keeps geometry readable without visible drift. */
 const n = (v: number) => Number(v.toFixed(4));
+
+/** An axis-aligned layer box in frame px — a connector's anchor geometry. */
+export interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One connector's quadratic path in frame px: the line between the targets'
+ * box centers, each end trimmed to where it exits the source box and enters
+ * the target box, plus the perpendicular bow at the midpoint (positive
+ * curves clockwise from the from→to direction — down for a left→right run).
+ * Boxes overlapping along the run can't be trimmed meaningfully; the path
+ * then simply joins the centers. Authored (unrotated) boxes anchor the path.
+ */
+export function connectorGeometry(
+  from: Box,
+  to: Box,
+  bow = 0,
+): { x1: number; y1: number; cx: number; cy: number; x2: number; y2: number } {
+  const ax = from.x + from.width / 2;
+  const ay = from.y + from.height / 2;
+  const bx = to.x + to.width / 2;
+  const by = to.y + to.height / 2;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return { x1: n(ax), y1: n(ay), cx: n(ax), cy: n(ay), x2: n(bx), y2: n(by) };
+  const ux = dx / len;
+  const uy = dy / len;
+  // Exit of the source box and entry into the target box along A→B (t in [0,1]).
+  const exitX = dx > 0 ? (from.x + from.width - ax) / dx : dx < 0 ? (from.x - ax) / dx : Infinity;
+  const exitY = dy > 0 ? (from.y + from.height - ay) / dy : dy < 0 ? (from.y - ay) / dy : Infinity;
+  const enterX = dx > 0 ? (to.x - ax) / dx : dx < 0 ? (to.x + to.width - ax) / dx : -Infinity;
+  const enterY = dy > 0 ? (to.y - ay) / dy : dy < 0 ? (to.y + to.height - ay) / dy : -Infinity;
+  const tExit = Math.min(exitX, exitY);
+  const tEnter = Math.max(enterX, enterY);
+  const overlap = tExit >= tEnter;
+  const x1 = overlap ? ax : ax + tExit * dx;
+  const y1 = overlap ? ay : ay + tExit * dy;
+  const x2 = overlap ? bx : ax + tEnter * dx;
+  const y2 = overlap ? by : ay + tEnter * dy;
+  return {
+    x1: n(x1),
+    y1: n(y1),
+    cx: n((x1 + x2) / 2 - uy * bow),
+    cy: n((y1 + y2) / 2 + ux * bow),
+    x2: n(x2),
+    y2: n(y2),
+  };
+}
 
 /** Every layer in the scene tree, depth-first — groups yield their children. */
 export function* layerTree(layers: SceneLayer[]): Generator<SceneLayer> {
@@ -321,6 +375,55 @@ function shapeMarkup(
 }
 
 /**
+ * Per-page arrowhead marker factory: the overlay's auto-oriented triangle,
+ * sized relative to the stroke width (markerUnits strokeWidth) and colored
+ * with its connector's line. Ids are numbered per page in layer order.
+ */
+function markerFactory(): (color: string) => { defs: string; ref: string } {
+  let next = 0;
+  return (color) => {
+    const id = `arrow-${++next}`;
+    return {
+      defs:
+        `<defs><marker id="${id}" viewBox="0 0 12 12" refX="10" refY="6" ` +
+        `markerWidth="4" markerHeight="4" orient="auto" markerUnits="strokeWidth">` +
+        `<path d="M 1 1 L 11 6 L 1 11 Z" fill="${color}"/></marker></defs>`,
+      ref: `url(#${id})`,
+    };
+  };
+}
+
+/**
+ * One connector as a pixel-space full-canvas SVG (viewBox = canvas, so
+ * stroke-width means frame px — the non-scaling-stroke trap stays out).
+ * `boxes` maps every top-level non-connector id to its box; the load gate
+ * guarantees both targets resolve.
+ */
+function connectorMarkup(
+  layer: ConnectorLayer,
+  canvas: { width: number; height: number },
+  boxes: Map<string, Box>,
+  marker: ReturnType<typeof markerFactory>,
+): string {
+  const g = connectorGeometry(boxes.get(layer.from)!, boxes.get(layer.to)!, layer.bow ?? 0);
+  const color = layer.color ?? LAYER_DEFAULTS.color;
+  const width = layer.width ?? LAYER_DEFAULTS.connectorWidth;
+  const dash = layer.dash ? ` stroke-dasharray="${layer.dash.map(n).join(" ")}"` : "";
+  let defs = "";
+  let markerRef = "";
+  if (layer.arrow) {
+    const m = marker(color);
+    defs = m.defs;
+    markerRef = ` marker-end="${m.ref}"`;
+  }
+  return (
+    `<svg viewBox="0 0 ${canvas.width} ${canvas.height}" style="width:100%;height:100%;overflow:visible;display:block">` +
+    `${defs}<path d="M ${g.x1} ${g.y1} Q ${g.cx} ${g.cy} ${g.x2} ${g.y2}" ` +
+    `fill="none" stroke="${color}" stroke-width="${n(width)}"${dash}${markerRef}/></svg>`
+  );
+}
+
+/**
  * One span as an inline element carrying only its overrides — everything
  * unset inherits the layer element's inline styles through CSS inheritance.
  */
@@ -345,14 +448,22 @@ function layerMarkup(
   layer: SceneLayer,
   natural: Map<string, ImageSize>,
   gradient: ReturnType<typeof gradientFactory>,
+  boxes: Map<string, Box>,
+  marker: ReturnType<typeof markerFactory>,
 ): string {
-  const { position, size, opacity, visible } = layer;
-  const styles = [
-    `left:${position.x}px`,
-    `top:${position.y}px`,
-    `width:${size.width}px`,
-    `height:${size.height}px`,
-  ];
+  const { opacity, visible } = layer;
+  const canvas = resolved.scene.canvas;
+  // A connector is canvas-sized — its geometry is the SVG path, so the
+  // wrapper positions the full frame rather than a layer box.
+  const styles =
+    layer.type === "connector"
+      ? ["left:0px", "top:0px", `width:${canvas.width}px`, `height:${canvas.height}px`]
+      : [
+          `left:${layer.position.x}px`,
+          `top:${layer.position.y}px`,
+          `width:${layer.size.width}px`,
+          `height:${layer.size.height}px`,
+        ];
   if (opacity !== undefined) styles.push(`opacity:${opacity}`);
   if (visible === false) styles.push("display:none");
   if (layer.type === "image" || layer.type === "group") {
@@ -362,18 +473,21 @@ function layerMarkup(
   const crop = layer.type === "image" && layer.crop ? "overflow:hidden;" : "";
   // A group is a positioned container: children render at their group-local
   // coordinates inside it and transform with it. Nothing flattens — every
-  // child stays an addressable layer element.
+  // child stays an addressable layer element. Connectors are top-level only
+  // (the load gate rejects nested ones), so the recursion never sees one.
   const children =
     layer.type === "group"
-      ? layer.layers.map((c) => layerMarkup(resolved, c, natural, gradient)).join("")
+      ? layer.layers.map((c) => layerMarkup(resolved, c, natural, gradient, boxes, marker)).join("")
       : layer.type === "image"
         ? imageMarkup(layer, imageUri(resolved, layer.id), natural.get(layer.id))
         : layer.type === "shape"
           ? shapeMarkup(layer, gradient)
-          : textMarkup(layer);
+          : layer.type === "connector"
+            ? connectorMarkup(layer, canvas, boxes, marker)
+            : textMarkup(layer);
   return `<div class="scene-layer" data-layer-id="${esc(layer.id)}" style="position:absolute;${crop}${styles.join(
     ";",
-  )};${transformCss(layer)}">${children}</div>`;
+  )};${layer.type === "connector" ? "" : transformCss(layer)}">${children}</div>`;
 }
 
 function imageUri(resolved: ResolvedScene, layerId: string): string {
@@ -393,13 +507,21 @@ export function scenePageHtml(
   const { scene } = resolved;
   const fontCss = fontFaceCss(...sceneFaces(resolved));
   const gradient = gradientFactory();
+  const marker = markerFactory();
+  // Connector targets resolve against the scene's top-level boxes (the load
+  // gate has already rejected dangling ids and connectors-as-targets).
+  const boxes = new Map<string, Box>();
+  for (const l of scene.layers) {
+    if (l.type === "connector" || boxes.has(l.id)) continue;
+    boxes.set(l.id, { x: l.position.x, y: l.position.y, width: l.size.width, height: l.size.height });
+  }
   return `<!doctype html><html><head><meta charset="utf-8"><style>
   * { margin:0; padding:0; box-sizing:border-box; }
   ${fontCss}
   body { width:${scene.canvas.width}px; height:${scene.canvas.height}px; overflow:hidden; position:relative; background:#fff; }
   .scene-layer { transform-origin:center; }
 </style></head><body>
-  ${scene.layers.map((layer) => layerMarkup(resolved, layer, natural, gradient)).join("\n  ")}
+  ${scene.layers.map((layer) => layerMarkup(resolved, layer, natural, gradient, boxes, marker)).join("\n  ")}
 </body></html>`;
 }
 

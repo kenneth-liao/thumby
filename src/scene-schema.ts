@@ -519,14 +519,76 @@ export const SCENE_SCHEMA = {
         color: { $ref: "#/definitions/color" },
       },
     },
+    connectorLayer: {
+      type: "object",
+      required: ["id", "type", "from", "to"],
+      additionalProperties: false,
+      // A connector has no position/size of its own: its geometry derives from
+      // its targets' boxes and always resolves in frame (canvas) coordinates,
+      // so connectors live at the scene's top level only (validated in
+      // src/scene.ts — a group's children are group-local).
+      properties: {
+        id: { $ref: "#/definitions/id" },
+        type: { const: "connector" },
+        visible: { $ref: "#/definitions/visible" },
+        opacity: { $ref: "#/definitions/opacity" },
+        from: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Source target — a top-level layer or Group id in this scene. " +
+            "The path starts where the line from this box's center exits the box. " +
+            "Dangling targets fail validation.",
+        },
+        to: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Destination target — a top-level layer or Group id in this scene. " +
+            "The path ends where the line toward this box's center enters the box " +
+            "(the arrowhead lands there). Dangling targets fail validation.",
+        },
+        bow: {
+          type: "number",
+          description:
+            "Perpendicular bow in frame px, applied at the path midpoint — " +
+            "positive curves clockwise from the from→to direction (down for a " +
+            "left→right line). 0 (absent) is a straight line.",
+        },
+        dash: {
+          type: "array",
+          minItems: 1,
+          items: { type: "number", minimum: 0 },
+          description:
+            "Dash pattern in frame px (dash, gap, …) — SVG stroke-dasharray. " +
+            "Absent: a solid line.",
+        },
+        color: {
+          $ref: "#/definitions/color",
+          description: "Stroke (and arrowhead) color. Default #000.",
+        },
+        width: {
+          type: "number",
+          exclusiveMinimum: 0,
+          description: "Stroke width in frame px. Default 3.",
+        },
+        arrow: {
+          type: "boolean",
+          description:
+            "Arrowhead at the `to` end, auto-oriented along the path, colored " +
+            "with the line, sized relative to the stroke width. Default: no arrowhead.",
+        },
+      },
+    },
     layer: {
       oneOf: [
         { $ref: "#/definitions/imageLayer" },
         { $ref: "#/definitions/textLayer" },
         { $ref: "#/definitions/shapeLayer" },
         { $ref: "#/definitions/groupLayer" },
+        { $ref: "#/definitions/connectorLayer" },
       ],
-      description: "Scene v1 layers: image, text, shape, or group.",
+      description: "Scene v1 layers: image, text, shape, group, or connector.",
     },
   },
 } as const;
