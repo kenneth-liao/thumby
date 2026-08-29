@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.18.0]
+
+### Added
+
+- Creator candidate generation (REQ-017): `bun run jobs creators <subject> --ref identity:<file> …` starts a creator Generation Job producing best-of-N isolated creator candidates from typed references — roles are restricted to `identity`, `pose`, `expression`, `outfit`, `style`, and `edit` (source-to-edit), and at least one identity anchor is required: a likeness is never generated from text alone (#16)
+- Model-specific reference adaptation preserves declared roles: references are attached identity-anchors-first and pose-last (the tested likeness recipe), and the run's recorded fullPrompt role-assigns every reference with its role and path, so the effective-prompt provenance preserves each declared role whatever the model's call shape (#16)
+- `bun run jobs review <jobId>` writes an offline review sheet (`<jobDir>/review.html`): a contact sheet of every distinct candidate across all runs with a checkerboard alpha view, plus a face-detail section applying the same deterministic center-crop to every candidate and every identity anchor for direct comparison; missing anchor files fail loudly and non-creator jobs are refused — the sheet is evidence for the human likeness gate (DEC-004), never an automated verdict (#16)
+- Creator adoption (`bun run jobs adopt` on a creator job) verifies the candidate's true alpha and writes a Cutout Asset (`assets/cutouts/<id>/cutout.png`) carrying job provenance (`adoptedFrom: job:<id>#<hash>`, model, subject, fullPrompt); `approval: "trial"` is forced — adoption is never an approval, and jobs never touch Scenes (#16)
+- Creator jobs are written under job schema version 3 (v1 plate-only, v2 plate/object), so a 0.16.1 binary rejects a creator record outright instead of adopting it through a path without the creator alpha gate (#16)
+- Adopted creator cutouts carry optional `subject`/`fullPrompt` provenance fields on `CutoutMeta`, mirroring Plate/Object metas; existing cutout metas are unaffected (#16)
+
 ## [0.17.2]
 
 ### Fixed

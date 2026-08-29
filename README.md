@@ -189,6 +189,27 @@ never final text or the final composite — ADR-0004); it enters a Scene as its
 own Image layer, movable, resizable, hideable, and replaceable with no
 regeneration of anything else.
 
+**Creator Assets** (REQ-017) are isolated creator candidates generated from
+typed identity anchors — never from text alone. Reference roles are typed
+(`identity`, `pose`, `expression`, `outfit`, `style`, `edit` = source-to-edit);
+references are attached identity-anchors-first and pose-last, and the run's
+recorded prompt role-assigns every reference, so provenance preserves each
+declared role:
+
+```bash
+bun run jobs creators "arms crossed, explaining to camera" \
+  --ref identity:assets/identity/kenny-headshots/k1.png \
+  --ref identity:assets/identity/kenny-headshots/k2.png \
+  --ref pose:pose.png --count 4
+bun run jobs review <jobId>                   # contact sheet + comparable face-detail views
+bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
+```
+
+Adoption verifies true alpha (the same gate as objects) and always enters the
+library as a `trial` Cutout Asset — approval is the human likeness gate, never
+automatic. Reruns append candidates under the job lineage; nothing is ever
+overwritten.
+
 Overlay specs reference library logos by id, so no absolute paths:
 
 ```json

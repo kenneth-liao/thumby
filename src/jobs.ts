@@ -17,17 +17,22 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TextZone } from "./generate.js";
 import { resolveModel } from "./models.js";
-import { extensionFor, writePlateAsset, writeObjectAsset } from "./assets.js";
+import { extensionFor, writePlateAsset, writeObjectAsset, writeCreatorAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
 
 /**
- * Job record schema versions. v1 is plate-only; object-capable jobs are v2.
- * The bump is the rollback boundary: a 0.15.1 binary rejects a v2 record
- * outright instead of rerunning or adopting an object job through its
- * plate-only path (where no alpha gate exists).
+ * Job record schema versions. v1 is plate-only; object-capable jobs are v2;
+ * creator-capable jobs are v3. Each bump is the rollback boundary: an older
+ * binary rejects a record outright instead of rerunning or adopting a newer
+ * job kind through an older path (where its gate does not exist — a creator
+ * candidate adopted through the plate path would skip the true-alpha check).
  */
 export const PLATE_JOB_SCHEMA_VERSION = 1 as const;
 export const OBJECT_JOB_SCHEMA_VERSION = 2 as const;
+export const CREATOR_JOB_SCHEMA_VERSION = 3 as const;
+
+/** The three Generation Job kinds. */
+export type JobKind = "plate" | "object" | "creator";
 
 /** A generation reference with an explicit role and exact content identity. */
 export interface TypedRef {
@@ -61,7 +66,33 @@ export interface ObjectJobRequest {
   refs: TypedRef[];
 }
 
-export type JobRequest = PlateJobRequest | ObjectJobRequest;
+/**
+ * A creator candidate request (REQ-017): an isolated creator figure produced
+ * from typed identity anchors — never from text alone. Roles are restricted
+ * to the creator set and ≥1 identity anchor is enforced at the request
+ * boundary by `validateCreatorRequest`.
+ */
+export interface CreatorJobRequest {
+  kind: "creator";
+  subject: string;
+  model: string;
+  count: number;
+  temperature?: number;
+  refs: TypedRef[];
+}
+
+export type JobRequest = PlateJobRequest | ObjectJobRequest | CreatorJobRequest;
+
+/** The roles a creator request may assign its references. */
+export const CREATOR_ROLES = [
+  "identity",
+  "pose",
+  "expression",
+  "outfit",
+  "style",
+  "edit",
+] as const;
+export type CreatorRole = (typeof CREATOR_ROLES)[number];
 
 export interface JobCandidate {
   contentHash: string;
@@ -83,9 +114,12 @@ export interface JobRun {
 }
 
 export interface GenerationJob {
-  schemaVersion: typeof PLATE_JOB_SCHEMA_VERSION | typeof OBJECT_JOB_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof PLATE_JOB_SCHEMA_VERSION
+    | typeof OBJECT_JOB_SCHEMA_VERSION
+    | typeof CREATOR_JOB_SCHEMA_VERSION;
   jobId: string;
-  kind: "plate" | "object";
+  kind: JobKind;
   createdAt: string;
   request: JobRequest;
   runs: JobRun[];
@@ -93,7 +127,7 @@ export interface GenerationJob {
 
 export interface JobSummary {
   jobId: string;
-  kind: "plate" | "object";
+  kind: JobKind;
   subject: string;
   createdAt: string;
   runs: number;
@@ -108,6 +142,7 @@ export interface GeneratedBatch {
 }
 export type PlateGenerator = (request: PlateJobRequest) => Promise<GeneratedBatch>;
 export type ObjectGenerator = (request: ObjectJobRequest) => Promise<GeneratedBatch>;
+export type CreatorGenerator = (request: CreatorJobRequest) => Promise<GeneratedBatch>;
 export type JobGenerator = (request: JobRequest) => Promise<GeneratedBatch>;
 
 /**
@@ -130,6 +165,30 @@ export function validateObjectSubject(subject: string): void {
         `Official logos come from sourced Assets (bun run library add-logo) and final text is rendered locally (ADR-0001); ` +
         `reword the subject to name the object itself, not its lettering.`,
     );
+}
+
+/**
+ * The creator request boundary (REQ-017): roles are restricted to the typed
+ * creator set, and at least one identity anchor is mandatory — a likeness is
+ * never generated from text alone (docs/asset-requirements.md). Runs before
+ * any generation call, so a refused request costs nothing.
+ */
+export function validateCreatorRequest(request: CreatorJobRequest): void {
+  if (!request.subject.trim())
+    throw new Error(`A creator job needs a subject describing the pose, expression, outfit, or edit to produce`);
+  if (!request.refs.some((r) => r.role === "identity"))
+    throw new Error(
+      `A creator job needs at least one "identity:" reference (an identity-kit anchor). ` +
+        `A likeness is never generated from text alone — search the kit with ` +
+        `"bun run library list --facets …" and pass 2–4 anchors, e.g. --ref identity:<file>.`,
+    );
+  for (const ref of request.refs) {
+    if (!(CREATOR_ROLES as readonly string[]).includes(ref.role))
+      throw new Error(
+        `Reference role "${ref.role}" is not a creator role — creator requests accept: ${CREATOR_ROLES.join(", ")}. ` +
+          `("edit" is the source-to-edit role.)`,
+      );
+  }
 }
 
 const JOB_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -203,7 +262,12 @@ async function runJob(
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
-    schemaVersion: request.kind === "object" ? OBJECT_JOB_SCHEMA_VERSION : PLATE_JOB_SCHEMA_VERSION,
+    schemaVersion:
+      request.kind === "object"
+        ? OBJECT_JOB_SCHEMA_VERSION
+        : request.kind === "creator"
+          ? CREATOR_JOB_SCHEMA_VERSION
+          : PLATE_JOB_SCHEMA_VERSION,
     jobId,
     kind: request.kind,
     createdAt: now,
@@ -233,6 +297,16 @@ export async function runObjectJob(
 ): Promise<GenerationJob> {
   validateObjectSubject(request.subject);
   return runJob(jobRoot, jobId, request, lift("object", generate));
+}
+
+export async function runCreatorJob(
+  jobRoot: string,
+  jobId: string,
+  request: CreatorJobRequest,
+  generate: CreatorGenerator,
+): Promise<GenerationJob> {
+  validateCreatorRequest(request);
+  return runJob(jobRoot, jobId, request, lift("creator", generate));
 }
 
 /**
@@ -282,6 +356,14 @@ export function rerunObjectJob(
   generate: ObjectGenerator,
 ): Promise<GenerationJob> {
   return rerunJob(jobRoot, jobId, lift("object", generate));
+}
+
+export function rerunCreatorJob(
+  jobRoot: string,
+  jobId: string,
+  generate: CreatorGenerator,
+): Promise<GenerationJob> {
+  return rerunJob(jobRoot, jobId, lift("creator", generate));
 }
 
 /** Call the generator, persist the candidates, and build the run record. */
@@ -337,9 +419,13 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
   }
   try {
     const job = JSON.parse(raw) as GenerationJob;
-    if (job.schemaVersion !== PLATE_JOB_SCHEMA_VERSION && job.schemaVersion !== OBJECT_JOB_SCHEMA_VERSION)
+    if (
+      job.schemaVersion !== PLATE_JOB_SCHEMA_VERSION &&
+      job.schemaVersion !== OBJECT_JOB_SCHEMA_VERSION &&
+      job.schemaVersion !== CREATOR_JOB_SCHEMA_VERSION
+    )
       throw new Error(
-        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${PLATE_JOB_SCHEMA_VERSION} and ${OBJECT_JOB_SCHEMA_VERSION} only`,
+        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${PLATE_JOB_SCHEMA_VERSION}, ${OBJECT_JOB_SCHEMA_VERSION}, and ${CREATOR_JOB_SCHEMA_VERSION} only`,
       );
     if (job.kind !== job.request.kind)
       throw new Error(
@@ -347,7 +433,11 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
       );
     if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate")
       throw new Error(
-        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, which is plate-only, but its kind is ${JSON.stringify(job.kind)} — object jobs require schemaVersion ${OBJECT_JOB_SCHEMA_VERSION}`,
+        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, which is plate-only, but its kind is ${JSON.stringify(job.kind)} — object jobs require schemaVersion ${OBJECT_JOB_SCHEMA_VERSION} and creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}`,
+      );
+    if (job.schemaVersion === OBJECT_JOB_SCHEMA_VERSION && job.kind === "creator")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${OBJECT_JOB_SCHEMA_VERSION}, which cannot carry a creator job (creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}) — an older binary must reject this record, not adopt it through a path without the creator alpha gate`,
       );
     return job;
   } catch (err) {
@@ -383,8 +473,10 @@ export async function listJobs(jobRoot: string): Promise<JobSummary[]> {
 
 /**
  * Adopt a recorded candidate as a new immutable Asset — the kind follows the
- * job: a plate job adopts a Plate Asset, an object job verifies the
- * candidate's true alpha (REQ-015) and adopts an Object Asset. The candidate
+ * job: a plate job adopts a Plate Asset; an object job verifies the
+ * candidate's true alpha (REQ-015) and adopts an Object Asset; a creator job
+ * runs the same true-alpha gate (REQ-017) and adopts a trial Cutout Asset.
+ * The candidate
  * is addressed by exact content hash (a unique prefix is accepted); its bytes
  * are re-derived and verified before adoption, so a tampered or missing file
  * cannot enter the library under a stale identity. Overwriting an existing
@@ -431,14 +523,27 @@ export async function adoptCandidate(
     adoptedFrom,
   };
 
-  if (job.kind === "object") {
+  if (job.kind === "object" || job.kind === "creator") {
     // The alpha gate runs before any write: an opaque candidate is exactly
     // the chroma-key shape REQ-015 forbids, and it must not enter the library.
     verifyTrueAlpha(bytes, cand.file);
     // The gate just proved the bytes are PNG — the recorded mediaType is
-    // derived, not authoritative, and object assets are contractually
-    // object.png (writeObjectAsset hardcodes the type, so a mislabeled
-    // candidate cannot produce object.jpg).
+    // derived, not authoritative, and generated assets are contractually
+    // object.png / cutout.png (the write paths hardcode the type, so a
+    // mislabeled candidate cannot produce a .jpg asset).
+    if (job.kind === "creator") {
+      // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
+      // only Kenneth promotes a Creator Asset through the library CLI.
+      const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, bytes, {
+        kind: "cutout",
+        id: assetId,
+        name: opts.name ?? assetId,
+        tags: opts.tags ?? [],
+        approval: "trial",
+        ...provenance,
+      });
+      return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
+    }
     const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, bytes, {
       kind: "object",
       id: assetId,
