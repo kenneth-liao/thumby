@@ -202,13 +202,23 @@ bun run jobs creators "arms crossed, explaining to camera" \
   --ref identity:assets/identity/kenny-headshots/k2.png \
   --ref pose:pose.png --count 4
 bun run jobs review <jobId>                   # contact sheet + comparable face-detail views
-bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
 ```
 
-Adoption verifies true alpha (the same gate as objects) and always enters the
-library as a `trial` Cutout Asset — approval is the human likeness gate, never
-automatic. Reruns append candidates under the job lineage; nothing is ever
-overwritten.
+Review is the endpoint of the documented creator flow **today**: the tested
+nano recipe yields opaque RGB candidates (measured 2026-08-29, one painted a
+fake checkerboard — see *Isolation is the open gap* in
+`docs/asset-requirements.md`), so `jobs adopt`'s true-alpha gate refuses them
+by design. The gate is correct; the missing piece is a segmentation-matting
+pass between generation and adoption (BiRefNet / BEN2 / RMBG-2.0 class,
+tracked as a follow-up). Once it lands, adoption verifies true alpha (the
+same gate as objects) and always enters the library as a `trial` Cutout Asset
+— approval is the human likeness gate, never automatic. Reruns append
+candidates under the job lineage; nothing is ever overwritten.
+
+The working isolation path today is the chromakey route — a `#00FF00`
+background pinned in-prompt, keyed with `src/chromakey.ts`, added with
+`bun run library add-cutout` — which does not go through the Job adoption
+path; green fringe on hair is its known defect.
 
 Overlay specs reference library logos by id, so no absolute paths:
 

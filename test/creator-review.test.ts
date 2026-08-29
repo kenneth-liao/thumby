@@ -63,7 +63,7 @@ const baseRequest = (anchors: string[]): CreatorJobRequest => ({
 describe("reviewCreatorJob", () => {
   test("writes a review sheet listing every distinct candidate across runs, against the identity anchors", async () => {
     await seedAnchors(["anchor-a.png", "anchor-b.png"]);
-    const first = await runCreatorJob(jobRoot, "creator-review", baseRequest(["anchor-a.png", "anchor-b.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-review", baseRequest(["anchor-a.png", "anchor-b.png"]), distinctGen);
     // A rerun of the SAME job adds candidates the sheet must also show — the
     // advertised all-runs behavior is exercised through the real lineage.
     const second = await rerunCreatorJob(jobRoot, "creator-review", distinctGen);
@@ -73,11 +73,14 @@ describe("reviewCreatorJob", () => {
     expect(result.reviewPath).toBe(path.join(jobRoot, "creator-review", "review.html"));
 
     const html = await readFile(result.reviewPath, "utf8");
-    // Every candidate from every run is referenced.
-    for (const job of [first, second]) {
-      for (const cand of job.runs[0]!.candidates) {
-        expect(html).toContain(cand.contentHash.slice(0, 12));
-      }
+    // Every candidate from every run is referenced. The rerun produced distinct
+    // candidates (distinctGen emits unique bytes), so its hashes are genuine
+    // second-run evidence — assert them directly, not as re-read first-run hashes.
+    const firstRunHashes = new Set(second.runs[0]!.candidates.map((c) => c.contentHash.slice(0, 12)));
+    const secondRunHashes = second.runs[1]!.candidates.map((c) => c.contentHash.slice(0, 12));
+    expect(secondRunHashes.some((h) => !firstRunHashes.has(h))).toBe(true);
+    for (const hash of [...firstRunHashes, ...secondRunHashes]) {
+      expect(html).toContain(hash);
     }
     // Anchors are referenced with their ids for the face-detail comparison.
     expect(html).toContain("anchor-a.png");
