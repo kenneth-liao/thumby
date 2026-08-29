@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0]
+
+### Added
+
+- YouTube safe-area validation (REQ-012): the duration-badge (bottom-right 192×64) and progress-bar (full-width bottom 16px) regions of the 1280×720 canvas are defined once in `src/safe-area.ts`; `bun run scene validate` reports a structured `safeAreaViolations` array and every render path (base, variants, rerender) surfaces violations as actionable `safe-area:` warnings naming the layer, its frame footprint, and the region — recorded in the Render manifest like any other warning. Violations never fail a render: a full-canvas plate legitimately intersects both regions, and accepting the overlap is the reviewer's call (ADR-0005) (#6)
+- `bun run scene guidelines <scene.json> [--out <path>]` renders the inspectable guideline view — the Scene exactly as `render` would draw it plus a labeled outline of both protected regions — to its own file (`<scene-dir>/out/<scene>.guidelines.png` by default, contained like render's `--out`). The overlay exists only on the guideline code path, so it can never enter a final render's output, and the view writes no manifest — it is a review artifact (#6)
+- The violation check is conservative over-approximate geometry over visible layers only: rotated bounding boxes, group scale/rotation/mirror applied down the tree, connector path hulls. Hidden or fully transparent layers and content outside all regions never violate (#6)
+
 ## [0.16.1]
 
 ### Fixed

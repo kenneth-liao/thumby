@@ -28,6 +28,7 @@ import type {
   ConnectorLayer,
 } from "./scene.js";
 import { LAYER_DEFAULTS } from "./scene.js";
+import { PROTECTED_REGIONS } from "./safe-area.js";
 
 export interface SceneRenderResult {
   png: Buffer;
@@ -53,61 +54,13 @@ const esc = (s: string) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-/** Rounding that keeps geometry readable without visible drift. */
-const n = (v: number) => Number(v.toFixed(4));
-
-/** An axis-aligned layer box in frame px — a connector's anchor geometry. */
-export interface Box {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/**
- * One connector's quadratic path in frame px: the line between the targets'
- * box centers, each end trimmed to where it exits the source box and enters
- * the target box, plus the perpendicular bow at the midpoint (positive
- * curves clockwise from the from→to direction — down for a left→right run).
- * Boxes overlapping along the run can't be trimmed meaningfully; the path
- * then simply joins the centers. Authored (unrotated) boxes anchor the path.
- */
-export function connectorGeometry(
-  from: Box,
-  to: Box,
-  bow = 0,
-): { x1: number; y1: number; cx: number; cy: number; x2: number; y2: number } {
-  const ax = from.x + from.width / 2;
-  const ay = from.y + from.height / 2;
-  const bx = to.x + to.width / 2;
-  const by = to.y + to.height / 2;
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return { x1: n(ax), y1: n(ay), cx: n(ax), cy: n(ay), x2: n(bx), y2: n(by) };
-  const ux = dx / len;
-  const uy = dy / len;
-  // Exit of the source box and entry into the target box along A→B (t in [0,1]).
-  const exitX = dx > 0 ? (from.x + from.width - ax) / dx : dx < 0 ? (from.x - ax) / dx : Infinity;
-  const exitY = dy > 0 ? (from.y + from.height - ay) / dy : dy < 0 ? (from.y - ay) / dy : Infinity;
-  const enterX = dx > 0 ? (to.x - ax) / dx : dx < 0 ? (to.x + to.width - ax) / dx : -Infinity;
-  const enterY = dy > 0 ? (to.y - ay) / dy : dy < 0 ? (to.y + to.height - ay) / dy : -Infinity;
-  const tExit = Math.min(exitX, exitY);
-  const tEnter = Math.max(enterX, enterY);
-  const overlap = tExit >= tEnter;
-  const x1 = overlap ? ax : ax + tExit * dx;
-  const y1 = overlap ? ay : ay + tExit * dy;
-  const x2 = overlap ? bx : ax + tEnter * dx;
-  const y2 = overlap ? by : ay + tEnter * dy;
-  return {
-    x1: n(x1),
-    y1: n(y1),
-    cx: n((x1 + x2) / 2 - uy * bow),
-    cy: n((y1 + y2) / 2 + ux * bow),
-    x2: n(x2),
-    y2: n(y2),
-  };
-}
+// Connector/box geometry lives in src/scene-geometry.ts — geometry consumers
+// (src/safe-area.ts) import it without importing this browser-backed module.
+// The re-export keeps the renderer the one import surface for existing callers.
+export { connectorGeometry } from "./scene-geometry.js";
+export type { Box } from "./scene-geometry.js";
+import { connectorGeometry, n } from "./scene-geometry.js";
+import type { Box } from "./scene-geometry.js";
 
 /** Every layer in the scene tree, depth-first — groups yield their children. */
 export function* layerTree(layers: SceneLayer[]): Generator<SceneLayer> {
@@ -537,6 +490,46 @@ const loadImageSize = (uri: string): Promise<{ w: number; h: number }> =>
     img.src = uri;
   });
 
+/**
+ * The guideline overlay (REQ-012): one labeled div per protected region, in
+ * a <style> block (nested quotes inside a style attribute truncate silently).
+ * Scoped to .safe-guide so the selectors can never touch scene-layer or SVG
+ * marker elements. Only the guideline page ever includes this markup —
+ * scenePageHtml cannot, so the overlay structurally cannot enter a final
+ * render's output.
+ */
+function guidelineOverlayMarkup(): string {
+  const regions = PROTECTED_REGIONS.map(
+    (r) =>
+      `<div class="safe-guide" data-region-id="${esc(r.id)}" data-region-label="${esc(r.label)}" ` +
+      `title="${esc(r.reason)}" ` +
+      `style="left:${r.box.x}px;top:${r.box.y}px;width:${r.box.width}px;height:${r.box.height}px;">` +
+      `<span>${esc(r.label)}</span></div>`,
+  ).join("");
+  return (
+    `<style>` +
+    `.safe-guide{position:absolute;outline:3px dashed #ff00ff;outline-offset:-3px;background:rgba(255,0,255,0.18);}` +
+    `.safe-guide span{position:absolute;left:6px;top:6px;font:bold 14px/18px sans-serif;color:#cc00cc;}` +
+    `</style>${regions}`
+  );
+}
+
+/**
+ * The guideline-view page: the resolved Scene's own page with the protected-
+ * region overlay appended before </body> — the scene markup itself is byte-
+ * identical to a final render's, so the view shows exactly what would render
+ * plus the regions YouTube's UI covers.
+ */
+export function guidelinePageHtml(
+  resolved: ResolvedScene,
+  natural: Map<string, ImageSize> = new Map(),
+): string {
+  return scenePageHtml(resolved, natural).replace(
+    "</body>",
+    `${guidelineOverlayMarkup()}\n</body>`,
+  );
+}
+
 /** Intrinsic sizes for every cropped image layer (at any depth), measured from the real bytes. */
 async function measureCroppedImages(
   page: Page,
@@ -606,12 +599,14 @@ const fitTextLayer = ({
 };
 
 /**
- * Render a resolved Scene to a PNG. Fails loudly when a text face does not
- * resolve from its bundled bytes — silent fallback never reaches a screenshot.
- * Pass `page` to render in an existing page (tests inject route-blocked ones).
+ * The browser pipeline renderScene and renderGuidelines share: measure
+ * cropped images, build the page HTML, verify fonts resolved, run auto-fit,
+ * screenshot. The page's HTML — and nothing else — is what distinguishes a
+ * final render from the guideline view.
  */
-export async function renderScene(
+async function renderResolvedToPng(
   resolved: ResolvedScene,
+  buildHtml: (natural: Map<string, ImageSize>) => string,
   opts?: { page?: Page },
 ): Promise<SceneRenderResult> {
   let ctx: BrowserContext | undefined;
@@ -629,7 +624,7 @@ export async function renderScene(
     })());
   try {
     const natural = await measureCroppedImages(page, resolved);
-    await page.setContent(scenePageHtml(resolved, natural), { waitUntil: "load" });
+    await page.setContent(buildHtml(natural), { waitUntil: "load" });
 
     // Same probe compose.ts uses: if a requested family did not resolve from
     // its bundled bytes, fail naming it before a screenshot is accepted.
@@ -671,6 +666,31 @@ export async function renderScene(
   } finally {
     await ctx?.close();
   }
+}
+
+/**
+ * Render a resolved Scene to a PNG. Fails loudly when a text face does not
+ * resolve from its bundled bytes — silent fallback never reaches a screenshot.
+ * Pass `page` to render in an existing page (tests inject route-blocked ones).
+ */
+export async function renderScene(
+  resolved: ResolvedScene,
+  opts?: { page?: Page },
+): Promise<SceneRenderResult> {
+  return renderResolvedToPng(resolved, (natural) => scenePageHtml(resolved, natural), opts);
+}
+
+/**
+ * Render the guideline view: the resolved Scene exactly as renderScene would
+ * draw it, plus the protected-region overlay (REQ-012). A review artifact —
+ * it never passes through finalize/manifest, and the overlay markup exists
+ * only on this code path, so a final render cannot contain it.
+ */
+export async function renderGuidelines(
+  resolved: ResolvedScene,
+  opts?: { page?: Page },
+): Promise<SceneRenderResult> {
+  return renderResolvedToPng(resolved, (natural) => guidelinePageHtml(resolved, natural), opts);
 }
 
 // --- contact sheet ---------------------------------------------------------------

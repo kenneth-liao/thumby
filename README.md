@@ -238,14 +238,17 @@ bun run scene init scene-template [--out p] # initialize a Scene from a template
 bun run scene validate scene.json          # field-specific errors before any render
 bun run scene inspect scene.json           # layer summary + resolved asset hashes
 bun run scene render scene.json [--out p]  # render to PNG (1280×720, YouTube 2 MB-compliant)
+bun run scene guidelines scene.json [--out p] # the safe-area guideline view (review only)
 bun run scene rerender out/scene.manifest.json  # re-render from its Render manifest
 ```
 
-All four print JSON on stdout (`{ "ok": true, … }` or
+Every one of these prints JSON on stdout (`{ "ok": true, … }` or
 `{ "ok": false, "errors": [{ path, message }] }`) and exit 0/1/2
 (ok / invalid or failed / usage). A successful render also carries
 `warnings` — non-fatal render signals naming the layer, e.g. an `autoFit`
-layer whose text still overflows at its `min` floor — and its `bytes`, plus an
+layer whose text still overflows at its `min` floor, or a safe-area
+violation where a visible layer intersects YouTube's duration-badge or
+progress-bar region — and its `bytes`, plus an
 `optimization` record when finalization had to bring the output under
 YouTube's 2 MB limit: an oversized render is optimized locally and
 deterministically (lossless alpha-drop and re-encode first, then 256-color
@@ -451,6 +454,33 @@ exit 2.
 Scenes are fully offline: fonts and assets resolve from local bytes as data
 URIs, validation and rendering never touch the network, and nothing here ever
 starts a Generation Job.
+
+### YouTube safe areas
+
+YouTube overlays its own UI on every thumbnail — the duration badge pinned
+to the bottom-right corner and the watched-progress bar across the bottom
+edge. The two protected regions are defined once (`src/safe-area.ts`,
+REQ-012): the badge is the bottom-right 192×64 of the 1280×720 canvas, the
+progress strip the full-width bottom 16px.
+
+`scene validate` reports a structured `safeAreaViolations` array; `scene
+render` reports each violation as a `safe-area:` warning naming the layer,
+its frame footprint, and the region (recorded in the Render manifest like
+any other warning). The check is conservative over-approximate geometry —
+rotated bounding boxes, group scale/rotation/mirror applied to children,
+connector path hulls — so hidden or fully transparent layers and content
+outside all regions never violate, but a rotated box that over-covers a
+region can. Violations **never fail a render** (ADR-0005): a full-canvas
+plate legitimately intersects both regions, and accepting the overlap is
+the reviewer's call.
+
+For visual review, `scene guidelines` renders the Scene exactly as `render`
+would draw it plus a labeled outline of both regions, to its own file
+(`<scene-dir>/out/<scene>.guidelines.png` by default — `--out` obeys the
+same containment rule as render). The overlay lives only on the guideline
+code path, so it can never enter a final render's output, and the guideline
+view writes no manifest — it is a review artifact, not a reproducible
+Render.
 
 ## Overlay cards
 
