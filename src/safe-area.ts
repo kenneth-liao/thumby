@@ -22,7 +22,9 @@
  * quadratic path — every footprint inflated by the renderer-supported paint
  * extents beyond the nominal box (shape borders, text strokes and shadows,
  * image/group effects, connector strokes and arrowheads), so content that
- * paints into a region violates even when its box misses. Chained and nested
+ * paints into a region violates even when its box misses. A blur-bearing
+ * effect counts Chromium's painted extent (3σ), not the authored blur length —
+ * the length is a standard deviation, and paint reaches far past it. Chained and nested
  * paint composes additively: the renderer's filter chain stages each paint
  * from the previous stage's output, and a group's filter paints on its
  * children's already-filtered output, so extents accumulate along the chain
@@ -251,9 +253,29 @@ const inflate = (box: Box, p: Pad): Box => ({
 });
 
 /**
+ * How far a Gaussian blur paints, in standard deviations. Chromium expands a
+ * filter's paint bounds by 3σ, and measured visible paint (the furthest pixel
+ * whose composited alpha still rounds above zero) reaches ~2.45σ — so 3σ is a
+ * conservative bound that over-covers rather than under-counts. Using the
+ * authored blur value itself as the bound under-counts by more than half,
+ * letting real paint enter a protected region unreported.
+ */
+const BLUR_SIGMA_EXTENT = 3;
+
+/**
+ * The blur standard deviation each CSS feature paints with. Chromium takes the
+ * length in `filter: blur(N)` and in `filter: drop-shadow(x y N)` as σ
+ * directly, while `text-shadow`'s blur radius follows the CSS 2σ convention
+ * (σ = N / 2). Both conventions are measured, not assumed — the browser-backed
+ * boundary test fails if either drifts.
+ */
+const filterBlurPad = (length: number): number => length * BLUR_SIGMA_EXTENT;
+const textBlurPad = (length: number): number => (length / 2) * BLUR_SIGMA_EXTENT;
+
+/**
  * Text paint beyond the box: stroke paints entirely outside the glyphs, and
- * each shadow reaches |offset| + blur from glyph edges — the glyphs stay
- * inside the box, so those bounds hold for the box too.
+ * each shadow reaches |offset| + its blur's painted extent from glyph edges —
+ * the glyphs stay inside the box, so those bounds hold for the box too.
  */
 function textPad(layer: TextLayer): Pad {
   let p: Pad = { x: 0, y: 0 };
@@ -261,9 +283,10 @@ function textPad(layer: TextLayer): Pad {
     p = { x: layer.stroke.width, y: layer.stroke.width };
   }
   for (const s of layer.shadows ?? []) {
+    const spread = textBlurPad(s.blur);
     p = {
-      x: Math.max(p.x, Math.abs(s.x) + s.blur),
-      y: Math.max(p.y, Math.abs(s.y) + s.blur),
+      x: Math.max(p.x, Math.abs(s.x) + spread),
+      y: Math.max(p.y, Math.abs(s.y) + spread),
     };
   }
   return p;
@@ -274,18 +297,25 @@ function textPad(layer: TextLayer): Pad {
  * filter chain — blur → colorAdjust → glow → shadow — and each stage paints
  * from the previous stage's output, so the extents accumulate: a blur-20
  * image with a 20px rightward shadow paints 40px right, not max(20, 20).
- * blur and glow (a centered drop-shadow) spread `radius` in every direction;
- * a drop-shadow reaches |offset| + blur. colorAdjust moves no pixels.
+ * blur and glow (a centered drop-shadow) spread their blur's painted extent
+ * in every direction; a drop-shadow reaches |offset| + that extent.
+ * colorAdjust moves no pixels.
  * (A text layer's shadows are one `text-shadow` painting every shadow from
  * the glyphs simultaneously — textPad's per-shadow maximum is correct there.)
  */
 function effectsPad(effects: Effects | undefined): Pad {
   if (!effects) return ZERO_PAD;
-  const blur = effects.blur ?? 0;
+  const blur = filterBlurPad(effects.blur ?? 0);
   let p: Pad = { x: blur, y: blur };
-  if (effects.glow) p = addPad(p, { x: effects.glow.radius, y: effects.glow.radius });
+  if (effects.glow) {
+    const glow = filterBlurPad(effects.glow.radius);
+    p = addPad(p, { x: glow, y: glow });
+  }
   const sh = effects.shadow;
-  if (sh) p = addPad(p, { x: Math.abs(sh.x) + sh.blur, y: Math.abs(sh.y) + sh.blur });
+  if (sh) {
+    const spread = filterBlurPad(sh.blur);
+    p = addPad(p, { x: Math.abs(sh.x) + spread, y: Math.abs(sh.y) + spread });
+  }
   return p;
 }
 

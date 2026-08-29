@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Page } from "playwright";
@@ -7,7 +7,9 @@ import { getBrowser } from "../src/browser.js";
 import { type Scene, type SceneLayer, type ResolvedScene } from "../src/scene.js";
 import { scenePageHtml, guidelinePageHtml, renderScene, renderGuidelines } from "../src/scene-render.js";
 import { PROTECTED_REGIONS, findSafeAreaViolations, safeAreaWarnings } from "../src/safe-area.js";
+import type { Box } from "../src/scene-geometry.js";
 import { run as cliRun } from "../src/scene-cli.js";
+import { renderOutputConflict } from "../src/manifest.js";
 import { decodePng } from "./png.js";
 
 // --- fixtures -------------------------------------------------------------
@@ -301,15 +303,15 @@ describe("findSafeAreaViolations", () => {
   // --- chained and nested paint composes additively, not by maximum -------
 
   it("accumulates a layer's own filter chain — blur then shadow compose, not max", () => {
-    // The 60×60 box ends 60px short of the badge's x edge. A 20px blur or a
-    // 20px rightward shadow alone paints to 1080 — clear. The renderer emits
-    // one CSS filter chain, so chained the shadow paints from the blurred
-    // output and reaches 1100, across the badge's 1088 edge.
+    // The 60×60 box ends 70px short of the badge's x edge. A 20px blur paints
+    // 60px out (3σ) and a 20px rightward shadow 20px — either alone stays
+    // clear. The renderer emits one CSS filter chain, so chained the shadow
+    // paints from the blurred output and reaches 80px, across the 1088 edge.
     const image = (effects: Record<string, unknown>) => ({
       id: "pic",
       type: "image" as const,
       asset: "./pic.png",
-      position: { x: 1000, y: 620 },
+      position: { x: 958, y: 580 },
       size: { width: 60, height: 60 },
       effects,
     });
@@ -633,6 +635,142 @@ describe("scene CLI", () => {
     expect(guidedContact.exitCode).toBe(1);
     expect(await readFile(contact)).toEqual(beforeContact);
   });
+
+  it("guidelines refuses a symlink aliasing a final Render output, bytes untouched", async () => {
+    // writeFile follows symlinks, so a lexical path comparison guards a name,
+    // not the file the write lands on: out/alias.png -> out/symlinked.png
+    // reaches the Render's bytes under a name no manifest records.
+    const file = await writeScene("symlinked.json", [shape({ position: { x: 100, y: 100 } })]);
+    const rendered = await cliRun(["render", file]);
+    expect(rendered.exitCode).toBe(0);
+    const finalOut = (rendered.output as { output: string }).output;
+    const alias = path.join(path.dirname(finalOut), "alias.png");
+    await symlink(path.basename(finalOut), alias);
+    const before = await readFile(finalOut);
+    const guided = await cliRun(["guidelines", file, "--out", alias]);
+    expect(guided.exitCode).toBe(1);
+    const o = guided.output as { ok: boolean; errors: { message: string }[] };
+    expect(o.ok).toBe(false);
+    expect(o.errors[0]!.message).toContain("Render output");
+    expect(await readFile(finalOut)).toEqual(before);
+  });
+
+});
+
+describe("renderOutputConflict", () => {
+  it("reports no conflict for a directory that does not exist", async () => {
+    const missing = path.join(fix.root, "no-such-dir", "g.png");
+    expect(await renderOutputConflict(missing)).toBeUndefined();
+  });
+
+  it("fails closed when the directory cannot be read — only absence means nothing is recorded", async () => {
+    // A permission or I/O failure answers nothing about what is recorded
+    // there. Returning "no conflict" would let a guideline write proceed on
+    // an unanswered question; the read must propagate instead.
+    const locked = path.join(fix.root, "locked");
+    await mkdir(locked, { recursive: true });
+    await chmod(locked, 0o000);
+    try {
+      await expect(renderOutputConflict(path.join(locked, "g.png"))).rejects.toThrow();
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  });
+});
+
+// --- the geometry against Chromium's real paint -----------------------------------
+
+/**
+ * The axis-aligned box covering every pixel the render actually painted (the
+ * canvas is white where nothing paints). The ground truth a footprint must
+ * contain — measuring it is the only way to catch a bound that assumes the
+ * wrong blur convention, which no pure-geometry test can see.
+ */
+function paintedBox(png: Buffer): Box {
+  const img = decodePng(png);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let y = 0; y < img.height; y++)
+    for (let x = 0; x < img.width; x++) {
+      const [r, g, b] = img.px(x, y);
+      if (r === 255 && g === 255 && b === 255) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+const overlaps = (a: Box, b: Box): boolean =>
+  a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+describe("blur-bearing paint extents match Chromium", () => {
+  // A 100×60 box whose right edge sits at x 1058 — 30px clear of the duration
+  // badge — inside a group carrying the effect. The authored box violates
+  // nothing; only the blur's real paint reaches the region, so each case
+  // proves the bound, not the box. Chromium takes `filter: blur(N)` and
+  // `filter: drop-shadow(x y N)` lengths as σ, and `text-shadow`'s as 2σ, and
+  // paints out to ~2.45σ — a bound of the authored length alone under-counts.
+  const clearOfBadge = { position: { x: 958, y: 610 }, size: { width: 100, height: 60 } };
+  const badge = PROTECTED_REGIONS.find((r) => r.id === "duration-badge")!;
+
+  const grouped = (effects: Record<string, unknown>): SceneLayer =>
+    ({
+      id: "card",
+      type: "group",
+      position: { x: 0, y: 0 },
+      size: { width: 1280, height: 720 },
+      effects,
+      layers: [shape({ id: "hero", ...clearOfBadge })],
+    }) as SceneLayer;
+
+  const cases: { name: string; layer: SceneLayer; painter: string }[] = [
+    { name: "filter blur", layer: grouped({ blur: 20 }), painter: "hero" },
+    { name: "glow radius", layer: grouped({ glow: { radius: 20, color: "#0000ff" } }), painter: "hero" },
+    {
+      name: "drop-shadow blur",
+      layer: grouped({ shadow: { x: 0, y: 0, blur: 20, color: "#0000ff" } }),
+      painter: "hero",
+    },
+    {
+      name: "text shadow blur",
+      layer: {
+        id: "word",
+        type: "text",
+        font: "Anton",
+        fontSize: 96,
+        color: "#ff0000",
+        spans: [{ text: "HELLO" }],
+        shadows: [{ x: 0, y: 0, blur: 60, color: "#0000ff" }],
+        ...clearOfBadge,
+      } as unknown as SceneLayer,
+      painter: "word",
+    },
+  ];
+
+  it("the authored boxes are clear of the badge — only paint can reach it", () => {
+    expect(overlaps({ ...clearOfBadge.position, ...clearOfBadge.size }, badge.box)).toBe(false);
+  });
+
+  for (const { name, layer, painter } of cases)
+    it(`${name}: every pixel painted inside a protected region is reported`, async () => {
+      const r = resolved([layer]);
+      const { png } = await renderScene(r, { page });
+      const paint = paintedBox(png);
+      const violations = findSafeAreaViolations(r);
+      for (const region of PROTECTED_REGIONS) {
+        if (!overlaps(paint, region.box)) continue;
+        expect(
+          violations.some((v) => v.layer === painter && v.region === region.id),
+        ).toBe(true);
+      }
+      // The case is only meaningful if the blur really did carry paint into
+      // the badge — a bound derived from the authored length would miss it.
+      expect(overlaps(paint, badge.box)).toBe(true);
+    });
 });
 
 // --- the rendered pixels ----------------------------------------------------------

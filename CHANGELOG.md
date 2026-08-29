@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2]
+
+### Fixed
+
+- Safe-area footprints bound a blur-bearing effect by Chromium's painted extent (3σ) instead of the authored blur length: a CSS `filter` blur/glow/drop-shadow length is a standard deviation and paint reaches far past it, so a blurred layer could paint into a protected region unreported (#6)
+- `scene guidelines --out` compares filesystem identities rather than lexical paths, so a symlink aliasing a final Render output can no longer slip past the write guard; a directory read that fails for any reason other than the directory being absent now fails closed instead of reporting no conflict (#6)
+
 ## [0.17.1]
 
 ### Fixed

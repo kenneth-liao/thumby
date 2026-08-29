@@ -38,9 +38,12 @@
   box misses. Chained and nested paint composes additively: the renderer's
   filter chain stages each paint from the previous stage's output, and a
   group's filter paints on its children's already-filtered output, so
-  extents accumulate along the chain rather than taking the maximum. Every
-  directional pad collapses to a symmetric bound where a rotation stands
-  between it and the canvas. Content outside all inflated footprints never
+  extents accumulate along the chain rather than taking the maximum. A
+  blur-bearing effect is bounded by Chromium's painted extent (3 standard
+  deviations), not by the authored blur length — a CSS filter length is a
+  standard deviation, so paint reaches far past it. Every directional pad
+  collapses to a symmetric bound where a rotation stands between it and the
+  canvas. Content outside all inflated footprints never
   violates; an inflated box may still over-cover (e.g. a rotated directional
   shadow collapses to a symmetric bound). Pixel-perfect
   alpha-aware detection would require compositing analysis for little

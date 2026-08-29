@@ -477,10 +477,12 @@ the reviewer's call.
 For visual review, `scene guidelines` renders the Scene exactly as `render`
 would draw it plus a labeled outline of both regions, to its own file
 (`<scene-dir>/out/<scene>.guidelines.png` by default — `--out` obeys the
-same containment rule as render). The overlay lives only on the guideline
-code path, so it can never enter a final render's output, and the guideline
-view writes no manifest — it is a review artifact, not a reproducible
-Render.
+same containment rule as render, and is refused outright when any Render
+manifest in the target's directory records that file — compared by resolved
+filesystem identity, so a symlink alias cannot reach a final Render's bytes
+either). The overlay lives only on the guideline code path, so it can never
+enter a final render's output, and the guideline view writes no manifest —
+it is a review artifact, not a reproducible Render.
 
 ## Overlay cards
 
