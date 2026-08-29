@@ -35,10 +35,15 @@
   renderer-supported paint extents beyond the nominal box — shape borders,
   text strokes/shadows, image/group effects, connector strokes and
   arrowheads — so content that paints into a region violates even when its
-  box misses. Content outside all inflated footprints never violates; an
-  inflated box may still over-cover (e.g. a rotated directional shadow
-  collapses to a symmetric bound). Pixel-perfect alpha-aware detection
-  would require compositing analysis for little practical gain and is
-  deliberately not built.
+  box misses. Chained and nested paint composes additively: the renderer's
+  filter chain stages each paint from the previous stage's output, and a
+  group's filter paints on its children's already-filtered output, so
+  extents accumulate along the chain rather than taking the maximum. Every
+  directional pad collapses to a symmetric bound where a rotation stands
+  between it and the canvas. Content outside all inflated footprints never
+  violates; an inflated box may still over-cover (e.g. a rotated directional
+  shadow collapses to a symmetric bound). Pixel-perfect
+  alpha-aware detection would require compositing analysis for little
+  practical gain and is deliberately not built.
 - The region rectangles are conservative boxes sized for YouTube's largest
   display surfaces. They are tuned in one place if YouTube's UI changes.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1]
+
+### Fixed
+
+- Safe-area footprints now compose chained and nested paint extents additively: the renderer's filter chain stages each paint from the previous stage's output (blur → glow → shadow accumulate within one layer), a group's filter paints on its children's already-filtered output (child and group extents accumulate down the tree), and every directional pad collapses at the point where a rotation stands between it and the canvas — chained effects can no longer paint into a protected region unreported (#6)
+- `scene guidelines --out` refuses any path that any Render manifest in the target's directory records as an output — including multi-Variant batch outputs recorded in the shared `<scene>.variants.manifest.json` and batch contact sheets — failing before any render work and leaving the final PNG's bytes untouched (#6)
+
 ## [0.17.0]
 
 ### Added

@@ -31,6 +31,7 @@ import {
   buildManifest,
   manifestPathFor,
   readManifest,
+  renderOutputConflict,
   writeManifest,
 } from "./manifest.js";
 import { finalizeRender, type Optimization } from "./finalize.js";
@@ -617,20 +618,22 @@ async function dispatch(args: string[]): Promise<CliResult> {
       : path.join(sceneDir, "out", `${path.basename(path.resolve(file), ".json")}.guidelines.png`);
     if (outsideDir(sceneDir, output))
       return usageError(`--out "${outArg}" must stay inside the scene's directory (${sceneDir})`);
-    // A Render output always carries its manifest beside it, so a guideline
-    // write must never target such a path: overwriting the PNG would leave
-    // the stale manifest presenting guideline pixels as an accepted Render.
-    // Checking the one invariant (manifest presence) covers both collision
-    // directions — a direct --out at a rendered PNG and a default guideline
-    // name a render has claimed via --out.
-    const manifestPath = manifestPathFor(output);
-    if (existsSync(manifestPath))
+    // A guideline write must never target a final Render output: overwriting
+    // the PNG would leave the recording manifest presenting guideline pixels
+    // as an accepted Render. renderOutputConflict is the one reader for that
+    // fact — a base render's manifest sits beside its output, but a Variant
+    // batch shares one variants manifest naming every output, so every
+    // manifest in the directory is consulted. That covers both collision
+    // directions: a direct --out at a rendered PNG (base or batch) and a
+    // default guideline name a render has claimed via --out.
+    const conflict = await renderOutputConflict(output);
+    if (conflict)
       return invalid([
         {
           path: "--out",
           message:
-            `"${output}" is a Render output — its manifest "${path.basename(manifestPath)}" exists beside it, and the ` +
-            `guideline view must never overwrite a final Render. Pick a different --out path.`,
+            `"${output}" is a Render output — the manifest "${path.basename(conflict.manifest)}" in the same directory ` +
+            `records it, and the guideline view must never overwrite a final Render. Pick a different --out path.`,
         },
       ]);
     const { png, width, height } = await renderGuidelines(result.resolved);

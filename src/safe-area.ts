@@ -22,8 +22,13 @@
  * quadratic path — every footprint inflated by the renderer-supported paint
  * extents beyond the nominal box (shape borders, text strokes and shadows,
  * image/group effects, connector strokes and arrowheads), so content that
- * paints into a region violates even when its box misses. Rotation collapses
- * directional pads to a symmetric bound (a rotated offset swaps axes).
+ * paints into a region violates even when its box misses. Chained and nested
+ * paint composes additively: the renderer's filter chain stages each paint
+ * from the previous stage's output, and a group's filter paints on its
+ * children's already-filtered output, so extents accumulate along the chain
+ * rather than taking the maximum. Rotation collapses a directional pad to a
+ * symmetric bound (a rotated offset swaps axes) — every pad collapses at the
+ * point where a rotation stands between it and the canvas.
  * Content that stays outside all inflated footprints never violates;
  * content an inflated box over-covers may still be reported — the region
  * figures themselves are conservative boxes sized for YouTube's largest
@@ -229,7 +234,13 @@ const ZERO_PAD: Pad = { x: 0, y: 0 };
 
 const collapse = (p: Pad): Pad => ({ x: Math.max(p.x, p.y), y: Math.max(p.x, p.y) });
 
-const maxPad = (a: Pad, b: Pad): Pad => ({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) });
+/**
+ * Compose two pads that apply to the same painted output in sequence: the
+ * second stage paints from the first stage's already-padded output, so the
+ * extents accumulate per axis. (Maximum would undercount a chain — a 20px
+ * shadow inside a group with its own 20px shadow paints 40px out.)
+ */
+const addPad = (a: Pad, b: Pad): Pad => ({ x: a.x + b.x, y: a.y + b.y });
 
 /** Inflate an axis-aligned box symmetrically by a pad. */
 const inflate = (box: Box, p: Pad): Box => ({
@@ -259,21 +270,22 @@ function textPad(layer: TextLayer): Pad {
 }
 
 /**
- * Image/group effects beyond the content box: blur and glow (a centered
- * drop-shadow) spread `radius` in every direction; a drop-shadow reaches
- * |offset| + blur. colorAdjust moves no pixels.
+ * Image/group effects beyond the content box. The renderer emits one CSS
+ * filter chain — blur → colorAdjust → glow → shadow — and each stage paints
+ * from the previous stage's output, so the extents accumulate: a blur-20
+ * image with a 20px rightward shadow paints 40px right, not max(20, 20).
+ * blur and glow (a centered drop-shadow) spread `radius` in every direction;
+ * a drop-shadow reaches |offset| + blur. colorAdjust moves no pixels.
+ * (A text layer's shadows are one `text-shadow` painting every shadow from
+ * the glyphs simultaneously — textPad's per-shadow maximum is correct there.)
  */
 function effectsPad(effects: Effects | undefined): Pad {
   if (!effects) return ZERO_PAD;
   const blur = effects.blur ?? 0;
   let p: Pad = { x: blur, y: blur };
-  if (effects.glow) p = { x: Math.max(p.x, effects.glow.radius), y: Math.max(p.y, effects.glow.radius) };
+  if (effects.glow) p = addPad(p, { x: effects.glow.radius, y: effects.glow.radius });
   const sh = effects.shadow;
-  if (sh)
-    p = {
-      x: Math.max(p.x, Math.abs(sh.x) + sh.blur),
-      y: Math.max(p.y, Math.abs(sh.y) + sh.blur),
-    };
+  if (sh) p = addPad(p, { x: Math.abs(sh.x) + sh.blur, y: Math.abs(sh.y) + sh.blur });
   return p;
 }
 
@@ -302,14 +314,16 @@ const transformScale = (t: Affine): number => Math.hypot(t.a, t.b);
 /**
  * Every painted leaf (image, text, shape, connector) with its axis-aligned
  * frame footprint, inflated by the paint pads. `env` is the inherited pad in
- * the current layers' own coordinate space; each leaf adds its own pad
- * (collapsed when any rotation stands between it and frame space, since a
- * rotated directional pad swaps axes) and converts both to frame px by the
- * accumulated transform scale. CSS filters apply before their transform, so
- * group effects pads scale with the group's scale — ignoring that would
- * under-cover a scaled-up group. Groups are containers, not painted content:
- * their children are the visible leaves. A hidden or fully transparent layer
- * paints nothing, so its whole subtree is skipped.
+ * the current layers' own coordinate space; the leaf's own pad composes with
+ * it additively (a group's filter paints on its children's already-filtered
+ * output, so extents accumulate — never max) and the sum converts to frame px
+ * by the accumulated transform scale. Every pad collapses where a rotation
+ * stands between it and the canvas (a rotated directional pad swaps axes).
+ * CSS filters apply before their transform, so group effects pads scale with
+ * the group's scale — ignoring that would under-cover a scaled-up group.
+ * Groups are containers, not painted content: their children are the visible
+ * leaves. A hidden or fully transparent layer paints nothing, so its whole
+ * subtree is skipped.
  */
 function* leafFootprints(
   layers: SceneLayer[],
@@ -322,13 +336,19 @@ function* leafFootprints(
     if (layer.type === "group") {
       const s = layer.scale ?? 1;
       // Parent-space env → this group's local space; a rotation between the
-      // two spaces mixes axes, so collapse before converting.
+      // two spaces mixes axes, so collapse before converting. (Pads from
+      // above an ancestor rotation are already collapsed — each pad collapses
+      // at the point where a rotation stands between it and the canvas.)
       const inherited = layer.rotation
         ? collapse({ x: env.x / s, y: env.y / s })
         : { x: env.x / s, y: env.y / s };
+      // This group's own effects paint on its children's already-filtered
+      // output, so its pad composes additively with the inherited one — and
+      // it passes through this group's rotation and any ancestor rotation
+      // (in t) on the way to the canvas, either of which mixes its axes.
       let own = effectsPad(layer.effects);
-      if (layer.rotation) own = collapse(own);
-      yield* leafFootprints(layer.layers, compose(t, groupTransform(layer)), boxes, maxPad(inherited, own));
+      if (layer.rotation || t.b !== 0 || t.c !== 0) own = collapse(own);
+      yield* leafFootprints(layer.layers, compose(t, groupTransform(layer)), boxes, addPad(inherited, own));
     } else if (layer.type === "connector") {
       yield { layer, box: inflate(connectorBox(layer, boxes), connectorPad(layer)) };
     } else {
@@ -336,7 +356,10 @@ function* leafFootprints(
       // The leaf's own rotation, or any ancestor rotation inside `t`, mixes
       // the pad's axes on the way to frame space.
       if (layer.rotation || t.b !== 0 || t.c !== 0) own = collapse(own);
-      const frame = { x: Math.max(own.x, env.x) * transformScale(t), y: Math.max(own.y, env.y) * transformScale(t) };
+      // The leaf's own paint and the inherited filter chain paint the same
+      // output in sequence — extents accumulate, never max.
+      const total = addPad(own, env);
+      const frame = { x: total.x * transformScale(t), y: total.y * transformScale(t) };
       const local = rotatedAabb(
         { x: layer.position.x, y: layer.position.y, width: layer.size.width, height: layer.size.height },
         layer.rotation ?? 0,

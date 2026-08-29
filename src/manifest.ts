@@ -14,7 +14,7 @@
  * silently resolves newer content — src/assets.ts owns the resolution
  * contract; this module verifies against it).
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -58,6 +58,42 @@ export function relPath(fromDir: string, target: string): string {
 /** The manifest path paired with a render output: `out/foo.png` → `out/foo.manifest.json`. */
 export function manifestPathFor(outputPath: string): string {
   return outputPath.replace(/\.png$/i, "") + ".manifest.json";
+}
+
+/**
+ * The Render manifest that records `outputPath` as one of its rendered
+ * outputs (or its contact sheet), found by consulting every manifest in the
+ * output's directory. A base render's manifest sits directly beside its
+ * output, but a Variant batch shares one `<scene>.variants.manifest.json`
+ * naming every output — no single adjacent name is sufficient, so the
+ * directory is the scan unit. An unreadable manifest is itself the conflict:
+ * a write that cannot be proven safe is not performed. This is the one
+ * reader for "is this path a final Render output" — guideline writes consult
+ * it so a review artifact can never overwrite published pixels.
+ */
+export async function renderOutputConflict(
+  outputPath: string,
+): Promise<{ manifest: string } | undefined> {
+  const dir = path.dirname(outputPath);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return undefined; // the directory does not exist — nothing is recorded there
+  }
+  const target = path.resolve(outputPath);
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".manifest.json")) continue;
+    const file = path.join(dir, entry);
+    const read = await readManifest(file);
+    if (!read.ok) return { manifest: file };
+    const recorded = [
+      ...read.manifest.outputs.map((o) => o.output),
+      ...(read.manifest.contact ? [read.manifest.contact.output] : []),
+    ];
+    if (recorded.some((rel) => path.resolve(dir, rel) === target)) return { manifest: file };
+  }
+  return undefined;
 }
 
 /**

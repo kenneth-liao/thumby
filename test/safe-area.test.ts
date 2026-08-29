@@ -297,6 +297,112 @@ describe("findSafeAreaViolations", () => {
     const v = findSafeAreaViolations(resolved([group(0.5)]));
     expect(v.some((x) => x.layer === "kid" && x.region === "duration-badge")).toBe(true);
   });
+
+  // --- chained and nested paint composes additively, not by maximum -------
+
+  it("accumulates a layer's own filter chain — blur then shadow compose, not max", () => {
+    // The 60×60 box ends 60px short of the badge's x edge. A 20px blur or a
+    // 20px rightward shadow alone paints to 1080 — clear. The renderer emits
+    // one CSS filter chain, so chained the shadow paints from the blurred
+    // output and reaches 1100, across the badge's 1088 edge.
+    const image = (effects: Record<string, unknown>) => ({
+      id: "pic",
+      type: "image" as const,
+      asset: "./pic.png",
+      position: { x: 1000, y: 620 },
+      size: { width: 60, height: 60 },
+      effects,
+    });
+    expect(findSafeAreaViolations(resolved([image({ blur: 20 })])).map((v) => v.layer)).toEqual([]);
+    expect(
+      findSafeAreaViolations(resolved([image({ shadow: { x: 20, y: 0, blur: 0, color: "#000" } })])).map((v) => v.layer),
+    ).toEqual([]);
+    const v = findSafeAreaViolations(
+      resolved([image({ blur: 20, shadow: { x: 20, y: 0, blur: 0, color: "#000" } })]),
+    );
+    expect(v.some((x) => x.layer === "pic" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("accumulates chained child and group effects — a group's filter paints on its children's output", () => {
+    // A 20px rightward image shadow inside a group with its own 20px
+    // rightward shadow paints to x 1100 from a nominal box ending at 1060 —
+    // across the badge's 1088 edge — though either alone stays at 1080.
+    const shadow = { shadow: { x: 20, y: 0, blur: 0, color: "#000" } };
+    const image = (effects?: Record<string, unknown>) => ({
+      id: "pic",
+      type: "image" as const,
+      asset: "./pic.png",
+      position: { x: 1000, y: 620 },
+      size: { width: 60, height: 60 },
+      ...(effects ? { effects } : {}),
+    });
+    const group = (effects?: Record<string, unknown>, childEffects?: Record<string, unknown>) => ({
+      id: "card",
+      type: "group" as const,
+      position: { x: 0, y: 0 },
+      size: { width: 600, height: 600 },
+      ...(effects ? { effects } : {}),
+      layers: [image(childEffects)],
+    });
+    expect(findSafeAreaViolations(resolved([group(undefined, shadow)])).map((v) => v.layer)).toEqual([]);
+    expect(findSafeAreaViolations(resolved([group(shadow)])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(resolved([group(shadow, shadow)]));
+    expect(v.some((x) => x.layer === "pic" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("accumulates nested group effects down the tree", () => {
+    // Two nested groups each add a 20px rightward shadow: 40px of paint past
+    // the box — across the badge's edge — though one level alone stays at 1080.
+    const leaf = {
+      id: "pic",
+      type: "image" as const,
+      asset: "./pic.png",
+      position: { x: 1000, y: 620 },
+      size: { width: 60, height: 60 },
+    };
+    const shadow = { shadow: { x: 20, y: 0, blur: 0, color: "#000" } };
+    const wrap = (id: string, effects: Record<string, unknown> | undefined, layers: SceneLayer[]) => ({
+      id,
+      type: "group" as const,
+      position: { x: 0, y: 0 },
+      size: { width: 600, height: 600 },
+      ...(effects ? { effects } : {}),
+      layers,
+    });
+    expect(findSafeAreaViolations(resolved([wrap("outer", shadow, [leaf])])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(resolved([wrap("outer", shadow, [wrap("inner", shadow, [leaf])])]));
+    expect(v.some((x) => x.layer === "pic" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("collapses a directional group pad that crosses an ancestor's rotation", () => {
+    // The leaf's frame box is clear of every region. The inner group's 40px
+    // rightward shadow points along the rotating outer group's local x — which
+    // maps to frame +y — so its painted extent reaches frame y 730, across the
+    // progress strip's 704 edge. Uncollapsed, the pad would pad frame x only
+    // and the violation would be missed.
+    const outer = {
+      id: "tilt",
+      type: "group" as const,
+      position: { x: 400, y: 400 },
+      size: { width: 400, height: 200 },
+      rotation: 90,
+      layers: [{
+        id: "card",
+        type: "group" as const,
+        position: { x: 0, y: 0 },
+        size: { width: 400, height: 200 },
+        effects: { shadow: { x: 40, y: 0, blur: 0, color: "#000" } },
+        layers: [shape({ id: "kid", position: { x: 370, y: 90 }, size: { width: 20, height: 10 } })],
+      }],
+    };
+    expect(
+      findSafeAreaViolations(
+        resolved([{ ...outer, layers: [{ ...outer.layers[0]!, effects: undefined }] }]),
+      ).map((v) => v.layer),
+    ).toEqual([]);
+    const v = findSafeAreaViolations(resolved([outer]));
+    expect(v.some((x) => x.layer === "kid" && x.region === "progress-bar")).toBe(true);
+  });
 });
 
 // --- the strings renders surface -----------------------------------------------
@@ -486,6 +592,46 @@ describe("scene CLI", () => {
     const guidedAgain = await cliRun(["guidelines", file, "--out", claimed]);
     expect(guidedAgain.exitCode).toBe(1);
     expect(await readFile(claimed)).toEqual(before);
+  });
+
+  it("guidelines refuses a multi-Variant batch output recorded in the shared variants manifest, bytes untouched", async () => {
+    // A batch records every output in one <scene>.variants.manifest.json —
+    // no manifest sits beside out/scene.alt.png — so the guard must consult
+    // every manifest in the directory, not just the adjacent name.
+    const file = path.join(fix.projectRoot, "batch-collision.json");
+    await writeFile(
+      file,
+      JSON.stringify(
+        {
+          ...scene([shape({ position: { x: 100, y: 100 } })]),
+          variants: {
+            alt: { changes: [{ layer: "box", set: { opacity: 1 } }] },
+            zoom: { changes: [{ layer: "box", set: { color: "#0000ff" } }] },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const rendered = await cliRun(["render", file, "--variant", "alt,zoom"]);
+    expect(rendered.exitCode).toBe(0);
+    const o = rendered.output as { ok: boolean; outputs: { output: string }[]; manifest: string };
+    expect(o.outputs).toHaveLength(2);
+    expect(o.manifest.endsWith("batch-collision.variants.manifest.json")).toBe(true);
+    const batchOut = o.outputs[0]!.output;
+    const before = await readFile(batchOut);
+    const guided = await cliRun(["guidelines", file, "--out", batchOut]);
+    expect(guided.exitCode).toBe(1);
+    const g = guided.output as { ok: boolean; errors: { message: string }[] };
+    expect(g.ok).toBe(false);
+    expect(g.errors[0]!.message).toContain("Render output");
+    expect(await readFile(batchOut)).toEqual(before);
+    // The batch contact sheet is manifest-recorded too — equally untouchable.
+    const contact = path.join(fix.projectRoot, "out", "batch-collision.contact.png");
+    const beforeContact = await readFile(contact);
+    const guidedContact = await cliRun(["guidelines", file, "--out", contact]);
+    expect(guidedContact.exitCode).toBe(1);
+    expect(await readFile(contact)).toEqual(beforeContact);
   });
 });
 
