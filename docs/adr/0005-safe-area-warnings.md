@@ -31,10 +31,14 @@
   can pattern-match it at a glance, and suppressing it would require exactly
   the privileged "background" concept the layer model avoids.
 - The footprint check is conservative over-approximate geometry (rotated
-  bounding boxes, group transforms, connector path hulls). Content outside
-  all regions never violates; a rotated layer whose *box* over-covers a
-  region may be reported even if its painted pixels miss. Pixel-perfect
-  alpha-aware detection would require compositing analysis for little
-  practical gain and is deliberately not built.
+  bounding boxes, group transforms, connector path hulls), inflated by the
+  renderer-supported paint extents beyond the nominal box — shape borders,
+  text strokes/shadows, image/group effects, connector strokes and
+  arrowheads — so content that paints into a region violates even when its
+  box misses. Content outside all inflated footprints never violates; an
+  inflated box may still over-cover (e.g. a rotated directional shadow
+  collapses to a symmetric bound). Pixel-perfect alpha-aware detection
+  would require compositing analysis for little practical gain and is
+  deliberately not built.
 - The region rectangles are conservative boxes sized for YouTube's largest
   display surfaces. They are tuned in one place if YouTube's UI changes.

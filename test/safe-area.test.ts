@@ -178,6 +178,125 @@ describe("findSafeAreaViolations", () => {
     const v = findSafeAreaViolations(resolved([...targets, { ...connector, bow: 100 }]));
     expect(v.some((x) => x.layer === "wire" && x.region === "progress-bar")).toBe(true);
   });
+
+  // --- paint extents beyond the nominal box (the renderer paints there) ---
+
+  it("counts a shape border's outside half", () => {
+    // The box sits 6px short of the badge region; a 14px border paints 7px out.
+    const base = { id: "framed", position: { x: 1000, y: 600 }, size: { width: 88, height: 55 } };
+    expect(findSafeAreaViolations(resolved([shape(base)])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(resolved([shape({ ...base, border: { width: 14, color: "#000" } })]));
+    expect(v.some((x) => x.layer === "framed" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("counts text stroke and shadows", () => {
+    const text = (over: Record<string, unknown>) => ({
+      id: "word",
+      type: "text" as const,
+      text: "Hi",
+      font: "Anton",
+      fontSize: 40,
+      position: { x: 1000, y: 600 },
+      size: { width: 88, height: 55 },
+      ...over,
+    });
+    expect(findSafeAreaViolations(resolved([text({})])).map((v) => v.layer)).toEqual([]);
+    const stroked = findSafeAreaViolations(resolved([text({ stroke: { width: 20, color: "#000" } })]));
+    expect(stroked.some((x) => x.layer === "word" && x.region === "duration-badge")).toBe(true);
+    const shadowed = findSafeAreaViolations(
+      resolved([text({ shadows: [{ x: 0, y: 0, blur: 30, color: "#000000" }] })]),
+    );
+    expect(shadowed.some((x) => x.layer === "word" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("counts image effect blur and directional drop-shadow offsets", () => {
+    // Base box touches x 1088 exactly (no strict overlap) but reaches into
+    // the badge's y band, so any x-direction pad tips it into the region.
+    const image = (over: Record<string, unknown>) => ({
+      id: "pic",
+      type: "image" as const,
+      asset: "./pic.png",
+      position: { x: 1000, y: 600 },
+      size: { width: 88, height: 60 },
+      ...over,
+    });
+    expect(findSafeAreaViolations(resolved([image({})])).map((v) => v.layer)).toEqual([]);
+    const shadowed = findSafeAreaViolations(
+      resolved([image({ effects: { shadow: { x: 40, y: 0, blur: 0, color: "#000000" } } })]),
+    );
+    expect(shadowed).toHaveLength(1);
+    expect(shadowed[0]!.region).toBe("duration-badge");
+    const blurred = findSafeAreaViolations(resolved([image({ effects: { blur: 30 } })]));
+    expect(blurred.some((x) => x.layer === "pic" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("counts the connector's stroke and auto-oriented arrowhead", () => {
+    // The path runs along y 690; a 5px stroke stays 2.5px clear of the
+    // progress strip, but the arrowhead paints arrowPad(5) = 15px past its
+    // anchor — across the 704 boundary.
+    const targets = [
+      shape({ id: "a", position: { x: 100, y: 680 }, size: { width: 100, height: 20 } }),
+      shape({ id: "b", position: { x: 500, y: 680 }, size: { width: 100, height: 20 } }),
+    ];
+    const connector = { id: "wire", type: "connector" as const, from: "a", to: "b", width: 5 };
+    expect(findSafeAreaViolations(resolved([...targets, connector])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(resolved([...targets, { ...connector, arrow: true }]));
+    expect(v.some((x) => x.layer === "wire" && x.region === "progress-bar")).toBe(true);
+  });
+
+  it("inherits a group's effects pad down to its children", () => {
+    // The child's frame box is clear of every region; the group's 80px blur
+    // pushes its shadow 80px beyond it — across the badge's y boundary.
+    const group = (effects?: Record<string, unknown>) => ({
+      id: "card",
+      type: "group" as const,
+      position: { x: 0, y: 0 },
+      size: { width: 600, height: 600 },
+      ...(effects ? { effects } : {}),
+      layers: [shape({ id: "kid", position: { x: 1100, y: 560 }, size: { width: 40, height: 20 } })],
+    });
+    expect(findSafeAreaViolations(resolved([group()])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(resolved([group({ shadow: { x: 0, y: 0, blur: 80, color: "#000000" } })]));
+    expect(v.some((x) => x.layer === "kid" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("carries directional pads through rotation — a local shadow offset rotates into frame axes", () => {
+    // The 88×55 box rotated 90° spans x 1016.5–1071.5, y 543.5–631.5: clear
+    // of every region. A shadow offset (x: 40, y: −40) in the layer's local
+    // frame rotates into frame +y and +x, truly painting into the badge
+    // region — the pads must rotate with the layer.
+    const image = {
+      id: "pic",
+      type: "image" as const,
+      asset: "./pic.png",
+      position: { x: 1000, y: 560 },
+      size: { width: 88, height: 55 },
+      rotation: 90,
+    };
+    expect(findSafeAreaViolations(resolved([image])).map((v) => v.layer)).toEqual([]);
+    const v = findSafeAreaViolations(
+      resolved([{ ...image, effects: { shadow: { x: 40, y: -40, blur: 0, color: "#000000" } } }]),
+    );
+    expect(v.some((x) => x.layer === "pic" && x.region === "duration-badge")).toBe(true);
+  });
+
+  it("scales a group's effects pad with the group's scale", () => {
+    // The child's frame box sits clear of the badge region; scale 0.5 halves
+    // the group's 80px blur to a 40px frame pad, which reaches it.
+    const group = (scale: number) => ({
+      id: "card",
+      type: "group" as const,
+      position: { x: 0, y: 0 },
+      size: { width: 800, height: 800 },
+      scale,
+      effects: { shadow: { x: 0, y: 0, blur: 80, color: "#000000" } },
+      layers: [shape({ id: "kid", position: { x: 1700, y: 880 }, size: { width: 40, height: 30 } })],
+    });
+    // scale 1: frame box (1700,880) is off-canvas; scale 0.5 puts it at
+    // (1050,640)-(1070,655) — clear of every region before the pad.
+    const v = findSafeAreaViolations(resolved([group(0.5)]));
+    expect(v.some((x) => x.layer === "kid" && x.region === "duration-badge")).toBe(true);
+  });
 });
 
 // --- the strings renders surface -----------------------------------------------
@@ -269,6 +388,40 @@ describe("scene CLI", () => {
     expect((output as { warnings: string[] }).warnings).toEqual([]);
   });
 
+  it("variant renders surface safe-area warnings too (renderScene owns the merge)", async () => {
+    const file = path.join(fix.projectRoot, "variant-warn.json");
+    await writeFile(
+      file,
+      JSON.stringify(
+        {
+          ...scene([shape({ id: "sticker", position: { x: 1150, y: 660 }, size: { width: 100, height: 40 } })]),
+          variants: { alt: { changes: [{ layer: "sticker", set: { opacity: 1 } }] } },
+        },
+        null,
+        2,
+      ),
+    );
+    const { exitCode, output } = await cliRun(["render", file, "--variant", "alt"]);
+    expect(exitCode).toBe(0);
+    const o = output as { ok: boolean; outputs: { warnings: string[] }[]; manifest: string };
+    expect(o.outputs[0]!.warnings.some((w) => w.includes('safe-area: visible layer "sticker"'))).toBe(true);
+    const manifest = JSON.parse(await readFile(o.manifest, "utf8")) as { outputs: { warnings: string[] }[] };
+    expect(manifest.outputs[0]!.warnings.some((w) => w.includes('safe-area: visible layer "sticker"'))).toBe(true);
+  });
+
+  it("rerender surfaces safe-area warnings from a fresh render, not the manifest's stale copy", async () => {
+    const file = await writeScene("rerender-warn.json", [
+      shape({ id: "sticker", position: { x: 1150, y: 660 }, size: { width: 100, height: 40 } }),
+    ]);
+    const rendered = await cliRun(["render", file]);
+    expect(rendered.exitCode).toBe(0);
+    const manifest = (rendered.output as { manifest: string }).manifest;
+    const rerun = await cliRun(["rerender", manifest]);
+    expect(rerun.exitCode).toBe(0);
+    const o = rerun.output as { ok: boolean; outputs: { warnings: string[] }[] };
+    expect(o.outputs[0]!.warnings.some((w) => w.includes('safe-area: visible layer "sticker"'))).toBe(true);
+  });
+
   it("guidelines writes the overlay view to its own file, never the final output", async () => {
     const file = await writeScene("guide.json", [shape({ position: { x: 100, y: 100 } })]);
     const rendered = await cliRun(["render", file]);
@@ -305,6 +458,34 @@ describe("scene CLI", () => {
   it("guidelines without a scene file is a usage error", async () => {
     const { exitCode } = await cliRun(["guidelines"]);
     expect(exitCode).toBe(2);
+  });
+
+  it("guidelines refuses to overwrite a final Render output, bytes untouched", async () => {
+    const file = await writeScene("collision.json", [shape({ position: { x: 100, y: 100 } })]);
+    const rendered = await cliRun(["render", file]);
+    expect(rendered.exitCode).toBe(0);
+    const finalOut = (rendered.output as { output: string }).output;
+    const before = await readFile(finalOut);
+    const guided = await cliRun(["guidelines", file, "--out", finalOut]);
+    expect(guided.exitCode).toBe(1);
+    const o = guided.output as { ok: boolean; errors: { path: string; message: string }[] };
+    expect(o.ok).toBe(false);
+    expect(o.errors[0]!.message).toContain("Render output");
+    expect(await readFile(finalOut)).toEqual(before);
+  });
+
+  it("guidelines refuses its default name when a render has claimed it via --out", async () => {
+    const file = await writeScene("claimed.json", [shape({ position: { x: 100, y: 100 } })]);
+    const claimed = path.join(fix.projectRoot, "out", "claimed.guidelines.png");
+    const rendered = await cliRun(["render", file, "--out", claimed]);
+    expect(rendered.exitCode).toBe(0);
+    const guided = await cliRun(["guidelines", file]);
+    expect(guided.exitCode).toBe(1);
+    expect((guided.output as { errors: { message: string }[] }).errors[0]!.message).toContain("Render output");
+    const before = await readFile(claimed);
+    const guidedAgain = await cliRun(["guidelines", file, "--out", claimed]);
+    expect(guidedAgain.exitCode).toBe(1);
+    expect(await readFile(claimed)).toEqual(before);
   });
 });
 

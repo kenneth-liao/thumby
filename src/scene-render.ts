@@ -28,15 +28,19 @@ import type {
   ConnectorLayer,
 } from "./scene.js";
 import { LAYER_DEFAULTS } from "./scene.js";
-import { PROTECTED_REGIONS } from "./safe-area.js";
+import { PROTECTED_REGIONS, safeAreaWarnings } from "./safe-area.js";
 
 export interface SceneRenderResult {
   png: Buffer;
   width: number;
   height: number;
   /**
-   * Non-fatal render signals, e.g. an auto-fit layer that could not fit at
-   * its `min` floor. The PNG still renders; consumers surface these.
+   * Non-fatal render signals — the complete set a consumer should surface:
+   * scene-level signals (e.g. an auto-fit layer that could not fit at its
+   * `min` floor) plus safe-area violations (ADR-0005). renderScene is the
+   * one home for assembling them, so every render path reports both
+   * without remembering to merge. The PNG still renders; consumers
+   * surface these.
    */
   warnings: string[];
 }
@@ -59,7 +63,7 @@ const esc = (s: string) =>
 // The re-export keeps the renderer the one import surface for existing callers.
 export { connectorGeometry } from "./scene-geometry.js";
 export type { Box } from "./scene-geometry.js";
-import { connectorGeometry, n } from "./scene-geometry.js";
+import { connectorGeometry, n, ARROW_MARKER } from "./scene-geometry.js";
 import type { Box } from "./scene-geometry.js";
 
 /** Every layer in the scene tree, depth-first — groups yield their children. */
@@ -336,11 +340,12 @@ function markerFactory(): (color: string) => { defs: string; ref: string } {
   let next = 0;
   return (color) => {
     const id = `arrow-${++next}`;
+    const m = ARROW_MARKER;
     return {
       defs:
-        `<defs><marker id="${id}" viewBox="0 0 12 12" refX="10" refY="6" ` +
-        `markerWidth="4" markerHeight="4" orient="auto" markerUnits="strokeWidth">` +
-        `<path d="M 1 1 L 11 6 L 1 11 Z" fill="${color}"/></marker></defs>`,
+        `<defs><marker id="${id}" viewBox="0 0 ${m.viewBox} ${m.viewBox}" refX="${m.refX}" refY="${m.refY}" ` +
+        `markerWidth="${m.markerWidth}" markerHeight="${m.markerWidth}" orient="auto" markerUnits="strokeWidth">` +
+        `<path d="M ${m.tipMin} ${m.tipMin} L ${m.tipMax} ${m.refY} L ${m.tipMin} ${m.tipMax} Z" fill="${color}"/></marker></defs>`,
       ref: `url(#${id})`,
     };
   };
@@ -672,19 +677,25 @@ async function renderResolvedToPng(
  * Render a resolved Scene to a PNG. Fails loudly when a text face does not
  * resolve from its bundled bytes — silent fallback never reaches a screenshot.
  * Pass `page` to render in an existing page (tests inject route-blocked ones).
+ *
+ * The returned `warnings` are the complete set — scene-level signals plus
+ * safe-area violations (ADR-0005) — assembled here, at the one home every
+ * render path (base, variants, rerender) reads through.
  */
 export async function renderScene(
   resolved: ResolvedScene,
   opts?: { page?: Page },
 ): Promise<SceneRenderResult> {
-  return renderResolvedToPng(resolved, (natural) => scenePageHtml(resolved, natural), opts);
+  const result = await renderResolvedToPng(resolved, (natural) => scenePageHtml(resolved, natural), opts);
+  return { ...result, warnings: [...result.warnings, ...safeAreaWarnings(resolved)] };
 }
 
 /**
  * Render the guideline view: the resolved Scene exactly as renderScene would
  * draw it, plus the protected-region overlay (REQ-012). A review artifact —
  * it never passes through finalize/manifest, and the overlay markup exists
- * only on this code path, so a final render cannot contain it.
+ * only on this code path, so a final render cannot contain it. Its warnings
+ * are scene-level signals only: the regions are visible in the image itself.
  */
 export async function renderGuidelines(
   resolved: ResolvedScene,

@@ -24,7 +24,7 @@ import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneErro
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
 import { renderScene, renderContactSheet, renderGuidelines, countLayers } from "./scene-render.js";
-import { PROTECTED_REGIONS, findSafeAreaViolations, safeAreaWarnings } from "./safe-area.js";
+import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import {
@@ -297,11 +297,9 @@ async function renderVariants(
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
-    const { png, width, height, warnings: sceneWarnings } = await renderScene(result.resolved);
-    // Safe-area violations ride the same warnings channel as every other
-    // non-fatal render signal (ADR-0005) — surfaced per output and recorded
-    // in the manifest.
-    const warnings = [...sceneWarnings, ...safeAreaWarnings(result.resolved)];
+    // renderScene assembles the complete warnings (scene-level + safe-area,
+    // ADR-0005) — the one home every render path reads through.
+    const { png, width, height, warnings } = await renderScene(result.resolved);
     // Finalization happens in phase 1: an uncompliant render leaves out/
     // untouched instead of half-updating it.
     const fin = finalizeRender(png, { at: output });
@@ -560,10 +558,9 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
-    const { png, width, height, warnings: sceneWarnings } = await renderScene(resolved);
-    // Safe-area violations ride the same warnings channel (ADR-0005) — in the
-    // command output and in the manifest's recorded warnings alike.
-    const warnings = [...sceneWarnings, ...safeAreaWarnings(resolved)];
+    // renderScene assembles the complete warnings (scene-level + safe-area,
+    // ADR-0005) — in the command output and the manifest alike.
+    const { png, width, height, warnings } = await renderScene(resolved);
     const fin = finalizeRender(png, { at: output });
     if (!fin.ok) return invalid(fin.errors);
     await mkdir(path.dirname(output), { recursive: true });
@@ -620,6 +617,22 @@ async function dispatch(args: string[]): Promise<CliResult> {
       : path.join(sceneDir, "out", `${path.basename(path.resolve(file), ".json")}.guidelines.png`);
     if (outsideDir(sceneDir, output))
       return usageError(`--out "${outArg}" must stay inside the scene's directory (${sceneDir})`);
+    // A Render output always carries its manifest beside it, so a guideline
+    // write must never target such a path: overwriting the PNG would leave
+    // the stale manifest presenting guideline pixels as an accepted Render.
+    // Checking the one invariant (manifest presence) covers both collision
+    // directions — a direct --out at a rendered PNG and a default guideline
+    // name a render has claimed via --out.
+    const manifestPath = manifestPathFor(output);
+    if (existsSync(manifestPath))
+      return invalid([
+        {
+          path: "--out",
+          message:
+            `"${output}" is a Render output — its manifest "${path.basename(manifestPath)}" exists beside it, and the ` +
+            `guideline view must never overwrite a final Render. Pick a different --out path.`,
+        },
+      ]);
     const { png, width, height } = await renderGuidelines(result.resolved);
     await mkdir(path.dirname(output), { recursive: true });
     await writeFile(output, png);
@@ -766,10 +779,9 @@ export async function rerenderManifest(
           },
         ]);
     }
-    const { png, width, height, warnings: sceneWarnings } = await renderScene(result.resolved, opts);
     // Rerender reports the same warnings a normal render of this scene would —
-    // safe-area violations included — not the manifest's stale copy.
-    const warnings = [...sceneWarnings, ...safeAreaWarnings(result.resolved)];
+    // renderScene assembles the complete set, never the manifest's stale copy.
+    const { png, width, height, warnings } = await renderScene(result.resolved, opts);
     const output = path.resolve(manifestDir, manifest.outputs[i]!.output);
     // Rerender publishes the same final contract: every rewritten output must
     // still satisfy the 2 MB limit, through the same deterministic pipeline.

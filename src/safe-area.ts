@@ -19,13 +19,18 @@
  * image/text/shape layers count their full rotated bounding box (rotation
  * can only grow it), group children transform through their group's
  * scale/rotation/mirror, and connectors count the convex hull of their
- * quadratic path. Content that stays outside all regions never violates;
- * content a rotated box over-covers may still be reported — the region
+ * quadratic path — every footprint inflated by the renderer-supported paint
+ * extents beyond the nominal box (shape borders, text strokes and shadows,
+ * image/group effects, connector strokes and arrowheads), so content that
+ * paints into a region violates even when its box misses. Rotation collapses
+ * directional pads to a symmetric bound (a rotated offset swaps axes).
+ * Content that stays outside all inflated footprints never violates;
+ * content an inflated box over-covers may still be reported — the region
  * figures themselves are conservative boxes sized for YouTube's largest
  * display surfaces and are tuned here, in this one place.
  */
-import type { ResolvedScene, SceneLayer, GroupLayer } from "./scene.js";
-import { connectorGeometry, type Box } from "./scene-geometry.js";
+import { LAYER_DEFAULTS, type ResolvedScene, type SceneLayer, type GroupLayer, type ImageLayer, type TextLayer, type ShapeLayer, type Effects } from "./scene.js";
+import { connectorGeometry, arrowPad, type Box } from "./scene-geometry.js";
 
 /** One protected rectangle of the YouTube thumbnail canvas. */
 export interface ProtectedRegion {
@@ -209,29 +214,134 @@ function connectorBox(layer: Extract<SceneLayer, { type: "connector" }>, boxes: 
 }
 
 /**
+ * How far paint can extend beyond a footprint's nominal box, per axis, in
+ * the coordinate space the footprint is about to be tested in. Directional
+ * (a text shadow with `x: 40` pads only horizontally); passing through any
+ * nonzero rotation mixes the axes, so pads collapse to the symmetric bound
+ * there — over-covering, never under.
+ */
+interface Pad {
+  x: number;
+  y: number;
+}
+
+const ZERO_PAD: Pad = { x: 0, y: 0 };
+
+const collapse = (p: Pad): Pad => ({ x: Math.max(p.x, p.y), y: Math.max(p.x, p.y) });
+
+const maxPad = (a: Pad, b: Pad): Pad => ({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) });
+
+/** Inflate an axis-aligned box symmetrically by a pad. */
+const inflate = (box: Box, p: Pad): Box => ({
+  x: box.x - p.x,
+  y: box.y - p.y,
+  width: box.width + 2 * p.x,
+  height: box.height + 2 * p.y,
+});
+
+/**
+ * Text paint beyond the box: stroke paints entirely outside the glyphs, and
+ * each shadow reaches |offset| + blur from glyph edges — the glyphs stay
+ * inside the box, so those bounds hold for the box too.
+ */
+function textPad(layer: TextLayer): Pad {
+  let p: Pad = { x: 0, y: 0 };
+  if (layer.stroke) {
+    p = { x: layer.stroke.width, y: layer.stroke.width };
+  }
+  for (const s of layer.shadows ?? []) {
+    p = {
+      x: Math.max(p.x, Math.abs(s.x) + s.blur),
+      y: Math.max(p.y, Math.abs(s.y) + s.blur),
+    };
+  }
+  return p;
+}
+
+/**
+ * Image/group effects beyond the content box: blur and glow (a centered
+ * drop-shadow) spread `radius` in every direction; a drop-shadow reaches
+ * |offset| + blur. colorAdjust moves no pixels.
+ */
+function effectsPad(effects: Effects | undefined): Pad {
+  if (!effects) return ZERO_PAD;
+  const blur = effects.blur ?? 0;
+  let p: Pad = { x: blur, y: blur };
+  if (effects.glow) p = { x: Math.max(p.x, effects.glow.radius), y: Math.max(p.y, effects.glow.radius) };
+  const sh = effects.shadow;
+  if (sh)
+    p = {
+      x: Math.max(p.x, Math.abs(sh.x) + sh.blur),
+      y: Math.max(p.y, Math.abs(sh.y) + sh.blur),
+    };
+  return p;
+}
+
+/** Shape paint beyond the box: a border strokes half outside the edge. */
+function shapePad(layer: ShapeLayer): Pad {
+  return layer.border ? { x: layer.border.width / 2, y: layer.border.width / 2 } : ZERO_PAD;
+}
+
+/** Connector paint beyond the path hull: half the stroke, plus the arrowhead. */
+function connectorPad(layer: Extract<SceneLayer, { type: "connector" }>): Pad {
+  const w = layer.width ?? LAYER_DEFAULTS.connectorWidth;
+  const p = Math.max(w / 2, layer.arrow ? arrowPad(w) : 0);
+  return { x: p, y: p };
+}
+
+function leafPad(layer: ImageLayer | TextLayer | ShapeLayer | Extract<SceneLayer, { type: "connector" }>): Pad {
+  if (layer.type === "text") return textPad(layer);
+  if (layer.type === "shape") return shapePad(layer);
+  if (layer.type === "connector") return connectorPad(layer);
+  return effectsPad(layer.effects);
+}
+
+/** The uniform scale a transform applies (no skew — only scale·rotation·mirror). */
+const transformScale = (t: Affine): number => Math.hypot(t.a, t.b);
+
+/**
  * Every painted leaf (image, text, shape, connector) with its axis-aligned
- * frame footprint. Groups are containers, not painted content: their children
- * are the visible leaves, transformed through the accumulated group
- * transforms. A hidden or fully transparent layer paints nothing, so its
- * whole subtree is skipped.
+ * frame footprint, inflated by the paint pads. `env` is the inherited pad in
+ * the current layers' own coordinate space; each leaf adds its own pad
+ * (collapsed when any rotation stands between it and frame space, since a
+ * rotated directional pad swaps axes) and converts both to frame px by the
+ * accumulated transform scale. CSS filters apply before their transform, so
+ * group effects pads scale with the group's scale — ignoring that would
+ * under-cover a scaled-up group. Groups are containers, not painted content:
+ * their children are the visible leaves. A hidden or fully transparent layer
+ * paints nothing, so its whole subtree is skipped.
  */
 function* leafFootprints(
   layers: SceneLayer[],
   t: Affine,
   boxes: Map<string, Box>,
+  env: Pad = ZERO_PAD,
 ): Generator<{ layer: SceneLayer; box: Box }> {
   for (const layer of layers) {
     if (layer.visible === false || layer.opacity === 0) continue;
     if (layer.type === "group") {
-      yield* leafFootprints(layer.layers, compose(t, groupTransform(layer)), boxes);
+      const s = layer.scale ?? 1;
+      // Parent-space env → this group's local space; a rotation between the
+      // two spaces mixes axes, so collapse before converting.
+      const inherited = layer.rotation
+        ? collapse({ x: env.x / s, y: env.y / s })
+        : { x: env.x / s, y: env.y / s };
+      let own = effectsPad(layer.effects);
+      if (layer.rotation) own = collapse(own);
+      yield* leafFootprints(layer.layers, compose(t, groupTransform(layer)), boxes, maxPad(inherited, own));
     } else if (layer.type === "connector") {
-      yield { layer, box: connectorBox(layer, boxes) };
+      yield { layer, box: inflate(connectorBox(layer, boxes), connectorPad(layer)) };
     } else {
+      let own = leafPad(layer);
+      // The leaf's own rotation, or any ancestor rotation inside `t`, mixes
+      // the pad's axes on the way to frame space.
+      if (layer.rotation || t.b !== 0 || t.c !== 0) own = collapse(own);
+      const frame = { x: Math.max(own.x, env.x) * transformScale(t), y: Math.max(own.y, env.y) * transformScale(t) };
       const local = rotatedAabb(
         { x: layer.position.x, y: layer.position.y, width: layer.size.width, height: layer.size.height },
         layer.rotation ?? 0,
       );
-      yield { layer, box: cornersAabb(local, t) };
+      yield { layer, box: inflate(cornersAabb(local, t), frame) };
     }
   }
 }

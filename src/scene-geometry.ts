@@ -18,6 +18,40 @@ export interface Box {
 }
 
 /**
+ * The auto-oriented arrowhead marker's geometry — the one home shared by the
+ * renderer's marker markup (scene-render's markerFactory) and the safe-area
+ * check's arrow pad, so the two can never drift.
+ */
+export const ARROW_MARKER = {
+  viewBox: 12,
+  refX: 10,
+  refY: 6,
+  markerWidth: 4,
+  /** The tip path's painted extent in viewBox units: x and y both span 1..11. */
+  tipMin: 1,
+  tipMax: 11,
+} as const;
+
+/**
+ * How far an auto-oriented arrowhead can paint beyond its path anchor point,
+ * in any direction. The marker scales by markerWidth·strokeWidth/viewBox and
+ * rotates to the path tangent, so the bound is the largest marker-local
+ * offset from the anchor (refX, refY) to a painted tip point — orientation
+ * independent, therefore conservative for every path direction.
+ */
+export function arrowPad(strokeWidth: number): number {
+  const m = ARROW_MARKER;
+  const scale = (m.markerWidth * strokeWidth) / m.viewBox;
+  const maxOffset = Math.max(
+    m.refX - m.tipMin,
+    m.tipMax - m.refX,
+    m.refY - m.tipMin,
+    m.tipMax - m.refY,
+  );
+  return maxOffset * scale;
+}
+
+/**
  * One connector's quadratic path in frame px: the line between the targets'
  * box centers, each end trimmed to where it exits the source box and enters
  * the target box, plus the perpendicular bow at the midpoint (positive
