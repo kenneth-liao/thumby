@@ -14,7 +14,7 @@
  * silently resolves newer content — src/assets.ts owns the resolution
  * contract; this module verifies against it).
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -58,6 +58,75 @@ export function relPath(fromDir: string, target: string): string {
 /** The manifest path paired with a render output: `out/foo.png` → `out/foo.manifest.json`. */
 export function manifestPathFor(outputPath: string): string {
   return outputPath.replace(/\.png$/i, "") + ".manifest.json";
+}
+
+/**
+ * The filesystem identity of a path — every symlink on it resolved. `writeFile`
+ * follows symlinks, so the lexical name is not the thing a write lands on: an
+ * `out/alias.png -> out/scene.png` alias writes a Render's bytes under a name
+ * no manifest records. Comparing identities, not strings, closes that. A path
+ * that does not exist yet resolves through its parent directory (which does,
+ * for any write about to happen). Only ENOENT proves absence — every other
+ * error leaves the question unanswered and propagates, so a write that cannot
+ * be proven safe is never performed.
+ */
+async function fsIdentity(p: string): Promise<string> {
+  const abs = path.resolve(p);
+  try {
+    return await realpath(abs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  try {
+    return path.join(await realpath(path.dirname(abs)), path.basename(abs));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    return abs;
+  }
+}
+
+/**
+ * The Render manifest that records `outputPath` as one of its rendered
+ * outputs (or its contact sheet), found by consulting every manifest in the
+ * output's directory. A base render's manifest sits directly beside its
+ * output, but a Variant batch shares one `<scene>.variants.manifest.json`
+ * naming every output — no single adjacent name is sufficient, so the
+ * directory is the scan unit. Candidate and recorded paths are compared by
+ * filesystem identity (`fsIdentity`), so a symlink alias cannot slip a final
+ * Render past the guard. An unreadable manifest, or any directory-read
+ * failure other than the directory being absent, is itself the conflict: a
+ * write that cannot be proven safe is not performed. This is the one reader
+ * for "is this path a final Render output" — guideline writes consult it so a
+ * review artifact can never overwrite published pixels.
+ */
+export async function renderOutputConflict(
+  outputPath: string,
+): Promise<{ manifest: string } | undefined> {
+  const dir = path.dirname(outputPath);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch (err) {
+    // Only absence proves nothing is recorded there. A permission or I/O
+    // failure answers nothing — fail closed by propagating, never fail open.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+  const target = await fsIdentity(outputPath);
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".manifest.json")) continue;
+    const file = path.join(dir, entry);
+    const read = await readManifest(file);
+    if (!read.ok) return { manifest: file };
+    const recorded = [
+      ...read.manifest.outputs.map((o) => o.output),
+      ...(read.manifest.contact ? [read.manifest.contact.output] : []),
+    ];
+    for (const rel of recorded) {
+      if ((await fsIdentity(path.resolve(dir, rel))) === target) return { manifest: file };
+    }
+  }
+  return undefined;
 }
 
 /**

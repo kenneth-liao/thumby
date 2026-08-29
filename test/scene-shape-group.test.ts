@@ -952,7 +952,12 @@ describe("committed logo-card fixture", () => {
     );
     const { png, width, height, warnings } = await render(resolved);
     expect([width, height]).toEqual([1280, 720]);
-    expect(warnings).toEqual([]);
+    // The fixture's full-canvas backdrop legitimately intersects both
+    // protected regions — accepted overlap (ADR-0005): reported as safe-area
+    // warnings, never failing the render. Every other signal must stay absent.
+    expect(warnings.filter((w) => w.startsWith("safe-area:"))).toHaveLength(2);
+    expect(warnings.every((w) => w.includes('layer "backdrop"'))).toBe(true);
+    expect(warnings.filter((w) => !w.startsWith("safe-area:"))).toEqual([]);
     const img = decodePng(png);
     expect(img.px(100, 100)).toEqual([15, 23, 42, 255]); // gradient backdrop corner (#0f172a)
     expect(img.px(640, 460)).toEqual([16, 24, 32, 255]); // card plate, below the label

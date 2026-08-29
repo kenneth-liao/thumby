@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.17.2]
+
+### Fixed
+
+- Safe-area footprints bound a blur-bearing effect by Chromium's painted extent (3σ) instead of the authored blur length: a CSS `filter` blur/glow/drop-shadow length is a standard deviation and paint reaches far past it, so a blurred layer could paint into a protected region unreported (#6)
+- `scene guidelines --out` compares filesystem identities rather than lexical paths, so a symlink aliasing a final Render output can no longer slip past the write guard; a directory read that fails for any reason other than the directory being absent now fails closed instead of reporting no conflict (#6)
+
+## [0.17.1]
+
+### Fixed
+
+- Safe-area footprints now compose chained and nested paint extents additively: the renderer's filter chain stages each paint from the previous stage's output (blur → glow → shadow accumulate within one layer), a group's filter paints on its children's already-filtered output (child and group extents accumulate down the tree), and every directional pad collapses at the point where a rotation stands between it and the canvas — chained effects can no longer paint into a protected region unreported (#6)
+- `scene guidelines --out` refuses any path that any Render manifest in the target's directory records as an output — including multi-Variant batch outputs recorded in the shared `<scene>.variants.manifest.json` and batch contact sheets — failing before any render work and leaving the final PNG's bytes untouched (#6)
+
+## [0.17.0]
+
+### Added
+
+- YouTube safe-area validation (REQ-012): the duration-badge (bottom-right 192×64) and progress-bar (full-width bottom 16px) regions of the 1280×720 canvas are defined once in `src/safe-area.ts`; `bun run scene validate` reports a structured `safeAreaViolations` array and every render path (base, variants, rerender) surfaces violations as actionable `safe-area:` warnings naming the layer, its frame footprint, and the region — recorded in the Render manifest like any other warning, assembled once inside `renderScene` so no render path can omit them. Violations never fail a render: a full-canvas plate legitimately intersects both regions, and accepting the overlap is the reviewer's call (ADR-0005) (#6)
+- `bun run scene guidelines <scene.json> [--out <path>]` renders the inspectable guideline view — the Scene exactly as `render` would draw it plus a labeled outline of both protected regions — to its own file (`<scene-dir>/out/<scene>.guidelines.png` by default, contained like render's `--out`, and refusing any path that is a Render output — one always carries its manifest beside it, and overwriting the pixels would leave the stale manifest presenting guideline pixels as an accepted Render). The overlay exists only on the guideline code path, so it can never enter a final render's output, and the view writes no manifest — it is a review artifact (#6)
+- The violation check is conservative over-approximate geometry over visible layers only: rotated bounding boxes, group scale/rotation/mirror applied down the tree, connector path hulls — each footprint inflated by the renderer-supported paint extents beyond the nominal box (shape borders, text strokes/shadows, image/group effect blur/glow/shadow, connector strokes and arrowheads, with pads rotating and scaling through group transforms), so content that paints into a region violates even when its box misses. Hidden or fully transparent layers and content outside all inflated footprints never violate (#6)
+
 ## [0.16.1]
 
 ### Fixed

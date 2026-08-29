@@ -23,13 +23,15 @@ import { LIBRARY_ROOT, scanLibrary, contentHash, type Library, type ResolvedAsse
 import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError, type ResolvedScene } from "./scene.js";
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
-import { renderScene, renderContactSheet, countLayers } from "./scene-render.js";
+import { renderScene, renderContactSheet, renderGuidelines, countLayers } from "./scene-render.js";
+import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import {
   buildManifest,
   manifestPathFor,
   readManifest,
+  renderOutputConflict,
   writeManifest,
 } from "./manifest.js";
 import { finalizeRender, type Optimization } from "./finalize.js";
@@ -51,6 +53,11 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         locally (lossless first, then deterministic
                                         palette quantization — dimensions never change);
                                         a render that cannot comply fails with its size.
+  bun run scene guidelines <scene.json> Render the safe-area guideline view: the Scene
+                                        exactly as render would draw it, plus the
+                                        protected regions (duration badge, progress bar)
+                                        outlined. A review artifact — written to its own
+                                        file, never the final output, never a manifest.
   bun run scene rerender <manifest.json>
                          Re-render from a Render manifest: verifies the scene
                          bytes and every recorded Asset identity first — a
@@ -66,6 +73,8 @@ Options
                  render: output path inside the scene's directory
                  (default: <scene-dir>/out/<scene-basename>.png;
                  with one --variant: <scene-dir>/out/<scene>.<variant>.png)
+                 guidelines: output path inside the scene's directory
+                 (default: <scene-dir>/out/<scene-basename>.guidelines.png)
   --variant <name[,name...]>
                  render: render one or more named Variants instead of the
                  base Scene. One variant renders alone; several render as a
@@ -85,14 +94,25 @@ Themes and templates
 
 Output is JSON on stdout: { "ok": true, ... } or { "ok": false, "errors": [...] }.
 Successful renders carry a "warnings" array (e.g. an auto-fit layer that
-could not fit at its min floor) and write a Render manifest beside the
-output(s) (<out>.manifest.json) recording the scene identity, selected
-variants, exact Asset identities, tool version, and outputs — every path
-in it is relative to the manifest itself, so the project can be relocated
-and re-rendered offline via "scene rerender". Exit codes: 0 ok, 1 invalid
-scene or render failure, 2 usage error.
+could not fit at its min floor, or a safe-area violation naming the layer
+that intersects YouTube's duration-badge or progress-bar region) and write
+a Render manifest beside the output(s) (<out>.manifest.json) recording the
+scene identity, selected variants, exact Asset identities, tool version,
+and outputs — every path in it is relative to the manifest itself, so the
+project can be relocated and re-rendered offline via "scene rerender".
+"scene validate" reports the structured safeAreaViolations array. Exit
+codes: 0 ok, 1 invalid scene or render failure, 2 usage error.
 Rendering, validation, inspection, and rerendering are offline and never
 start generation.
+
+Safe areas (REQ-012)
+  The YouTube duration-badge and progress regions are defined once in
+  src/safe-area.ts. validate and render report visible layers whose painted
+  footprint intersects a region — as structured violations and as warnings
+  respectively. Violations never fail a render: a full-canvas plate
+  legitimately intersects, and accepting the overlap is the reviewer's call
+  (ADR-0005). "scene guidelines" renders the regions for visual review
+  without entering the final output.
 `;
 
 interface CliResult {
@@ -278,6 +298,8 @@ async function renderVariants(
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
+    // renderScene assembles the complete warnings (scene-level + safe-area,
+    // ADR-0005) — the one home every render path reads through.
     const { png, width, height, warnings } = await renderScene(result.resolved);
     // Finalization happens in phase 1: an uncompliant render leaves out/
     // untouched instead of half-updating it.
@@ -469,6 +491,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
         ...(resolved.scene.variants
           ? { variantCount: Object.keys(resolved.scene.variants).length }
           : {}),
+        safeAreaViolations: findSafeAreaViolations(resolved),
       });
     }
 
@@ -536,6 +559,8 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
+    // renderScene assembles the complete warnings (scene-level + safe-area,
+    // ADR-0005) — in the command output and the manifest alike.
     const { png, width, height, warnings } = await renderScene(resolved);
     const fin = finalizeRender(png, { at: output });
     if (!fin.ok) return invalid(fin.errors);
@@ -574,14 +599,64 @@ async function dispatch(args: string[]): Promise<CliResult> {
     });
   }
 
+  if (cmd === "guidelines" && file) {
+    let outArg: string | undefined;
+    for (let i = 0; i < rest.length; i += 2) {
+      if (rest[i] === "--out" && outArg === undefined) {
+        if (rest[i + 1] === undefined || rest[i + 1].startsWith("--"))
+          return usageError("missing value after \"--out\"");
+        outArg = rest[i + 1];
+      } else return usageError("guidelines accepts at most one --out <path>");
+    }
+    const read = await readSceneFile(file);
+    if ("errors" in read) return invalid(read.errors);
+    const sceneDir = path.dirname(path.resolve(file));
+    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), read.raw);
+    if (!result.ok) return invalid(result.errors);
+    const output = outArg
+      ? path.resolve(outArg)
+      : path.join(sceneDir, "out", `${path.basename(path.resolve(file), ".json")}.guidelines.png`);
+    if (outsideDir(sceneDir, output))
+      return usageError(`--out "${outArg}" must stay inside the scene's directory (${sceneDir})`);
+    // A guideline write must never target a final Render output: overwriting
+    // the PNG would leave the recording manifest presenting guideline pixels
+    // as an accepted Render. renderOutputConflict is the one reader for that
+    // fact — a base render's manifest sits beside its output, but a Variant
+    // batch shares one variants manifest naming every output, so every
+    // manifest in the directory is consulted. That covers both collision
+    // directions: a direct --out at a rendered PNG (base or batch) and a
+    // default guideline name a render has claimed via --out.
+    const conflict = await renderOutputConflict(output);
+    if (conflict)
+      return invalid([
+        {
+          path: "--out",
+          message:
+            `"${output}" is a Render output — the manifest "${path.basename(conflict.manifest)}" in the same directory ` +
+            `records it, and the guideline view must never overwrite a final Render. Pick a different --out path.`,
+        },
+      ]);
+    const { png, width, height } = await renderGuidelines(result.resolved);
+    await mkdir(path.dirname(output), { recursive: true });
+    await writeFile(output, png);
+    return ok({
+      ok: true,
+      output,
+      width,
+      height,
+      regions: PROTECTED_REGIONS.map((r) => ({ id: r.id, label: r.label, box: r.box })),
+    });
+  }
+  if (cmd === "guidelines") return usageError(`"scene guidelines" takes exactly one scene file`);
+
   if (cmd === "rerender" && file && rest.length === 0) return rerenderManifest(file);
   if (cmd === "rerender")
     return usageError(`"scene rerender" takes exactly one manifest path`);
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, render, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, render, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, render, guidelines, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, render, guidelines, or rerender`,
   );
 }
 
@@ -707,6 +782,8 @@ export async function rerenderManifest(
           },
         ]);
     }
+    // Rerender reports the same warnings a normal render of this scene would —
+    // renderScene assembles the complete set, never the manifest's stale copy.
     const { png, width, height, warnings } = await renderScene(result.resolved, opts);
     const output = path.resolve(manifestDir, manifest.outputs[i]!.output);
     // Rerender publishes the same final contract: every rewritten output must

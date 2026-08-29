@@ -423,7 +423,19 @@ describe("constellation fixture — generic layers only", () => {
     const { resolved } = await loadFixture();
     const { png, width, height, warnings } = await render(resolved);
     expect([width, height]).toEqual([1280, 720]);
-    expect(warnings).toEqual([]);
+    // The fixture's full-canvas backdrop legitimately intersects both
+    // protected regions and the codex tile's corner enters the badge —
+    // accepted overlap (ADR-0005): reported as safe-area warnings, never
+    // failing the render. Every other render signal must stay absent.
+    const pairs = warnings
+      .filter((w) => w.startsWith("safe-area:"))
+      .map((w) => /visible layer "([^"]+)".*intersects the (.+) region /.exec(w))
+      .map((m) => `${m![1]}→${m![2]}`)
+      .sort();
+    expect(pairs).toEqual(
+      ["backdrop→duration-badge", "backdrop→progress-bar", "codex-tile→duration-badge"].sort(),
+    );
+    expect(warnings.filter((w) => !w.startsWith("safe-area:"))).toEqual([]);
     const img = decodePng(png);
     expect(img.px(135, 135)).toEqual([20, 24, 31, 255]); // claude tile, above the creator
     expect(img.px(300, 300)).toEqual([34, 211, 238, 255]); // creator over the behind card
