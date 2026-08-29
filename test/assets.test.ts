@@ -208,7 +208,10 @@ describe("writeObjectAsset", () => {
 
   it("gives concurrent cross-kind adoptions of one id exactly one winner (atomic reservation)", async () => {
     const results = await Promise.allSettled([
-      writeObjectAsset(root, "clash", new TextEncoder().encode("OBJ"), meta),
+      // The object meta's id must match its directory ("clash") — a mismatched
+      // id would trip the scanner when this branch wins the race, making the
+      // test flaky on which adoption wins rather than on the reservation.
+      writeObjectAsset(root, "clash", new TextEncoder().encode("OBJ"), { ...meta, id: "clash" }),
       writePlateAsset(root, "clash", new TextEncoder().encode("PLATE"), {
         kind: "plate",
         id: "clash",
