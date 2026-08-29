@@ -219,8 +219,9 @@ from, and says plainly when a candidate has none. `jobs adopt` writes the
 **matte** — the same true-alpha gate as objects, applied to the bytes that
 actually enter the library — always as a `trial` Cutout Asset; approval is the
 human likeness gate, never automatic (DEC-004). The adopted Asset records its
-`matteEngine` and `matteHash`, and `adoptedFrom` names the candidate the matte
-came from. Reruns append candidates under the job lineage; nothing is ever
+`matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
+Asset's content identity is derived from its bytes, never stored (ADR-0002),
+and `jobs adopt` reports that identity — the bytes it wrote. Reruns append candidates under the job lineage; nothing is ever
 overwritten. The shipped engine predicts the mask through the Gateway; a local
 BiRefNet / BEN2 / RMBG-class runner satisfies the same seam (ADR-0006).
 

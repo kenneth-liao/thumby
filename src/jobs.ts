@@ -19,7 +19,7 @@ import type { TextZone } from "./generate.js";
 import { resolveModel } from "./models.js";
 import { extensionFor, writePlateAsset, writeObjectAsset, writeCreatorAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
-import { matteCandidate, type MatteEngine } from "./matte.js";
+import { matteCandidate, MattingFailure, UNBILLED, type MatteEngine } from "./matte.js";
 
 /**
  * Job record schema versions. v1 is plate-only; object-capable jobs are v2;
@@ -448,6 +448,13 @@ async function recordRun(
         await writeFile(path.join(dir, matteFile), result.bytes);
         record.matte = { contentHash: matteHash, file: matteFile, engine: result.engine };
       } catch (err) {
+        // A failed attempt still spent what it spent: its cost and the mask
+        // call's own warnings are recorded, so the run never understates its
+        // cost or claims an unmeasured part was measured.
+        const billing = err instanceof MattingFailure ? err.billing : UNBILLED;
+        matteCostUsd += billing.costUsd;
+        matteCostMeasured &&= billing.costMeasured;
+        warnings.push(...billing.warnings);
         warnings.push(
           `matte: candidate ${contentHash.slice(0, 12)} could not be isolated — ${(err as Error).message}`,
         );
@@ -541,6 +548,21 @@ export async function listJobs(jobRoot: string): Promise<JobSummary[]> {
   return jobs;
 }
 
+/** What adoption wrote, and where it came from. */
+export interface AdoptionResult {
+  assetId: string;
+  /**
+   * The content identity of the bytes actually written — the Asset's own
+   * identity (ADR-0002), which for a creator adoption is the matte's, not the
+   * candidate's. The candidate this came from is named by `adoptedFrom`;
+   * nothing stores either hash in the Asset's meta.
+   */
+  contentHash: string;
+  imagePath: string;
+  /** `job:<jobId>#<candidateHash>` — the lineage, the only home for it. */
+  adoptedFrom: string;
+}
+
 /**
  * Adopt a recorded candidate as a new immutable Asset — the kind follows the
  * job: a plate job adopts a Plate Asset; an object job verifies the
@@ -560,7 +582,7 @@ export async function adoptCandidate(
   candidateRef: string,
   assetId: string,
   opts: { libraryRoot: string; name?: string; tags?: string[] },
-): Promise<{ assetId: string; contentHash: string; imagePath: string; adoptedFrom: string }> {
+): Promise<AdoptionResult> {
   const job = await loadJob(jobRoot, jobId);
   // Uniqueness is on content identity: the same bytes recurring across runs
   // collapse to one candidate, so ambiguity only means two distinct hashes.
@@ -626,9 +648,10 @@ export async function adoptCandidate(
       ...provenance,
       matting: "true-alpha",
       matteEngine: cand.matte.engine,
-      matteHash: cand.matte.contentHash,
     });
-    return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
+    // The identity of what was written is the matte's, not the candidate's —
+    // the candidate lineage lives in `adoptedFrom` and nowhere else.
+    return { assetId, contentHash: cand.matte.contentHash, imagePath, adoptedFrom };
   }
 
   if (job.kind === "object") {

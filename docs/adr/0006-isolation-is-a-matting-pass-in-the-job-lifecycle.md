@@ -59,9 +59,14 @@ known defect.
   that could record un-matted candidates is unrepresentable.
 - A matting failure does not discard a paid run: the candidate is recorded
   without a matte, the run's warnings say why, and adoption refuses it by name.
-- Run cost covers generation **and** matting — a run cost that counted only
-  generation would understate what the run spent.
-- Adopted Cutout Assets record `matting: "true-alpha"`, the `matteEngine`, and
-  the `matteHash`; `adoptedFrom` still names the candidate the matte came from.
+- Run cost covers generation **and** matting — including a matting attempt
+  that failed *after* its model call returned. Every failure carries its
+  billing (`MattingFailure.billing`), so a run can neither understate its cost
+  nor claim an unmeasured part was measured.
+- Adopted Cutout Assets record `matting: "true-alpha"` and the `matteEngine`.
+  No content identity is stored: the Asset's identity is derived from its bytes
+  (ADR-0002), and the candidate the matte came from is named by `adoptedFrom`
+  alone. The adoption result reports the identity of the bytes written — the
+  matte's — so nothing reports a hash that does not identify what it wrote.
 - Matte quality per engine is a measurable, replaceable property — swapping
   engines is a one-line change with no lifecycle impact.

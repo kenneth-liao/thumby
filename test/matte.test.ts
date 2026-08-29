@@ -1,5 +1,11 @@
 import { describe, test, expect } from "bun:test";
-import { composeMatte, matteCandidate, NATIVE_ALPHA, type MatteEngine } from "../src/matte.js";
+import {
+  composeMatte,
+  matteCandidate,
+  MattingFailure,
+  NATIVE_ALPHA,
+  type MatteEngine,
+} from "../src/matte.js";
 import { verifyTrueAlpha } from "../src/alpha.js";
 import { encodePng, decodePng } from "./png.js";
 
@@ -112,6 +118,36 @@ describe("matteCandidate", () => {
     await expect(matteCandidate(OPAQUE_SUBJECT, "full.png", engineOf(ALL_WHITE))).rejects.toThrow(
       /effectively opaque|transparent/i,
     );
+  });
+
+  test("keeps the billing of a call that failed after it was billed (RE-2)", async () => {
+    // The mask call returned (and is billed); composition or verification
+    // then fails. The cost and the call's warnings must survive the failure.
+    const billed = { costUsd: 0.034, costMeasured: false, warnings: ["nano-lite: size ignored"] };
+    const failsAfterBilling: MatteEngine = async ({ bytes, label }) => ({
+      bytes: composeMatte(bytes, ALL_BLACK, label), // a degenerate matte — refused downstream
+      engine: "test/mask-model",
+      ...billed,
+    });
+    const err = await matteCandidate(OPAQUE_SUBJECT, "cand.png", failsAfterBilling).catch((e) => e);
+    expect(err).toBeInstanceOf(MattingFailure);
+    expect((err as MattingFailure).billing).toEqual(billed);
+
+    // An engine that throws with its own billing keeps it too.
+    const throwsBilled: MatteEngine = async () => {
+      throw new MattingFailure("mask model returned no image", billed);
+    };
+    const thrown = await matteCandidate(OPAQUE_SUBJECT, "cand.png", throwsBilled).catch((e) => e);
+    expect((thrown as MattingFailure).billing).toEqual(billed);
+  });
+
+  test("charges nothing for a failure that never reached a billable call", async () => {
+    const dead: MatteEngine = async () => {
+      throw new Error("connection refused");
+    };
+    const err = await matteCandidate(OPAQUE_SUBJECT, "cand.png", dead).catch((e) => e);
+    expect(err).toBeInstanceOf(MattingFailure);
+    expect((err as MattingFailure).billing).toEqual({ costUsd: 0, costMeasured: true, warnings: [] });
   });
 
   test("refuses an engine that returns bytes without a real alpha channel", async () => {

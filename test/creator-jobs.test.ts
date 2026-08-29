@@ -15,7 +15,7 @@ import {
   type JobGenerator,
 } from "../src/jobs.js";
 import { scanLibrary, writePlateAsset } from "../src/assets.js";
-import { composeMatte, type MatteEngine } from "../src/matte.js";
+import { composeMatte, MattingFailure, type MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
 let root: string;
@@ -263,6 +263,29 @@ describe("the matting pass (REQ-017)", () => {
     const cand = job.runs[0]!.candidates[0]!;
     expect(cand.matte).toBeUndefined();
     expect(job.runs[0]!.warnings.join("\n")).toMatch(/matte:.*could not be isolated/i);
+    // Nothing reached a billable call, so the run's cost is generation only.
+    expect(job.runs[0]!.costUsd).toBeCloseTo(0.067, 6);
+    expect(job.runs[0]!.costMeasured).toBe(true);
+  });
+
+  test("charges a failed matting attempt that was already billed (RE-2)", async () => {
+    // The mask call returned and is billed; the matte is then refused. The
+    // run must still report what it spent — and that part is unmeasured.
+    const billedFailure: MatteEngine = async () => {
+      throw new MattingFailure("mask model returned no image", {
+        costUsd: 0.034,
+        costMeasured: false,
+        warnings: ["nano-lite: aspectRatio ignored"],
+      });
+    };
+    const job = await runCreatorJob(jobRoot, "creator-billed-fail", { ...baseRequest(), count: 1 }, fakeGen, billedFailure);
+    const run = job.runs[0]!;
+    expect(run.candidates[0]!.matte).toBeUndefined();
+    expect(run.costUsd).toBeCloseTo(0.067 + 0.034, 6);
+    // A run that dropped the unmeasured part would falsely claim measured cost.
+    expect(run.costMeasured).toBe(false);
+    expect(run.warnings).toContain("nano-lite: aspectRatio ignored");
+    expect(run.warnings.join("\n")).toMatch(/could not be isolated/i);
   });
 });
 
@@ -294,8 +317,16 @@ describe("adoptCandidate for creator jobs", () => {
       expect(asset.meta.adoptedFrom).toBe(`job:creator-adopt#${cand.contentHash}`);
       expect(asset.meta.matting).toBe("true-alpha");
       expect(asset.meta.matteEngine).toBe("test/segmentation");
-      expect(asset.meta.matteHash).toBe(cand.matte!.contentHash);
+      // No content identity is stored in meta — it is derived from the bytes
+      // at scan time (ADR-0002); the lineage lives in adoptedFrom alone.
+      expect(JSON.stringify(asset.meta)).not.toContain(cand.matte!.contentHash);
+      expect(Object.keys(asset.meta)).not.toContain("matteHash");
     }
+    // The reported identity is the Asset's own — the bytes that were written,
+    // which for a creator adoption are the matte's, not the candidate's (RE-1).
+    expect(result.contentHash).toBe(cand.matte!.contentHash);
+    expect(result.contentHash).toBe(asset.hash);
+    expect(result.contentHash).not.toBe(cand.contentHash);
     expect(result.imagePath.endsWith(path.join("kenny-crossed", "cutout.png"))).toBe(true);
   });
 

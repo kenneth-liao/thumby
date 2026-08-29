@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveModel, type ModelSpec } from "./models.js";
-import { composeMatte, type MatteEngine } from "./matte.js";
+import { composeMatte, MattingFailure, type MatteEngine } from "./matte.js";
 
 export type TextZone = "left" | "right" | "bottom" | "none";
 
@@ -417,16 +417,23 @@ const MASK_PROMPT = [
 export function segmentationMatteEngine(model: string = DEFAULT_MATTE_MODEL): MatteEngine {
   const spec = resolveModel(model);
   return async ({ bytes, label }) => {
+    // Everything after this call is billed whether or not it succeeds: the
+    // mask call has returned, so its cost and warnings travel with any later
+    // failure rather than vanishing with it.
     const { plates, warnings } = await runGeneration(spec, MASK_PROMPT, [{ bytes }], 1);
+    const billing = { costUsd: spec.approxCost, costMeasured: spec.costMeasured, warnings };
     const mask = plates[0];
-    if (!mask) throw new Error(`${spec.id} returned no matte mask for "${label}"`);
-    return {
-      bytes: composeMatte(bytes, mask.bytes, label),
-      engine: `segmentation:${spec.id}`,
-      costUsd: spec.approxCost,
-      costMeasured: spec.costMeasured,
-      warnings,
-    };
+    if (!mask)
+      throw new MattingFailure(`${spec.id} returned no matte mask for "${label}"`, billing);
+    try {
+      return { bytes: composeMatte(bytes, mask.bytes, label), engine: `segmentation:${spec.id}`, ...billing };
+    } catch (err) {
+      throw new MattingFailure(
+        `${spec.id} returned a mask that could not be applied to "${label}": ${(err as Error).message}`,
+        billing,
+        { cause: err },
+      );
+    }
   };
 }
 

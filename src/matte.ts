@@ -25,6 +25,37 @@
 import { decodePng, encodePngRgba, PngParseError } from "./png.js";
 import { verifyTrueAlpha } from "./alpha.js";
 
+/**
+ * What a matting attempt spent, whether or not it produced a usable matte.
+ * A model call that has already returned is billed even when composition or
+ * verification then fails, so this travels with the failure as well as with
+ * the success — a run that dropped it would understate its own cost and could
+ * claim the cost was measured when the unmeasured part simply vanished.
+ */
+export interface MatteBilling {
+  costUsd: number;
+  costMeasured: boolean;
+  warnings: string[];
+}
+
+/** No call was made (or none had returned): nothing was spent. */
+export const UNBILLED: MatteBilling = { costUsd: 0, costMeasured: true, warnings: [] };
+
+/**
+ * Every matting failure is this error, so a caller reads billing from one
+ * shape instead of guessing which failures cost money.
+ */
+export class MattingFailure extends Error {
+  constructor(
+    message: string,
+    readonly billing: MatteBilling,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "MattingFailure";
+  }
+}
+
 /** Engine name recorded when the candidate's own alpha channel is the matte. */
 export const NATIVE_ALPHA = "native-alpha" as const;
 
@@ -45,12 +76,9 @@ export type MatteEngine = (input: {
   label: string;
 }) => Promise<MatteEngineResult>;
 
-export interface MatteOutcome {
+export interface MatteOutcome extends MatteBilling {
   bytes: Uint8Array;
   engine: string;
-  costUsd: number;
-  costMeasured: boolean;
-  warnings: string[];
 }
 
 /** Rec. 709 luminance — a predicted mask is read as brightness, white = subject. */
@@ -120,24 +148,39 @@ export async function matteCandidate(
 ): Promise<MatteOutcome> {
   try {
     verifyTrueAlpha(bytes, label);
-    return { bytes, engine: NATIVE_ALPHA, costUsd: 0, costMeasured: true, warnings: [] };
+    return { bytes, engine: NATIVE_ALPHA, ...UNBILLED };
   } catch {
     // Not natively isolated — the ordinary case, and exactly why this pass exists.
   }
 
-  const result = await engine({ bytes, label });
+  let result: MatteEngineResult;
   try {
-    verifyTrueAlpha(result.bytes, label);
+    result = await engine({ bytes, label });
   } catch (err) {
-    throw new Error(
-      `The matting pass ("${result.engine}") did not produce a usable matte for "${label}": ${(err as Error).message}`,
-    );
+    // An engine that got far enough to be billed says so by throwing a
+    // MattingFailure; anything else (a connection error, a bad model id)
+    // never reached a billable call.
+    throw err instanceof MattingFailure
+      ? err
+      : new MattingFailure(`The matting pass failed for "${label}": ${(err as Error).message}`, UNBILLED, {
+          cause: err,
+        });
   }
-  return {
-    bytes: result.bytes,
-    engine: result.engine,
+
+  const billing: MatteBilling = {
     costUsd: result.costUsd ?? 0,
     costMeasured: result.costMeasured ?? false,
     warnings: result.warnings ?? [],
   };
+  try {
+    verifyTrueAlpha(result.bytes, label);
+  } catch (err) {
+    // The call already happened, so its cost and warnings survive the refusal.
+    throw new MattingFailure(
+      `The matting pass ("${result.engine}") did not produce a usable matte for "${label}": ${(err as Error).message}`,
+      billing,
+      { cause: err },
+    );
+  }
+  return { bytes: result.bytes, engine: result.engine, ...billing };
 }
