@@ -36,7 +36,14 @@ import {
   type ObjectJobRequest,
   type CreatorJobRequest,
 } from "./jobs.js";
-import { generatePlates, generateObjects, generateCreators, type GenerateOptions } from "./generate.js";
+import {
+  generatePlates,
+  generateObjects,
+  generateCreators,
+  segmentationMatteEngine,
+  type GenerateOptions,
+} from "./generate.js";
+import type { MatteEngine } from "./matte.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
@@ -62,9 +69,10 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
                                             Adopt a candidate (exact hash or unique prefix)
                                             as a new immutable Asset of the job's kind.
                                             Adoption never overwrites an existing asset;
-                                            object and creator candidates must carry true
-                                            alpha, and creator adoption always enters the
-                                            library as trial.
+                                            an object candidate must carry true alpha, a
+                                            creator candidate is adopted as its matte, and
+                                            creator adoption always enters the library as
+                                            trial.
 
 plates options
   --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
@@ -90,8 +98,12 @@ creators options
   (source-to-edit). Defaults to nano-2, the measured likeness workhorse.
   References are attached identity-anchors-first and pose-last; the run's
   fullPrompt role-assigns every reference, so the provenance preserves each
-  declared role. Adoption verifies true alpha and always enters the library
-  as a trial Cutout Asset — approval is Kenneth's alone (DEC-004).
+  declared role. Every candidate then goes through the matting pass — a
+  predicted segmentation mask applied locally as a true alpha channel, since
+  the models return opaque RGB (ADR-0006) — and "jobs adopt" writes that
+  matte, always as a trial Cutout Asset; approval is Kenneth's alone
+  (DEC-004). A candidate the pass could not isolate is refused at adoption
+  and the run's warnings say why.
 
 A plate job is a bare backdrop by definition (REQ-014): no person, product,
 device, or independently editable foreground object is baked in — subjects
@@ -185,10 +197,20 @@ export const PRODUCTION_CREATOR_GENERATOR: CreatorGenerator = async (request: Cr
   };
 };
 
+/**
+ * The shipped matting pass (REQ-017): a segmentation matte predicted through
+ * the Gateway and applied locally as a true alpha channel. It runs on every
+ * creator candidate the model does not already return isolated, which —
+ * measured — is all of them.
+ */
+export const PRODUCTION_MATTE_ENGINE: MatteEngine = segmentationMatteEngine();
+
 export interface JobCliDeps {
   generate: PlateGenerator;
   generateObject: ObjectGenerator;
   generateCreator: CreatorGenerator;
+  /** The matting pass creator candidates are isolated with before they can be adopted. */
+  matte: MatteEngine;
   /** Where job records live (default: <cwd>/out/jobs). */
   jobsRoot: string;
   /** Library root for adoption (default: the repo asset library). */
@@ -364,7 +386,7 @@ async function startJob(
       ? await runPlateJob(deps.jobsRoot, jobId, { kind, zone: fields.zone ?? "left", ...common }, deps.generate)
       : kind === "object"
         ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject)
-        : await runCreatorJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateCreator);
+        : await runCreatorJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateCreator, deps.matte);
   const runIndex = job.runs.length - 1;
   return ok({
     ok: true,
@@ -430,7 +452,13 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
         : recorded.request.kind === "creator"
           ? lift("creator", deps.generateCreator)
           : lift("plate", deps.generate);
-    const job = await rerunJob(deps.jobsRoot, first, generator);
+    const job = await rerunJob(
+      deps.jobsRoot,
+      first,
+      generator,
+      // Only creator runs are matted; the engine is inert for other kinds.
+      recorded.request.kind === "creator" ? deps.matte : undefined,
+    );
     const runIndex = job.runs.length - 1;
     return ok({
       ok: true,
@@ -491,6 +519,7 @@ export async function run(
     generate: deps?.generate ?? PRODUCTION_GENERATOR,
     generateObject: deps?.generateObject ?? PRODUCTION_OBJECT_GENERATOR,
     generateCreator: deps?.generateCreator ?? PRODUCTION_CREATOR_GENERATOR,
+    matte: deps?.matte ?? PRODUCTION_MATTE_ENGINE,
     jobsRoot: deps?.jobsRoot ?? path.resolve("out", "jobs"),
     libraryRoot: deps?.libraryRoot ?? LIBRARY_ROOT,
   };

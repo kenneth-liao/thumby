@@ -74,6 +74,12 @@ export interface CutoutMeta {
   /** Provenance carried from the generating job (creator adoption). */
   subject?: string;
   fullPrompt?: string;
+  /** How the cutout was isolated — job adoption only accepts a verified true-alpha matte. */
+  matting?: "true-alpha";
+  /** The matting engine that produced it ("native-alpha" when the model returned one). */
+  matteEngine?: string;
+  /** sha-256 of the matte, whose bytes are the asset's — the candidate it came from is `adoptedFrom`. */
+  matteHash?: string;
 }
 
 /**

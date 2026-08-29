@@ -15,6 +15,7 @@ import {
   type JobGenerator,
 } from "../src/jobs.js";
 import { scanLibrary, writePlateAsset } from "../src/assets.js";
+import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
 let root: string;
@@ -31,24 +32,49 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-/** True-alpha PNG: a 4×4 opaque red subject in a 16×16 transparent frame. */
-const ALPHA_PNG = encodePng(16, 16, (x, y) =>
-  x < 4 && y < 4 ? [255, 0, 0, 255] : [0, 0, 0, 0],
+/**
+ * What the tested recipe actually returns: an opaque RGB figure on a plain
+ * background (measured — docs/asset-requirements.md). The fixtures model the
+ * real default path, so the suite exercises generation *and* matting.
+ */
+const OPAQUE_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [200, 30, 40, 255] : [20, 90, 200, 255]),
+  { colorType: 2 },
 );
 
-/** An opaque PNG — no alpha matte, the shape the adoption gate must refuse. */
-const OPAQUE_PNG = encodePng(16, 16, () => [20, 90, 200, 255]);
+/** The segmentation mask the matting engine predicts for it. */
+const MASK_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [255, 255, 255, 255] : [0, 0, 0, 255]),
+  { colorType: 2 },
+);
+
+/** A candidate that already carries a real matte — the native-alpha route. */
+const ALPHA_PNG = encodePng(16, 16, (x, y) =>
+  x < 8 && y < 8 ? [255, 0, 0, 255] : [0, 0, 0, 0],
+);
 
 let genCounter = 0;
 const fakeGen: JobGenerator = async (req) => ({
   candidates: Array.from({ length: req.count }, () => ({
     // Distinct bytes per candidate; the suffix after IEND is ignored by the
     // PNG parser but gives every candidate its own content identity.
-    bytes: Buffer.concat([ALPHA_PNG, Buffer.from(`-${genCounter++}`)]),
+    bytes: Buffer.concat([OPAQUE_PNG, Buffer.from(`-${genCounter++}`)]),
     mediaType: "image/png",
   })),
   warnings: [],
   fullPrompt: `CREATOR<${req.subject}>`,
+});
+
+/** The matting seam under test: a predicted mask applied by the real composer. */
+const fakeMatte: MatteEngine = async ({ bytes, label }) => ({
+  bytes: composeMatte(bytes, MASK_PNG, label),
+  engine: "test/segmentation",
+  costUsd: 0.034,
+  costMeasured: true,
 });
 
 const baseRequest = (): CreatorJobRequest => ({
@@ -94,7 +120,7 @@ describe("validateCreatorRequest", () => {
       calls++;
       return fakeGen(r);
     };
-    await expect(runCreatorJob(jobRoot, "no-identity", req, spy)).rejects.toThrow(
+    await expect(runCreatorJob(jobRoot, "no-identity", req, spy, fakeMatte)).rejects.toThrow(
       /identity|text alone/i,
     );
     expect(calls).toBe(0); // refused before any generation call
@@ -121,7 +147,7 @@ describe("validateCreatorRequest", () => {
 
 describe("runCreatorJob", () => {
   test("records a schemaVersion 3 creator job with its typed references", async () => {
-    const job = await runCreatorJob(jobRoot, "creator-basic", baseRequest(), fakeGen);
+    const job = await runCreatorJob(jobRoot, "creator-basic", baseRequest(), fakeGen, fakeMatte);
     expect(job.kind).toBe("creator");
     expect(job.schemaVersion).toBe(3);
     expect(job.request.refs.map((r) => r.role)).toEqual(["identity", "identity", "pose"]);
@@ -131,15 +157,15 @@ describe("runCreatorJob", () => {
   });
 
   test("one request produces a best-of-N candidate set", async () => {
-    const job = await runCreatorJob(jobRoot, "creator-n", { ...baseRequest(), count: 3 }, fakeGen);
+    const job = await runCreatorJob(jobRoot, "creator-n", { ...baseRequest(), count: 3 }, fakeGen, fakeMatte);
     expect(job.runs[0]!.candidates).toHaveLength(3);
     const hashes = job.runs[0]!.candidates.map((c) => c.contentHash);
     expect(new Set(hashes).size).toBe(3);
   });
 
   test("refuses to create over an existing job id — rerun is the only way to add candidates", async () => {
-    await runCreatorJob(jobRoot, "creator-dup", baseRequest(), fakeGen);
-    await expect(runCreatorJob(jobRoot, "creator-dup", baseRequest(), fakeGen)).rejects.toThrow(
+    await runCreatorJob(jobRoot, "creator-dup", baseRequest(), fakeGen, fakeMatte);
+    await expect(runCreatorJob(jobRoot, "creator-dup", baseRequest(), fakeGen, fakeMatte)).rejects.toThrow(
       /rerun|already exists/i,
     );
   });
@@ -164,8 +190,8 @@ describe("rerunCreatorJob", () => {
         { role: "pose", path: pose, contentHash: sha("pose-bytes") },
       ],
     };
-    const first = await runCreatorJob(jobRoot, "creator-lineage", req, fakeGen);
-    const second = await rerunCreatorJob(jobRoot, "creator-lineage", fakeGen);
+    const first = await runCreatorJob(jobRoot, "creator-lineage", req, fakeGen, fakeMatte);
+    const second = await rerunCreatorJob(jobRoot, "creator-lineage", fakeGen, fakeMatte);
     expect(second.runs).toHaveLength(2);
     expect(second.runs[0]).toEqual(first.runs[0]);
     const hashes = second.runs.flatMap((r) => r.candidates.map((c) => c.contentHash));
@@ -175,7 +201,7 @@ describe("rerunCreatorJob", () => {
 
 describe("loadJob record integrity for creator jobs", () => {
   test("rejects a v2 record claiming kind creator — the rollback boundary", async () => {
-    await runCreatorJob(jobRoot, "creator-forged-v2", baseRequest(), fakeGen);
+    await runCreatorJob(jobRoot, "creator-forged-v2", baseRequest(), fakeGen, fakeMatte);
     const file = path.join(jobRoot, "creator-forged-v2", "job.json");
     const rec = JSON.parse(await readFile(file, "utf8"));
     rec.schemaVersion = 2; // what a 0.16-era binary would trust
@@ -191,9 +217,58 @@ describe("loadJob record integrity for creator jobs", () => {
   });
 });
 
+describe("the matting pass (REQ-017)", () => {
+  test("mattes every candidate of a run — the model's opaque output becomes adoptable", async () => {
+    const job = await runCreatorJob(jobRoot, "creator-matted", { ...baseRequest(), count: 2 }, fakeGen, fakeMatte);
+    const run = job.runs[0]!;
+    expect(run.candidates).toHaveLength(2);
+    for (const cand of run.candidates) {
+      expect(cand.matte).toBeDefined();
+      expect(cand.matte!.engine).toBe("test/segmentation");
+      expect(cand.matte!.file.startsWith("mattes/")).toBe(true);
+      // The recorded matte is on disk under its own content identity.
+      const bytes = await readFile(path.join(jobRoot, "creator-matted", cand.matte!.file));
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(cand.matte!.contentHash);
+      // The raw candidate is exactly what the model returned — opaque.
+      expect(cand.contentHash).not.toBe(cand.matte!.contentHash);
+    }
+    // The run's cost covers the matting calls too, not just generation.
+    expect(run.costUsd).toBeCloseTo(0.067 * 2 + 0.034 * 2, 6);
+  });
+
+  test("keeps a natively isolated candidate's own bytes — no second model call", async () => {
+    const nativeGen: CreatorGenerator = async (req) => ({
+      candidates: [{ bytes: ALPHA_PNG, mediaType: "image/png" }],
+      warnings: [],
+      fullPrompt: `CREATOR<${req.subject}>`,
+    });
+    let engineCalls = 0;
+    const spyMatte: MatteEngine = async (input) => {
+      engineCalls++;
+      return fakeMatte(input);
+    };
+    const job = await runCreatorJob(jobRoot, "creator-native", { ...baseRequest(), count: 1 }, nativeGen, spyMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    expect(engineCalls).toBe(0);
+    expect(cand.matte!.engine).toBe("native-alpha");
+    expect(cand.matte!.contentHash).toBe(cand.contentHash);
+    expect(job.runs[0]!.costUsd).toBeCloseTo(0.067, 6);
+  });
+
+  test("records why a candidate could not be isolated instead of discarding the run", async () => {
+    const brokenMatte: MatteEngine = async () => {
+      throw new Error("mask model returned no image");
+    };
+    const job = await runCreatorJob(jobRoot, "creator-nomatte", { ...baseRequest(), count: 1 }, fakeGen, brokenMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    expect(cand.matte).toBeUndefined();
+    expect(job.runs[0]!.warnings.join("\n")).toMatch(/matte:.*could not be isolated/i);
+  });
+});
+
 describe("adoptCandidate for creator jobs", () => {
-  test("adopts a true-alpha candidate as a trial Cutout Asset with job provenance", async () => {
-    const job = await runCreatorJob(jobRoot, "creator-adopt", baseRequest(), fakeGen);
+  test("adopts the candidate's matte as a trial Cutout Asset with job and matte provenance", async () => {
+    const job = await runCreatorJob(jobRoot, "creator-adopt", baseRequest(), fakeGen, fakeMatte);
     const cand = job.runs[0]!.candidates[0]!;
 
     const result = await adoptCandidate(jobRoot, "creator-adopt", cand.contentHash, "kenny-crossed", {
@@ -206,7 +281,9 @@ describe("adoptCandidate for creator jobs", () => {
     const lib = await scanLibrary(libraryRoot);
     const asset = lib.cutouts.find((c) => c.meta.id === "kenny-crossed")!;
     expect(asset).toBeDefined();
-    expect(asset.hash).toBe(cand.contentHash);
+    // The Asset's bytes are the matte — the isolated form, not the opaque
+    // candidate — and the candidate it came from stays in the provenance.
+    expect(asset.hash).toBe(cand.matte!.contentHash);
     expect(asset.meta.kind).toBe("cutout");
     if (asset.meta.kind === "cutout") {
       // Trial is forced: adoption is never an approval (REQ-017, DEC-004).
@@ -215,29 +292,61 @@ describe("adoptCandidate for creator jobs", () => {
       expect(asset.meta.subject).toBe("arms crossed, explaining to camera");
       expect(asset.meta.fullPrompt).toBe("CREATOR<arms crossed, explaining to camera>");
       expect(asset.meta.adoptedFrom).toBe(`job:creator-adopt#${cand.contentHash}`);
+      expect(asset.meta.matting).toBe("true-alpha");
+      expect(asset.meta.matteEngine).toBe("test/segmentation");
+      expect(asset.meta.matteHash).toBe(cand.matte!.contentHash);
     }
     expect(result.imagePath.endsWith(path.join("kenny-crossed", "cutout.png"))).toBe(true);
   });
 
-  test("refuses an opaque candidate — the same true-alpha gate as objects", async () => {
-    const opaqueGen: CreatorGenerator = async (req) => ({
-      candidates: [{ bytes: OPAQUE_PNG, mediaType: "image/png" }],
-      warnings: [],
-      fullPrompt: `CREATOR<${req.subject}>`,
-    });
-    await runCreatorJob(jobRoot, "creator-opaque", { ...baseRequest(), count: 1 }, opaqueGen);
+  test("refuses a candidate the matting pass could not isolate — never the opaque bytes", async () => {
+    const brokenMatte: MatteEngine = async () => {
+      throw new Error("mask model returned no image");
+    };
+    await runCreatorJob(jobRoot, "creator-opaque", { ...baseRequest(), count: 1 }, fakeGen, brokenMatte);
     const job = await loadJob(jobRoot, "creator-opaque");
     const hash = job.runs[0]!.candidates[0]!.contentHash;
 
     await expect(
       adoptCandidate(jobRoot, "creator-opaque", hash, "opaque-creator", { libraryRoot }),
-    ).rejects.toThrow(/chroma-key|alpha/i);
+    ).rejects.toThrow(/no matte/i);
     const lib = await scanLibrary(libraryRoot);
     expect(lib.cutouts).toHaveLength(0);
   });
 
+  test("refuses a tampered matte — the adopted bytes must match the record", async () => {
+    const job = await runCreatorJob(jobRoot, "creator-tamper", { ...baseRequest(), count: 1 }, fakeGen, fakeMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    await writeFile(path.join(jobRoot, "creator-tamper", cand.matte!.file), ALPHA_PNG);
+
+    await expect(
+      adoptCandidate(jobRoot, "creator-tamper", cand.contentHash, "tampered", { libraryRoot }),
+    ).rejects.toThrow(/no longer matches its recorded identity/i);
+    expect((await scanLibrary(libraryRoot)).cutouts).toHaveLength(0);
+  });
+
+  test("refuses a matte that does not carry true alpha — the gate holds independently", async () => {
+    // A hand-edited record pointing the matte at opaque bytes: the pass's own
+    // verification is bypassed, and the adoption gate must still refuse.
+    const job = await runCreatorJob(jobRoot, "creator-forged-matte", { ...baseRequest(), count: 1 }, fakeGen, fakeMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    const file = path.join(jobRoot, "creator-forged-matte", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.runs[0].candidates[0].matte = {
+      file: cand.file,
+      contentHash: cand.contentHash,
+      engine: "forged",
+    };
+    await writeFile(file, JSON.stringify(rec, null, 2));
+
+    await expect(
+      adoptCandidate(jobRoot, "creator-forged-matte", cand.contentHash, "forged", { libraryRoot }),
+    ).rejects.toThrow(/chroma-key|alpha/i);
+    expect((await scanLibrary(libraryRoot)).cutouts).toHaveLength(0);
+  });
+
   test("never overwrites an existing asset of any kind", async () => {
-    await runCreatorJob(jobRoot, "creator-overwrite", baseRequest(), fakeGen);
+    await runCreatorJob(jobRoot, "creator-overwrite", baseRequest(), fakeGen, fakeMatte);
     const job = await loadJob(jobRoot, "creator-overwrite");
     const [a, b] = job.runs[0]!.candidates;
     await adoptCandidate(jobRoot, "creator-overwrite", a!.contentHash, "taken", { libraryRoot });
@@ -250,7 +359,7 @@ describe("adoptCandidate for creator jobs", () => {
     await writePlateAsset(libraryRoot, "plate-a", new TextEncoder().encode("PLATE"), {
       kind: "plate", id: "plate-a", name: "Plate A", tags: [],
     });
-    await runCreatorJob(jobRoot, "creator-scene", baseRequest(), fakeGen);
+    await runCreatorJob(jobRoot, "creator-scene", baseRequest(), fakeGen, fakeMatte);
     const job = await loadJob(jobRoot, "creator-scene");
     const scenePath = path.join(root, "scene.json");
     await writeFile(scenePath, JSON.stringify({ schemaVersion: 1, layers: [] }));
@@ -266,7 +375,7 @@ describe("adoptCandidate for creator jobs", () => {
 
 describe("listJobs with creator jobs", () => {
   test("summarizes creator jobs from one jobs root", async () => {
-    await runCreatorJob(jobRoot, "creator-a", { ...baseRequest(), count: 1 }, fakeGen);
+    await runCreatorJob(jobRoot, "creator-a", { ...baseRequest(), count: 1 }, fakeGen, fakeMatte);
     const jobs = await listJobs(jobRoot);
     const a = jobs.find((j) => j.jobId === "creator-a")!;
     expect(a.kind).toBe("creator");
@@ -298,6 +407,7 @@ function runCli(args: string[]) {
     generate: fakeGen,
     generateObject: fakeGen,
     generateCreator: fakeGen,
+    matte: fakeMatte,
     jobsRoot: cliJobsRoot,
     libraryRoot: cliLibraryRoot,
   });

@@ -201,24 +201,33 @@ bun run jobs creators "arms crossed, explaining to camera" \
   --ref identity:assets/identity/kenny-headshots/k1.png \
   --ref identity:assets/identity/kenny-headshots/k2.png \
   --ref pose:pose.png --count 4
-bun run jobs review <jobId>                   # contact sheet + comparable face-detail views
+bun run jobs review <jobId>                   # contact sheet, mattes, face detail
+bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
 ```
 
-Review is the endpoint of the documented creator flow **today**: the tested
-nano recipe yields opaque RGB candidates (measured 2026-08-29, one painted a
-fake checkerboard — see *Isolation is the open gap* in
-`docs/asset-requirements.md`), so `jobs adopt`'s true-alpha gate refuses them
-by design. The gate is correct; the missing piece is a segmentation-matting
-pass between generation and adoption (BiRefNet / BEN2 / RMBG-2.0 class,
-tracked as a follow-up). Once it lands, adoption verifies true alpha (the
-same gate as objects) and always enters the library as a `trial` Cutout Asset
-— approval is the human likeness gate, never automatic. Reruns append
-candidates under the job lineage; nothing is ever overwritten.
+Isolation is a **stage of the job**, not a prompt instruction: the tested nano
+recipe returns opaque RGB (measured — see *Isolation is a matting pass* in
+`docs/asset-requirements.md`), so every candidate goes through the **matting
+pass** as part of its run. An engine predicts a subject mask and the mask
+becomes the candidate's alpha channel locally — segmentation, never colour
+distance — and the resulting matte is recorded beside the candidate under its
+own content identity. A candidate that already carries a real matte is kept
+as-is (`native-alpha`), with no second call.
 
-The working isolation path today is the chromakey route — a `#00FF00`
-background pinned in-prompt, keyed with `src/chromakey.ts`, added with
-`bun run library add-cutout` — which does not go through the Job adoption
-path; green fringe on hair is its known defect.
+`jobs review` shows each matte on a checkerboard beside the candidate it came
+from, and says plainly when a candidate has none. `jobs adopt` writes the
+**matte** — the same true-alpha gate as objects, applied to the bytes that
+actually enter the library — always as a `trial` Cutout Asset; approval is the
+human likeness gate, never automatic (DEC-004). The adopted Asset records its
+`matteEngine` and `matteHash`, and `adoptedFrom` names the candidate the matte
+came from. Reruns append candidates under the job lineage; nothing is ever
+overwritten. The shipped engine predicts the mask through the Gateway; a local
+BiRefNet / BEN2 / RMBG-class runner satisfies the same seam (ADR-0006).
+
+The green-screen route — a `#00FF00` background pinned in-prompt, keyed with
+`src/chromakey.ts`, added with `bun run library add-cutout` — stays available
+for hand-keying an existing image, outside the Job path; green fringe on hair
+is its known defect.
 
 Overlay specs reference library logos by id, so no absolute paths:
 

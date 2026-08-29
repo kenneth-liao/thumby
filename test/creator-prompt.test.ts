@@ -87,12 +87,19 @@ describe("buildCreatorPrompt", () => {
     expect(prompt).toMatch(/do not (widen|blend)|never.*blend|average/i);
   });
 
-  test("demands one isolated figure on a plain uniform background with true transparency", () => {
+  test("demands one isolated figure on a plain flat background the matting pass can cut", () => {
     const prompt = buildCreatorPrompt("arms crossed", ordered);
     expect(prompt).toMatch(/isolated/i);
-    expect(prompt).toMatch(/uniform background/i);
-    expect(prompt).toMatch(/transparen/i);
+    expect(prompt).toMatch(/uniform, evenly lit background/i);
+    expect(prompt).toMatch(/matting pass/i);
     expect(prompt).toMatch(/no text|no letters/i);
+  });
+
+  test("never asks the model for transparency — that produced a painted checkerboard", () => {
+    const prompt = buildCreatorPrompt("arms crossed", ordered);
+    // Transparency is only ever mentioned to forbid faking it.
+    expect(prompt).not.toMatch(/true transparency/i);
+    expect(prompt).toMatch(/do not paint a checkerboard/i);
   });
 
   test("includes the subject verbatim", () => {

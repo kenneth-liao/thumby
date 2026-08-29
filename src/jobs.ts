@@ -19,6 +19,7 @@ import type { TextZone } from "./generate.js";
 import { resolveModel } from "./models.js";
 import { extensionFor, writePlateAsset, writeObjectAsset, writeCreatorAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
+import { matteCandidate, type MatteEngine } from "./matte.js";
 
 /**
  * Job record schema versions. v1 is plate-only; object-capable jobs are v2;
@@ -94,11 +95,32 @@ export const CREATOR_ROLES = [
 ] as const;
 export type CreatorRole = (typeof CREATOR_ROLES)[number];
 
+/**
+ * The isolated form of a candidate (REQ-017): the true-alpha bytes the
+ * matting pass produced, content-addressed beside the candidate that
+ * generated them. This is the *only* home for a creator candidate's
+ * adoptable bytes — adoption reads the matte, never the raw candidate, so
+ * there is no second path by which opaque bytes could reach the library.
+ */
+export interface JobCandidateMatte {
+  contentHash: string;
+  /** Path relative to the job directory. */
+  file: string;
+  /** Which engine produced it — "native-alpha" when the model returned a real matte. */
+  engine: string;
+}
+
 export interface JobCandidate {
   contentHash: string;
   /** Path relative to the job directory. */
   file: string;
   mediaType: string;
+  /**
+   * Present when the matting pass ran and succeeded for this candidate.
+   * Absent means the pass failed (the run records why) — the candidate is
+   * still reviewable evidence, but it cannot be adopted.
+   */
+  matte?: JobCandidateMatte;
 }
 
 export interface JobRun {
@@ -253,6 +275,7 @@ async function runJob(
   jobId: string,
   request: JobRequest,
   generate: JobGenerator,
+  matte?: MatteEngine,
 ): Promise<GenerationJob> {
   if (!JOB_ID_PATTERN.test(jobId))
     throw new Error(`Invalid job id "${jobId}" — use lowercase letters/digits/hyphens`);
@@ -274,7 +297,7 @@ async function runJob(
     request,
     runs: [],
   };
-  const run = await recordRun(jobRoot, job, request, batch, now);
+  const run = await recordRun(jobRoot, job, request, batch, now, matte);
   job.runs.push(run);
   await writeJobRecord(jobRoot, job);
   return job;
@@ -299,14 +322,21 @@ export async function runObjectJob(
   return runJob(jobRoot, jobId, request, lift("object", generate));
 }
 
+/**
+ * A creator job runs generation *and* the matting pass (REQ-017): the model
+ * returns opaque bytes, so isolation is a stage of the lifecycle, not a hope
+ * about the prompt. The engine is required — a creator job that could record
+ * un-matted candidates would be a job whose candidates can never be adopted.
+ */
 export async function runCreatorJob(
   jobRoot: string,
   jobId: string,
   request: CreatorJobRequest,
   generate: CreatorGenerator,
+  matte: MatteEngine,
 ): Promise<GenerationJob> {
   validateCreatorRequest(request);
-  return runJob(jobRoot, jobId, request, lift("creator", generate));
+  return runJob(jobRoot, jobId, request, lift("creator", generate), matte);
 }
 
 /**
@@ -319,6 +349,7 @@ export async function rerunJob(
   jobRoot: string,
   jobId: string,
   generate: JobGenerator,
+  matte?: MatteEngine,
 ): Promise<GenerationJob> {
   const job = await loadJob(jobRoot, jobId);
   for (const ref of job.request.refs) {
@@ -336,7 +367,7 @@ export async function rerunJob(
   }
 
   const batch = await generate(job.request);
-  const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString());
+  const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString(), matte);
   job.runs.push(run);
   await writeJobRecord(jobRoot, job);
   return job;
@@ -362,39 +393,78 @@ export function rerunCreatorJob(
   jobRoot: string,
   jobId: string,
   generate: CreatorGenerator,
+  matte: MatteEngine,
 ): Promise<GenerationJob> {
-  return rerunJob(jobRoot, jobId, lift("creator", generate));
+  return rerunJob(jobRoot, jobId, lift("creator", generate), matte);
 }
 
-/** Call the generator, persist the candidates, and build the run record. */
+/**
+ * Call the generator, persist the candidates, run the matting pass where the
+ * job kind requires one, and build the run record.
+ *
+ * A matting failure never discards the run: the generation is already paid
+ * for and the candidate is still likeness evidence, so the candidate is
+ * recorded without a matte and the reason is recorded as a run warning.
+ * Adoption then refuses it by name — the failure surfaces at the point of
+ * use instead of being silently swallowed here.
+ */
 async function recordRun(
   jobRoot: string,
   job: GenerationJob,
   request: JobRequest,
   batch: GeneratedBatch,
   ranAt: string,
+  matte?: MatteEngine,
 ): Promise<JobRun> {
   if (batch.candidates.length === 0) throw new Error("Generation returned no candidates");
+  if (request.kind === "creator" && !matte)
+    throw new Error("A creator run needs a matting engine — creator candidates are adopted as their matte");
   const spec = resolveModel(request.model);
   const dir = jobDir(jobRoot, job.jobId);
-  const candidatesDir = path.join(dir, "candidates");
-  await mkdir(candidatesDir, { recursive: true });
+  await mkdir(path.join(dir, "candidates"), { recursive: true });
 
+  const warnings = [...batch.warnings];
   const candidates: JobCandidate[] = [];
+  let matteCostUsd = 0;
+  let matteCostMeasured = true;
+
   for (const candidate of batch.candidates) {
     const contentHash = sha256(candidate.bytes);
     const file = path.join("candidates", `${contentHash}.${extensionFor(candidate.mediaType)}`);
     await writeFile(path.join(dir, file), candidate.bytes);
-    candidates.push({ contentHash, file, mediaType: candidate.mediaType });
+    const record: JobCandidate = { contentHash, file, mediaType: candidate.mediaType };
+
+    if (matte && request.kind === "creator") {
+      try {
+        const result = await matteCandidate(candidate.bytes, file, matte);
+        matteCostUsd += result.costUsd;
+        matteCostMeasured &&= result.costMeasured;
+        warnings.push(...result.warnings);
+        // Content-addressed like the candidate itself, in its own directory:
+        // a matte is derived output, never a candidate in the lineage.
+        const matteHash = sha256(result.bytes);
+        const matteFile = path.join("mattes", `${matteHash}.png`);
+        await mkdir(path.join(dir, "mattes"), { recursive: true });
+        await writeFile(path.join(dir, matteFile), result.bytes);
+        record.matte = { contentHash: matteHash, file: matteFile, engine: result.engine };
+      } catch (err) {
+        warnings.push(
+          `matte: candidate ${contentHash.slice(0, 12)} could not be isolated — ${(err as Error).message}`,
+        );
+      }
+    }
+    candidates.push(record);
   }
 
   return {
     ranAt,
     model: spec.id,
     fullPrompt: batch.fullPrompt,
-    costUsd: spec.approxCost * batch.candidates.length,
-    costMeasured: spec.costMeasured,
-    warnings: batch.warnings,
+    // The matting pass is billed work too — a run cost that counted only the
+    // generation would understate what the run actually spent.
+    costUsd: spec.approxCost * batch.candidates.length + matteCostUsd,
+    costMeasured: spec.costMeasured && matteCostMeasured,
+    warnings: [...new Set(warnings)],
     candidates,
   };
 }
@@ -475,7 +545,9 @@ export async function listJobs(jobRoot: string): Promise<JobSummary[]> {
  * Adopt a recorded candidate as a new immutable Asset — the kind follows the
  * job: a plate job adopts a Plate Asset; an object job verifies the
  * candidate's true alpha (REQ-015) and adopts an Object Asset; a creator job
- * runs the same true-alpha gate (REQ-017) and adopts a trial Cutout Asset.
+ * adopts the candidate's matte — the isolated form the matting pass produced
+ * — through the same true-alpha gate, always as a trial Cutout Asset
+ * (REQ-017).
  * The candidate
  * is addressed by exact content hash (a unique prefix is accepted); its bytes
  * are re-derived and verified before adoption, so a tampered or missing file
@@ -523,27 +595,50 @@ export async function adoptCandidate(
     adoptedFrom,
   };
 
-  if (job.kind === "object" || job.kind === "creator") {
+  if (job.kind === "creator") {
+    // A creator candidate is adopted as its matte — the isolated form the
+    // matting pass produced (REQ-017). The raw candidate is opaque by
+    // measurement, so there is no branch here that could adopt it: a
+    // candidate without a matte is refused, naming the pass that must run.
+    if (!cand.matte)
+      throw new Error(
+        `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
+          `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
+      );
+    const matteBytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.matte.file));
+    const matteActual = sha256(matteBytes);
+    if (matteActual !== cand.matte.contentHash)
+      throw new Error(
+        `Matte file "${cand.matte.file}" no longer matches its recorded identity (sha-256 ${cand.matte.contentHash}, actual ${matteActual}) — it cannot be adopted`,
+      );
+    // The same gate as objects, applied to the bytes that actually enter the
+    // library: the matting pass already verified them, and this layer holds
+    // independently of it.
+    verifyTrueAlpha(matteBytes, cand.matte.file);
+    // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
+    // only Kenneth promotes a Creator Asset through the library CLI.
+    const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, matteBytes, {
+      kind: "cutout",
+      id: assetId,
+      name: opts.name ?? assetId,
+      tags: opts.tags ?? [],
+      approval: "trial",
+      ...provenance,
+      matting: "true-alpha",
+      matteEngine: cand.matte.engine,
+      matteHash: cand.matte.contentHash,
+    });
+    return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
+  }
+
+  if (job.kind === "object") {
     // The alpha gate runs before any write: an opaque candidate is exactly
     // the chroma-key shape REQ-015 forbids, and it must not enter the library.
     verifyTrueAlpha(bytes, cand.file);
     // The gate just proved the bytes are PNG — the recorded mediaType is
-    // derived, not authoritative, and generated assets are contractually
-    // object.png / cutout.png (the write paths hardcode the type, so a
-    // mislabeled candidate cannot produce a .jpg asset).
-    if (job.kind === "creator") {
-      // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
-      // only Kenneth promotes a Creator Asset through the library CLI.
-      const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, bytes, {
-        kind: "cutout",
-        id: assetId,
-        name: opts.name ?? assetId,
-        tags: opts.tags ?? [],
-        approval: "trial",
-        ...provenance,
-      });
-      return { assetId, contentHash: cand.contentHash, imagePath, adoptedFrom };
-    }
+    // derived, not authoritative, and a generated object is contractually
+    // object.png (the write path hardcodes the type, so a mislabeled
+    // candidate cannot produce a .jpg asset).
     const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, bytes, {
       kind: "object",
       id: assetId,

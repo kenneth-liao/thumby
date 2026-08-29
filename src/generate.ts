@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveModel, type ModelSpec } from "./models.js";
+import { composeMatte, type MatteEngine } from "./matte.js";
 
 export type TextZone = "left" | "right" | "bottom" | "none";
 
@@ -104,6 +105,9 @@ export function creatorRefOrder(refs: CreatorRefInput[]): CreatorRefInput[] {
 /**
  * The creator prompt: the subject, a numbered role manifest of the attached
  * references, the tested likeness recipe, and the isolation contract. The
+ * The isolation contract is what the matting pass needs — a plain flat
+ * background and crisp edges — not a request for transparency the model
+ * cannot honour (ADR-0006). The role
  * manifest is what preserves each reference's declared role in the Job's
  * effective-prompt provenance — by ordinal and role label only: local paths
  * are machine details and never leave the box (they live in the Job's typed
@@ -124,8 +128,9 @@ export function buildCreatorPrompt(subject: string, orderedRefs: CreatorRefInput
     "",
     "Copy the face from the identity anchors exactly — do not widen, round, or blend. Do not average the references into a different person.",
     "",
-    "Format: exactly one single isolated creator figure, fully inside the frame with clear margins around it, on a plain uniform background with true transparency around the figure — no environment, no scene, no room, no props, no surface it stands on.",
-    "Style: clean readable silhouette at small sizes, even studio-like lighting, crisp well-defined edges suitable for cutout isolation.",
+    "Format: exactly one single isolated creator figure, fully inside the frame with clear margins around it, on a plain, uniform, evenly lit background — no environment, no scene, no room, no props, no surface it stands on.",
+    "Style: clean readable silhouette at small sizes, even studio-like lighting, crisp well-defined edges the matting pass can cut cleanly.",
+    "Do not paint a checkerboard or any other transparency indicator: isolation is done locally after generation, so the background here must be a plain flat colour.",
     "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, no UI elements, and no composite thumbnail layout — this figure will be composited into a design by local tooling.",
   ].join("\n");
 }
@@ -376,11 +381,63 @@ export async function loadCreatorRefs(ordered: CreatorRefInput[]): Promise<Loade
   );
 }
 
+// --- the matting pass's model call (REQ-017) ---------------------------------
+
+/**
+ * The default matte model. The mask is a segmentation task, not a likeness
+ * one, so it does not need the likeness workhorse's price: `nano-lite` is the
+ * cheapest multimodal model that accepts the candidate as a reference image.
+ */
+export const DEFAULT_MATTE_MODEL = "nano-lite";
+
+/**
+ * Ask for a subject matte, not a cutout. The model returns a mask image; the
+ * alpha channel is applied locally by `composeMatte`, so nothing here depends
+ * on the model being able to emit transparency — which, measured, it cannot
+ * (docs/asset-requirements.md).
+ */
+const MASK_PROMPT = [
+  "Produce a segmentation matte for the person in the attached image.",
+  "",
+  "Output a single black-and-white mask image at exactly the same dimensions, framing, and alignment as the attached image — every pixel must line up with the original.",
+  "Pure white (#FFFFFF) everywhere the person is, including hair, glasses, and clothing. Pure black (#000000) everywhere else.",
+  "Use intermediate greys ONLY as a one-to-two-pixel soft edge along hair and silhouette boundaries.",
+  "CRITICAL: output the mask only — do not redraw, restyle, recolour, crop, or resize the person, do not paint a checkerboard or any transparency indicator, and render no text, numbers, or watermarks.",
+].join("\n");
+
+/**
+ * The shipped matting engine: predict the subject mask through the Gateway,
+ * then apply it locally as a true alpha channel. Segmentation, not chroma
+ * key — no pixel is ever judged by its colour distance to a background.
+ *
+ * This is the seam's default, not its contract: a local BiRefNet/BEN2/
+ * RMBG-class runner satisfies the same `MatteEngine` type and drops in
+ * without touching the Job lifecycle or the adoption gate.
+ */
+export function segmentationMatteEngine(model: string = DEFAULT_MATTE_MODEL): MatteEngine {
+  const spec = resolveModel(model);
+  return async ({ bytes, label }) => {
+    const { plates, warnings } = await runGeneration(spec, MASK_PROMPT, [{ bytes }], 1);
+    const mask = plates[0];
+    if (!mask) throw new Error(`${spec.id} returned no matte mask for "${label}"`);
+    return {
+      bytes: composeMatte(bytes, mask.bytes, label),
+      engine: `segmentation:${spec.id}`,
+      costUsd: spec.approxCost,
+      costMeasured: spec.costMeasured,
+      warnings,
+    };
+  };
+}
+
 /**
  * Creator candidate generation (REQ-017): typed references are adapted to the
  * tested ordering (identity anchors first, pose last) and role-assigned in the
  * effective prompt by ordinal, so the recorded fullPrompt preserves every
  * declared role for any model call shape — with no local path sent off-box.
+ * The prompt asks for a clean, evenly lit figure on a flat background — the
+ * best input for the matting pass — and never for transparency: asking for it
+ * produced a painted checkerboard (ADR-0006).
  * Reference bytes are verified against the recorded identities and those exact
  * bytes are what the model receives. Isolation is requested in-prompt;
  * adoption verifies true alpha — nothing hinges on the model's compliance.
@@ -403,7 +460,7 @@ export async function generateCreators(
     plates,
     warnings: [
       ...warnings,
-      "creator: isolation is requested in-prompt — adoption verifies true alpha and refuses opaque candidates (REQ-017)",
+      "creator: isolation comes from the matting pass, not the prompt — every candidate is matted before it is recorded, and adoption verifies the matte's true alpha (REQ-017)",
     ],
     fullPrompt: prompt,
   };

@@ -1,7 +1,9 @@
 /**
  * Creator candidate review (REQ-017): an offline evidence package for judging
  * likeness. One command writes `<jobDir>/review.html` — a contact sheet of
- * every distinct candidate across all runs, plus a face-detail section that
+ * every distinct candidate across all runs, the matte the isolation pass
+ * produced for each (the bytes adoption would write), plus a face-detail
+ * section that
  * applies the *same* deterministic center-crop geometry to every candidate
  * and every identity anchor, so crops are directly comparable. There is no
  * face detection here: the crop is a fixed relative region, labeled as such,
@@ -31,6 +33,12 @@ export interface ReviewCandidate {
   runIndex: number;
   /** ISO timestamp of that run. */
   ranAt: string;
+  /**
+   * The matte the isolation pass produced — the bytes adoption would write.
+   * Absent when the pass failed for this candidate: it is still likeness
+   * evidence, but it cannot be adopted, and the sheet says so.
+   */
+  matte?: { contentHash: string; file: string; engine: string };
 }
 
 export interface ReviewAnchor {
@@ -102,6 +110,7 @@ export async function reviewCreatorJob(
           file: cand.file,
           runIndex,
           ranAt: run.ranAt,
+          ...(cand.matte ? { matte: { ...cand.matte } } : {}),
         });
     }
   });
@@ -112,20 +121,34 @@ export async function reviewCreatorJob(
   // the candidate the model returned.
   const jobDirectory = path.join(jobRoot, jobId);
   for (const cand of candidates) {
-    const bytes = await readFile(path.join(jobDirectory, cand.file)).catch(() => {
-      throw new Error(`Candidate file "${cand.file}" is missing — the job record cannot be rendered as review evidence`);
-    });
-    const actual = sha256(bytes);
-    if (actual !== cand.contentHash)
-      throw new Error(
-        `Candidate file "${cand.file}" changed content identity — recorded sha-256 ${cand.contentHash}, actual ${actual}. It cannot be rendered as review evidence.`,
-      );
+    await verifyRecorded(jobDirectory, cand.file, cand.contentHash, "Candidate");
+    // The matte is the evidence for the isolation decision and the bytes
+    // adoption writes — it is held to the same identity rule as the candidate.
+    if (cand.matte)
+      await verifyRecorded(jobDirectory, cand.matte.file, cand.matte.contentHash, "Matte");
   }
 
   const html = renderReviewSheet(job.jobId, jobDirectory, job.request.subject, candidates, anchors);
   const reviewPath = path.join(jobDirectory, "review.html");
   await writeFile(reviewPath, html);
   return { jobId: job.jobId, reviewPath, candidates, anchors };
+}
+
+/** Read a recorded artifact and refuse it unless its bytes still match the record. */
+async function verifyRecorded(
+  jobDirectory: string,
+  file: string,
+  contentHash: string,
+  what: string,
+): Promise<void> {
+  const bytes = await readFile(path.join(jobDirectory, file)).catch(() => {
+    throw new Error(`${what} file "${file}" is missing — the job record cannot be rendered as review evidence`);
+  });
+  const actual = sha256(bytes);
+  if (actual !== contentHash)
+    throw new Error(
+      `${what} file "${file}" changed content identity — recorded sha-256 ${contentHash}, actual ${actual}. It cannot be rendered as review evidence.`,
+    );
 }
 
 function fileUrl(p: string): string {
@@ -156,6 +179,16 @@ function renderReviewSheet(
       ),
     )
     .join("\n");
+  const matteViews = candidates
+    .map((c) =>
+      c.matte
+        ? figure(
+            jobPath(c.matte.file),
+            `run ${c.runIndex} · ${c.contentHash.slice(0, 12)} · matte via ${c.matte.engine}`,
+          )
+        : `<figure><div class="frame"></div><figcaption>run ${escapeHtml(String(c.runIndex))} · ${escapeHtml(c.contentHash.slice(0, 12))} · no matte — not adoptable</figcaption></figure>`,
+    )
+    .join("\n");
   const anchorFaces = anchors
     .map((a) => face(a.path, `anchor · ${a.id}`))
     .join("\n");
@@ -183,8 +216,10 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 </style>
 <h1>Creator review · ${escapeHtml(jobId)}</h1>
 <p class="meta">subject: ${escapeHtml(subject)} · ${candidates.length} candidate(s) · face detail uses the same fixed crop on every image — it is not face detection; likeness judgment is human (DEC-004)</p>
-<h2>candidates — full view (checkerboard shows the alpha matte)</h2>
+<h2>candidates — full view, as the model returned them</h2>
 <div class="g">${candidateFull || "<p>no candidates</p>"}</div>
+<h2>isolation — the matte adoption would write (checkerboard shows the alpha)</h2>
+<div class="g">${matteViews || "<p>no candidates</p>"}</div>
 <h2>face detail — identity anchors first, same crop for every image</h2>
 <div class="g">${anchorFaces}${candidateFaces}</div>
 </body>`;

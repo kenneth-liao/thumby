@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { runCreatorJob, loadJob, rerunCreatorJob, type CreatorGenerator, type CreatorJobRequest, type JobGenerator } from "../src/jobs.js";
 import { reviewCreatorJob } from "../src/review.js";
 import { run as cliRun } from "../src/job-cli.js";
+import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -26,10 +27,29 @@ const ALPHA_PNG = encodePng(16, 16, (x, y) =>
   x < 4 && y < 4 ? [255, 0, 0, 255] : [0, 0, 0, 0],
 );
 
+/** What the model actually returns: opaque RGB. The matting pass isolates it. */
+const OPAQUE_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [200, 30, 40, 255] : [20, 90, 200, 255]),
+  { colorType: 2 },
+);
+const MASK_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [255, 255, 255, 255] : [0, 0, 0, 255]),
+  { colorType: 2 },
+);
+
+const fakeMatte: MatteEngine = async ({ bytes, label }) => ({
+  bytes: composeMatte(bytes, MASK_PNG, label),
+  engine: "test/segmentation",
+});
+
 let genCounter = 0;
 const distinctGen: JobGenerator = async (req) => ({
   candidates: Array.from({ length: req.count }, () => ({
-    bytes: Buffer.concat([ALPHA_PNG, Buffer.from(`-${genCounter++}`)]),
+    bytes: Buffer.concat([OPAQUE_PNG, Buffer.from(`-${genCounter++}`)]),
     mediaType: "image/png",
   })),
   warnings: [],
@@ -63,10 +83,10 @@ const baseRequest = (anchors: string[]): CreatorJobRequest => ({
 describe("reviewCreatorJob", () => {
   test("writes a review sheet listing every distinct candidate across runs, against the identity anchors", async () => {
     await seedAnchors(["anchor-a.png", "anchor-b.png"]);
-    await runCreatorJob(jobRoot, "creator-review", baseRequest(["anchor-a.png", "anchor-b.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-review", baseRequest(["anchor-a.png", "anchor-b.png"]), distinctGen, fakeMatte);
     // A rerun of the SAME job adds candidates the sheet must also show — the
     // advertised all-runs behavior is exercised through the real lineage.
-    const second = await rerunCreatorJob(jobRoot, "creator-review", distinctGen);
+    const second = await rerunCreatorJob(jobRoot, "creator-review", distinctGen, fakeMatte);
     expect(second.runs).toHaveLength(2);
 
     const result = await reviewCreatorJob(jobRoot, "creator-review");
@@ -97,12 +117,12 @@ describe("reviewCreatorJob", () => {
   test("deduplicates a candidate hash recurring across runs to its first run", async () => {
     await seedAnchors(["anchor-a.png"]);
     const same: CreatorGenerator = async (req) => ({
-      candidates: [{ bytes: ALPHA_PNG, mediaType: "image/png" }],
+      candidates: [{ bytes: OPAQUE_PNG, mediaType: "image/png" }],
       warnings: [],
       fullPrompt: `CREATOR<${req.subject}>`,
     });
-    const job = await runCreatorJob(jobRoot, "creator-dup", baseRequest(["anchor-a.png"]), same);
-    const reran = await rerunCreatorJob(jobRoot, "creator-dup", same);
+    const job = await runCreatorJob(jobRoot, "creator-dup", baseRequest(["anchor-a.png"]), same, fakeMatte);
+    const reran = await rerunCreatorJob(jobRoot, "creator-dup", same, fakeMatte);
     expect(reran.runs[0]!.candidates[0]!.contentHash).toBe(reran.runs[1]!.candidates[0]!.contentHash);
     const result = await reviewCreatorJob(jobRoot, "creator-dup");
     expect(result.candidates).toHaveLength(1);
@@ -111,16 +131,50 @@ describe("reviewCreatorJob", () => {
     expect(html).toContain(`run ${result.candidates[0]!.runIndex}`);
   });
 
+  test("shows the matte adoption would write, per candidate, and names the engine", async () => {
+    await seedAnchors(["anchor-a.png"]);
+    const job = await runCreatorJob(jobRoot, "creator-matte-view", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, fakeMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    const result = await reviewCreatorJob(jobRoot, "creator-matte-view");
+    expect(result.candidates[0]!.matte!.contentHash).toBe(cand.matte!.contentHash);
+    const html = await readFile(result.reviewPath, "utf8");
+    expect(html).toMatch(/isolation/i);
+    expect(html).toContain(path.basename(cand.matte!.file));
+    expect(html).toContain("matte via test/segmentation");
+  });
+
+  test("says plainly when a candidate has no matte — it is evidence, not an adoptable asset", async () => {
+    await seedAnchors(["anchor-a.png"]);
+    const brokenMatte: MatteEngine = async () => {
+      throw new Error("mask model returned no image");
+    };
+    await runCreatorJob(jobRoot, "creator-no-matte", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, brokenMatte);
+    const result = await reviewCreatorJob(jobRoot, "creator-no-matte");
+    expect(result.candidates[0]!.matte).toBeUndefined();
+    const html = await readFile(result.reviewPath, "utf8");
+    expect(html).toContain("no matte — not adoptable");
+  });
+
+  test("fails loudly when a matte file no longer matches its recorded identity", async () => {
+    await seedAnchors(["anchor-a.png"]);
+    const job = await runCreatorJob(jobRoot, "creator-matte-tampered", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, fakeMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    await writeFile(path.join(jobRoot, "creator-matte-tampered", cand.matte!.file), ALPHA_PNG);
+    await expect(reviewCreatorJob(jobRoot, "creator-matte-tampered")).rejects.toThrow(
+      /matte.*(changed|identity)/i,
+    );
+  });
+
   test("fails loudly when an identity anchor file is missing", async () => {
     await seedAnchors(["anchor-a.png", "gone.png"]);
-    await runCreatorJob(jobRoot, "creator-missing", baseRequest(["anchor-a.png", "gone.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-missing", baseRequest(["anchor-a.png", "gone.png"]), distinctGen, fakeMatte);
     await rm(path.join(root, "gone.png"));
     await expect(reviewCreatorJob(jobRoot, "creator-missing")).rejects.toThrow(/gone\.png/);
   });
 
   test("fails loudly when an identity anchor's bytes no longer match the recorded identity", async () => {
     await seedAnchors(["anchor-a.png"]);
-    await runCreatorJob(jobRoot, "creator-drift", baseRequest(["anchor-a.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-drift", baseRequest(["anchor-a.png"]), distinctGen, fakeMatte);
     await writeFile(path.join(root, "anchor-a.png"), "tampered-anchor-bytes");
     await expect(reviewCreatorJob(jobRoot, "creator-drift")).rejects.toThrow(
       /anchor-a\.png.*(changed|identity|drift)/i,
@@ -129,7 +183,7 @@ describe("reviewCreatorJob", () => {
 
   test("fails loudly when a candidate file no longer matches its recorded identity", async () => {
     await seedAnchors(["anchor-a.png"]);
-    await runCreatorJob(jobRoot, "creator-tampered", baseRequest(["anchor-a.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-tampered", baseRequest(["anchor-a.png"]), distinctGen, fakeMatte);
     const job = await loadJob(jobRoot, "creator-tampered");
     const cand = job.runs[0]!.candidates[0]!;
     await writeFile(path.join(jobRoot, "creator-tampered", cand.file), "tampered-candidate-bytes");
@@ -148,7 +202,7 @@ describe("reviewCreatorJob", () => {
       model: "nano-2",
       count: 1,
       refs: [await anchorRef(evilName)],
-    }, distinctGen);
+    }, distinctGen, fakeMatte);
     const review = await reviewCreatorJob(jobRoot, "creator-hostile");
     const html = await readFile(review.reviewPath, "utf8");
     // No executable markup survives: the raw payload never appears verbatim.
@@ -177,11 +231,12 @@ describe("reviewCreatorJob", () => {
 
   test("the CLI review command prints structured JSON with the review path", async () => {
     await seedAnchors(["anchor-a.png"]);
-    await runCreatorJob(jobRoot, "creator-cli", baseRequest(["anchor-a.png"]), distinctGen);
+    await runCreatorJob(jobRoot, "creator-cli", baseRequest(["anchor-a.png"]), distinctGen, fakeMatte);
     const res = await cliRun(["review", "creator-cli"], {
       generate: distinctGen,
       generateObject: distinctGen,
       generateCreator: distinctGen,
+      matte: fakeMatte,
       jobsRoot: jobRoot,
     });
     expect(res.exitCode).toBe(0);
