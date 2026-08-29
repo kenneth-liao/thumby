@@ -1,6 +1,12 @@
-import { describe, test, expect } from "bun:test";
-import { buildCreatorPrompt, creatorRefOrder } from "../src/generate.js";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { buildCreatorPrompt, creatorRefOrder, loadCreatorRefs } from "../src/generate.js";
 import type { TypedRef } from "../src/jobs.js";
+
+const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
 const ref = (role: string, p: string): TypedRef => ({
   role,
@@ -61,15 +67,18 @@ describe("buildCreatorPrompt", () => {
     ref("style", "style.png"),
   ]);
 
-  test("role-assigns every reference in the effective prompt — provenance preserves the declared role", () => {
+  test("role-assigns every reference without sending local paths off-box", () => {
     const prompt = buildCreatorPrompt("arms crossed, explaining to camera", ordered);
-    // Each reference is numbered and role-labeled in the prompt text itself.
-    expect(prompt).toContain("1. identity");
-    expect(prompt).toContain("2. identity");
-    expect(prompt).toContain("3. style");
-    expect(prompt).toContain("4. pose");
-    expect(prompt).toContain("anchor-a.png");
-    expect(prompt).toContain("pose.png");
+    // Each reference is numbered and role-labeled so the model can assign roles
+    // by ordinal alone — no local path leaves the machine.
+    expect(prompt).toContain("image 1 — identity");
+    expect(prompt).toContain("image 2 — identity");
+    expect(prompt).toContain("image 3 — style");
+    expect(prompt).toContain("image 4 — pose");
+    for (const ref of ordered) {
+      expect(prompt).not.toContain(ref.path);
+      expect(prompt).not.toContain(path.basename(ref.path));
+    }
   });
 
   test("carries the tested likeness recipe: copy the face exactly, never blend anchors", () => {
@@ -89,5 +98,39 @@ describe("buildCreatorPrompt", () => {
   test("includes the subject verbatim", () => {
     const prompt = buildCreatorPrompt("unseen pose: presenting at a whiteboard", ordered);
     expect(prompt).toContain("unseen pose: presenting at a whiteboard");
+  });
+});
+
+describe("loadCreatorRefs", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "thumby-creator-refs-"));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("returns the exact bytes a recorded identity was derived from", async () => {
+    const file = path.join(root, "anchor.png");
+    const bytes = Buffer.from("anchor-bytes");
+    await writeFile(file, bytes);
+    const loaded = await loadCreatorRefs([{ role: "identity", path: file, contentHash: sha256(bytes) }]);
+    expect(loaded).toHaveLength(1);
+    expect(Buffer.from(loaded[0]!.bytes).equals(bytes)).toBe(true);
+    expect(loaded[0]!.path).toBe(file);
+  });
+
+  test("refuses a reference whose bytes drifted from the recorded identity", async () => {
+    const file = path.join(root, "anchor.png");
+    await writeFile(file, "new-bytes");
+    await expect(
+      loadCreatorRefs([{ role: "identity", path: file, contentHash: "a".repeat(64) }]),
+    ).rejects.toThrow(/changed content identity/);
+  });
+
+  test("refuses a missing reference before any generation call", async () => {
+    await expect(
+      loadCreatorRefs([{ role: "pose", path: path.join(root, "gone.png") }]),
+    ).rejects.toThrow(/gone\.png.*missing/i);
   });
 });

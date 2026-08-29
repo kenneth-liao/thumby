@@ -103,22 +103,50 @@ preference — each carries its evidence.
 ### The identity recipe (tested 2026-08-26, re-tested 2026-08-27)
 
 Derived cutouts are generated through **`nano-2` / `nano-pro`** with a
-single edit pass from the identity kit (`assets/identity/kenny-headshots/`):
+single edit pass from the identity kit (`assets/identity/kenny-headshots/`).
+The recorded Generation Job workflow (`bun run jobs creators`) encodes the
+tested rules as request structure: reference roles are typed (`identity`,
+`pose`, `expression`, `outfit`, `style`, `edit`), anchors are attached first
+and the pose reference last, every reference is role-assigned in the effective
+prompt by ordinal, and ≥1 identity anchor is mandatory — a likeness is never
+generated from text alone. Review evidence comes from `bun run jobs review`
+(contact sheet + same-crop face-detail views against the anchors).
+
+The manual rules that predate the job workflow and still apply:
 
 - **Pass 4 headshot anchors first**, then **one
-  pose-only reference last**. Role-assign every ref in the prompt
-  ("images 1–4 = identity, image 5 = pose"). Unassigned refs make the model
-  average faces — the chubby-drift failure mode.
-- **Pick anchors by tag from `index.json`** (verified per-image at ~1028px,
-  2026-08-27): e.g. `frontal` + `teeth-smile` for a bright opener, `thinking`
-  for explainers. **Exclude `wide-eyes`/`shocked` anchors for calm
-  expressions** — they drag the expression wide-eyed.
-- The prompt must say **"copy his face exactly — do not widen, round, or
-  blend"**.
-- Background: **"one single solid #00FF00 edge to edge — no gradient, no
-  vignette, no corners"**, then key it with `src/chromakey.ts`.
+  pose-only reference last**. Unassigned refs make the model
+  average faces — the chubby-drift failure mode. (The job workflow's adapter
+  enforces the ordering; pick anchors by tag from `index.json` — verified
+  per-image at ~1028px, 2026-08-27: e.g. `frontal` + `teeth-smile` for a
+  bright opener, `thinking` for explainers. **Exclude
+  `wide-eyes`/`shocked` anchors for calm expressions** — they drag the
+  expression wide-eyed.)
+- The prompt says **"copy his face exactly — do not widen, round, or
+  blend"** (encoded in the job workflow's role manifest).
 - **One edit pass per cutout, always from the identity kit.** Stacked edits
-  compound drift. **Never generate the likeness from text alone.**
+  compound drift. **Never generate the likeness from text alone.** (Encoded:
+  the request boundary refuses creator jobs with no identity anchor.)
+
+### Isolation is the open gap (measured 2026-08-29)
+
+The tested nano recipe does **not** produce usable alpha. Measured through the
+recorded creator-job workflow (`int1-alpha-demo`, nano-2, 3 anchors, true
+transparency explicitly requested in-prompt): both candidates came back
+opaque RGB PNGs (color type 2), and one **painted a fake checkerboard texture
+imitating a transparency indicator** instead of carrying an alpha channel.
+Adoption's true-alpha gate refuses both by design — RGB chroma-key distance
+cannot qualify an output, and a painted checkerboard is not a matte.
+
+Until a segmentation matting pass (BiRefNet / BEN2 / RMBG-2.0 class) sits
+between generation and adoption, creator candidates cannot reach the library
+through `jobs adopt` — the gate is doing its job, and the missing piece is the
+matte, not the gate (tracked as a follow-up issue). The older green-screen
+route — background pinned to **"one single solid #00FF00 edge to edge — no
+gradient, no vignette, no corners"**, keyed with `src/chromakey.ts`, adopted
+with `library add-cutout` — remains the only working isolation path today; it
+does not go through `jobs adopt`, and green fringe on hair is its known
+defect.
 
 ### Model ranking for likeness (measured, 2026-08-27 three-way, same 5 refs)
 

@@ -172,7 +172,9 @@ export const PRODUCTION_CREATOR_GENERATOR: CreatorGenerator = async (request: Cr
   const result = await generateCreators({
     subject: request.subject,
     model: request.model,
-    refs: request.refs.map((r) => ({ role: r.role, path: r.path })),
+    // Recorded identities travel with the request: generation verifies the
+    // bytes against them before anything is sent to the model.
+    refs: request.refs.map((r) => ({ role: r.role, path: r.path, contentHash: r.contentHash })),
     count: request.count,
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
   });

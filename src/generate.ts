@@ -1,5 +1,6 @@
 import { generateText, generateImage } from "ai";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveModel, type ModelSpec } from "./models.js";
 
@@ -66,6 +67,8 @@ function buildObjectPrompt(subject: string): string {
 export interface CreatorRefInput {
   role: string;
   path: string;
+  /** Recorded content identity — when present, the bytes sent to the model are verified against it. */
+  contentHash?: string;
 }
 
 /**
@@ -102,13 +105,15 @@ export function creatorRefOrder(refs: CreatorRefInput[]): CreatorRefInput[] {
  * The creator prompt: the subject, a numbered role manifest of the attached
  * references, the tested likeness recipe, and the isolation contract. The
  * manifest is what preserves each reference's declared role in the Job's
- * effective-prompt provenance.
+ * effective-prompt provenance — by ordinal and role label only: local paths
+ * are machine details and never leave the box (they live in the Job's typed
+ * request record).
  */
 export function buildCreatorPrompt(subject: string, orderedRefs: CreatorRefInput[]): string {
   const manifest = orderedRefs
     .map((r, i) => {
       const what = CREATOR_ROLE_INSTRUCTIONS[r.role];
-      return `${i + 1}. ${r.role}${what ? ` (${what})` : ""} — ${r.path}`;
+      return `image ${i + 1} — ${r.role}${what ? ` (${what})` : ""}`;
     })
     .join("\n");
   return [
@@ -132,18 +137,23 @@ function describeWarning(model: string, w: unknown): string {
   return `${model}: ${o?.details ?? o?.message ?? `unsupported ${what}`}`;
 }
 
-async function refParts(refs: string[]) {
+/** A generation reference: a path to read, or already-verified bytes. */
+type GenRef = string | { bytes: Uint8Array };
+
+async function refParts(refs: GenRef[]) {
   return Promise.all(
-    refs.map(async (p) => ({
+    refs.map(async (r) => ({
       type: "image" as const,
-      image: await readFile(path.resolve(p)),
+      image: typeof r === "string" ? await readFile(path.resolve(r)) : r.bytes,
     })),
   );
 }
 
 /** Image models take raw bytes in GenerateImagePrompt.images, not file parts. */
-async function refBytes(refs: string[]) {
-  return Promise.all(refs.map((p) => readFile(path.resolve(p))));
+function refBytes(refs: GenRef[]) {
+  return Promise.all(
+    refs.map((r) => (typeof r === "string" ? readFile(path.resolve(r)) : Promise.resolve(r.bytes))),
+  );
 }
 
 export interface GenerateOptions {
@@ -206,7 +216,7 @@ export interface GeneratedPlate {
 async function runGeneration(
   spec: ModelSpec,
   prompt: string,
-  refs: string[],
+  refs: GenRef[],
   count: number,
   temperature?: number,
 ): Promise<{ plates: GeneratedPlate[]; warnings: string[] }> {
@@ -328,23 +338,64 @@ export async function generateObjects(
   };
 }
 
+/** A reference whose exact bytes are already loaded — no re-read, no drift. */
+export interface LoadedRef {
+  path: string;
+  bytes: Uint8Array;
+}
+
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * Load creator references and verify each file's bytes against the identity
+ * recorded at request time. The returned bytes are exactly what the model is
+ * sent — generation never re-reads a mutable path, so the provider cannot
+ * receive different content than the Job records (INT: request-to-generation
+ * drift is refused, not sent).
+ */
+export async function loadCreatorRefs(ordered: CreatorRefInput[]): Promise<LoadedRef[]> {
+  return Promise.all(
+    ordered.map(async (r): Promise<LoadedRef> => {
+      let bytes: Buffer;
+      try {
+        bytes = await readFile(path.resolve(r.path));
+      } catch {
+        throw new Error(
+          `Creator reference "${r.path}" (role ${r.role}) is missing — cannot start the generation`,
+        );
+      }
+      if (r.contentHash !== undefined) {
+        const actual = sha256(bytes);
+        if (actual !== r.contentHash)
+          throw new Error(
+            `Creator reference "${r.path}" (role ${r.role}) changed content identity after the request was recorded — sha-256 ${r.contentHash}, actual ${actual}. Record a new job for different references.`,
+          );
+      }
+      return { path: r.path, bytes };
+    }),
+  );
+}
+
 /**
  * Creator candidate generation (REQ-017): typed references are adapted to the
  * tested ordering (identity anchors first, pose last) and role-assigned in the
- * effective prompt, so the recorded fullPrompt preserves every declared role
- * for any model call shape. Isolation is requested in-prompt; adoption
- * verifies true alpha — nothing hinges on the model's compliance.
+ * effective prompt by ordinal, so the recorded fullPrompt preserves every
+ * declared role for any model call shape — with no local path sent off-box.
+ * Reference bytes are verified against the recorded identities and those exact
+ * bytes are what the model receives. Isolation is requested in-prompt;
+ * adoption verifies true alpha — nothing hinges on the model's compliance.
  */
 export async function generateCreators(
   opts: GenerateCreatorOptions,
 ): Promise<GenerateResult> {
   const spec = resolveModel(opts.model);
   const ordered = creatorRefOrder(opts.refs);
+  const verified = await loadCreatorRefs(ordered);
   const prompt = buildCreatorPrompt(opts.subject, ordered);
   const { plates, warnings } = await runGeneration(
     spec,
     prompt,
-    ordered.map((r) => r.path),
+    verified,
     opts.count,
     opts.temperature,
   );
