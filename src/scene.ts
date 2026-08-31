@@ -62,6 +62,8 @@ export interface ImageLayer extends BaseLayer {
   type: "image";
   asset: string;
   fit?: "cover" | "contain" | "fill" | "none";
+  /** Deterministic local colorization through a named mask (REQ-019). */
+  adjust?: { mask: string; color: string };
   /** Editable visual effects applied to the image's rendered alpha. */
   effects?: Effects;
   crop?: { left: number; top: number; right: number; bottom: number };
@@ -190,6 +192,12 @@ export interface ResolvedScene {
   scene: Scene;
   /** Exact bytes per image layer, keyed by layer id — the asset identities a render used. */
   assets: Map<string, ResolvedAsset>;
+  /**
+   * Exact mask bytes per adjusted image layer, keyed by layer id (REQ-019) —
+   * the mask identities a render used, resolved and dimension-checked at the
+   * gate. A layer without `adjust` has no entry.
+   */
+  masks: Map<string, ResolvedAsset>;
 }
 
 /**
@@ -596,11 +604,100 @@ function trialCreatorError(id: string | undefined): string {
   );
 }
 
+/**
+ * Pixel dimensions of a PNG from its IHDR header — null when the bytes are
+ * not a PNG. The named-mask gate uses this to prove a mask selects against
+ * the same pixel grid as the Creator Asset it adjusts.
+ */
+function pngDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length < 33 || !signature.every((b, i) => bytes[i] === b)) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { width: view.getUint32(16), height: view.getUint32(20) };
+}
+
+/**
+ * Validate one image layer's `adjust` against its resolved asset (REQ-019):
+ * the asset must define the named mask, the mask reference must resolve, be
+ * a PNG, and match the asset's pixel dimensions. Failures land at
+ * `<layer>.adjust.mask` before any render; success stores the mask's exact
+ * bytes in `masks` keyed by layer id.
+ */
+async function adjustErrors(
+  projectRoot: string,
+  getLibrary: () => Promise<Library>,
+  layer: ImageLayer,
+  at: string,
+  asset: ResolvedAsset,
+  masks: Map<string, ResolvedAsset>,
+): Promise<SceneError[]> {
+  const errors: SceneError[] = [];
+  const fail = (message: string) => errors.push({ path: `${at}.adjust.mask`, message });
+  const label = asset.scope === "library" ? `asset "${asset.id}"` : `project asset "${asset.path}"`;
+  if (!asset.masks || Object.keys(asset.masks).length === 0) {
+    fail(
+      asset.scope === "library"
+        ? `${label} defines no named masks — add a "masks" map to its meta.json ` +
+            `(mask name → library mask asset id), or drop the layer's "adjust"`
+        : `${label} defines no named masks — named masks attach to library Creator Assets through their meta.json`,
+    );
+    return errors;
+  }
+  const ref = asset.masks[layer.adjust!.mask];
+  if (ref === undefined) {
+    fail(
+      `unknown named mask "${layer.adjust!.mask}" on ${label} — this asset defines: ` +
+        `${Object.keys(asset.masks).join(", ")}`,
+    );
+    return errors;
+  }
+  const name = layer.adjust!.mask;
+  try {
+    const maskLib = parseAssetRef(ref).scope === "library" ? await getLibrary() : EMPTY_LIBRARY;
+    // Kind-restricted: a mask is a mask — a cutout or plate id in a masks map
+    // is library state that failed validation, not a selectable region, and
+    // kind-restriction also keeps the REQ-018 approval gate's subject
+    // unambiguous (masks are not Creator Assets and carry no approval state).
+    const mask = await resolveAsset(projectRoot, maskLib, ref, { kind: "mask" });
+    if (mask.mediaType !== "image/png") {
+      fail(
+        `mask asset "${mask.id ?? mask.path}" for named mask "${name}" is ${mask.mediaType} — ` +
+          `named masks must be PNG images so their pixel dimensions can be checked`,
+      );
+      return errors;
+    }
+    const maskDims = pngDimensions(mask.bytes);
+    if (!maskDims) {
+      fail(`mask asset "${mask.id ?? mask.path}" for named mask "${name}" has unreadable PNG bytes`);
+      return errors;
+    }
+    const assetDims = pngDimensions(asset.bytes);
+    if (!assetDims) {
+      fail(`${label} is not a PNG — a named-mask adjustment needs a Creator Asset with PNG bytes`);
+      return errors;
+    }
+    if (maskDims.width !== assetDims.width || maskDims.height !== assetDims.height) {
+      fail(
+        `mask "${name}" is ${maskDims.width}×${maskDims.height} but ${label} is ` +
+          `${assetDims.width}×${assetDims.height} — a named mask must match its asset's pixel dimensions exactly`,
+      );
+      return errors;
+    }
+    masks.set(layer.id, mask);
+  } catch (err) {
+    // The mask reference itself failed to resolve (missing asset, bad pin) —
+    // the resolution contract's message already names the reference.
+    fail((err as Error).message);
+  }
+  return errors;
+}
+
 async function resolutionErrors(
   projectRoot: string,
   library: () => Promise<Library>,
   scene: Scene,
   assets: Map<string, ResolvedAsset>,
+  masks: Map<string, ResolvedAsset>,
   opts?: { allowTrialCreator?: boolean },
 ): Promise<SceneError[]> {
   const errors: SceneError[] = [];
@@ -627,6 +724,8 @@ async function resolutionErrors(
           continue;
         }
         assets.set(layer.id, resolved);
+        if (layer.adjust)
+          errors.push(...(await adjustErrors(projectRoot, getLibrary, layer, at, resolved, masks)));
       } catch (err) {
         errors.push({
           path: `${at}.asset`,
@@ -714,10 +813,11 @@ export async function loadScene(
   if (errors.length === 0) errors.push(...variantErrors(scene));
   if (errors.length === 0) errors.push(...themeErrorsAndApply(scene));
   const assets = new Map<string, ResolvedAsset>();
+  const masks = new Map<string, ResolvedAsset>();
   if (errors.length === 0)
     errors.push(
-      ...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets, opts)),
+      ...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets, masks, opts)),
     );
   if (errors.length) return { ok: false, errors };
-  return { ok: true, resolved: { scene, assets } };
+  return { ok: true, resolved: { scene, assets, masks } };
 }

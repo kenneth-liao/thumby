@@ -78,6 +78,13 @@ export interface CutoutMeta {
   /** Provenance carried from the generating job (creator adoption). */
   subject?: string;
   fullPrompt?: string;
+  /**
+   * Named semantic masks (REQ-019): mask name → asset reference through the
+   * one resolution contract (a library mask id is the portable form). The
+   * scene gate resolves and dimension-checks each referenced mask before a
+   * render may use it.
+   */
+  masks?: Record<string, string>;
   /** How the cutout was isolated — job adoption only accepts a verified true-alpha matte. */
   matting?: "true-alpha";
   /** The matting engine that produced it ("native-alpha" when the model returned one). */
@@ -102,7 +109,19 @@ export interface ObjectMeta {
   matting: "true-alpha";
 }
 
-export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta | ObjectMeta;
+/**
+ * A named semantic mask (REQ-019) — a PNG whose alpha selects pixels of the
+ * Creator Asset that references it. It carries no subject of its own; its
+ * reuse value is the selection it draws.
+ */
+export interface MaskMeta {
+  kind: "mask";
+  id: string;
+  name: string;
+  tags: string[];
+}
+
+export type AssetMeta = LogoMeta | PlateMeta | CutoutMeta | ObjectMeta | MaskMeta;
 
 /** Structural base every library meta satisfies — lets `matches` be generic. */
 interface BaseMeta {
@@ -126,6 +145,7 @@ export interface Library {
   plates: LibraryEntry<PlateMeta>[];
   cutouts: LibraryEntry<CutoutMeta>[];
   objects: LibraryEntry<ObjectMeta>[];
+  masks: LibraryEntry<MaskMeta>[];
   /** Identity-kit sources (REQ-016) — searchable, not scene-resolvable. */
   identity: IdentityKit;
 }
@@ -136,10 +156,11 @@ export const EMPTY_LIBRARY: Library = {
   plates: [],
   cutouts: [],
   objects: [],
+  masks: [],
   identity: EMPTY_IDENTITY_KIT,
 };
 
-const KIND_DIRS = ["logos", "plates", "cutouts", "objects"] as const;
+const KIND_DIRS = ["logos", "plates", "cutouts", "objects", "masks"] as const;
 type KindDir = (typeof KIND_DIRS)[number];
 
 const IMAGE_EXTENSIONS = new Set([".svg", ".png", ".jpg", ".jpeg", ".webp"]);
@@ -193,7 +214,8 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
         meta.kind !== "logo" &&
         meta.kind !== "plate" &&
         meta.kind !== "cutout" &&
-        meta.kind !== "object"
+        meta.kind !== "object" &&
+        meta.kind !== "mask"
       )
         throw new Error(`${dir}/meta.json: unknown kind "${(meta as any).kind}"`);
       if (meta.id !== d)
@@ -217,11 +239,12 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
 }
 
 export async function scanLibrary(root: string): Promise<Library> {
-  const [logos, plates, cutouts, objects, kit] = await Promise.all([
+  const [logos, plates, cutouts, objects, masks, kit] = await Promise.all([
     scanKindDir(root, "logos"),
     scanKindDir(root, "plates"),
     scanKindDir(root, "cutouts"),
     scanKindDir(root, "objects"),
+    scanKindDir(root, "masks"),
     scanIdentityKit(root),
   ]);
   // An id is the vocabulary every reader uses; it must be unambiguous library-wide.
@@ -231,6 +254,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     ["plates", plates],
     ["cutouts", cutouts],
     ["objects", objects],
+    ["masks", masks],
     ["identity", kit.entries],
   ] as const) {
     for (const e of entries) {
@@ -247,6 +271,7 @@ export async function scanLibrary(root: string): Promise<Library> {
     plates: plates as LibraryEntry<PlateMeta>[],
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
     objects: objects as LibraryEntry<ObjectMeta>[],
+    masks: masks as LibraryEntry<MaskMeta>[],
     identity: kit,
   };
 }
@@ -288,7 +313,7 @@ async function reserveAssetId(root: string, id: string): Promise<string> {
  */
 async function writeKindAsset(
   root: string,
-  kindDir: "plates" | "objects" | "cutouts",
+  kindDir: "plates" | "objects" | "cutouts" | "masks",
   fileBase: string,
   id: string,
   bytes: Uint8Array,
@@ -330,6 +355,22 @@ export async function writePlateAsset(
   mediaType = "image/png",
 ): Promise<string> {
   return writeKindAsset(root, "plates", "plate", id, bytes, meta, mediaType);
+}
+
+/**
+ * Write a new mask asset into the library (the mask-kind write path, REQ-019).
+ * The media type is not a parameter: masks must be PNG so the scene gate can
+ * compare pixel dimensions against the Creator Asset that references them —
+ * the contract's `mask.png` is hardcoded here, and a mislabeled candidate
+ * cannot produce a differently-named asset.
+ */
+export async function writeMaskAsset(
+  root: string,
+  id: string,
+  bytes: Uint8Array,
+  meta: MaskMeta,
+): Promise<string> {
+  return writeKindAsset(root, "masks", "mask", id, bytes, meta, "image/png");
 }
 
 /**
@@ -458,6 +499,7 @@ export async function searchLibrary(
     plates: text(lib.plates),
     cutouts: text(lib.cutouts),
     objects: text(lib.objects),
+    masks: text(lib.masks),
     identity: { ...lib.identity, entries: text(identity) },
   };
 }
@@ -522,7 +564,7 @@ export interface AssetRef {
 }
 
 /** Restricts library-scope resolution to one asset kind. */
-export type AssetKind = "logo" | "plate" | "cutout" | "object";
+export type AssetKind = "logo" | "plate" | "cutout" | "object" | "mask";
 
 /** Match a logo by id, display name, or alias against a lowercased `want`. */
 function matchesLogo(entry: LibraryEntry<LogoMeta>, want: string): boolean {
@@ -596,6 +638,8 @@ export interface ResolvedAsset {
   kind?: AssetKind;
   /** Library scope, cutouts only: the Creator Asset approval state (REQ-018). */
   approval?: CutoutMeta["approval"];
+  /** Library scope, cutouts only: named mask refs from the asset's meta (REQ-019). */
+  masks?: Record<string, string>;
   /** Project scope: the path relative to the project root, in portable `/` form. */
   path?: string;
   bytes: Uint8Array;
@@ -646,13 +690,17 @@ export async function resolveAsset(
     } else if (opts?.kind === "object") {
       entry = lib.objects.find(byId(want));
       pool = lib.objects;
+    } else if (opts?.kind === "mask") {
+      entry = lib.masks.find(byId(want));
+      pool = lib.masks;
     } else {
       entry =
         lib.logos.find((l) => matchesLogo(l, want)) ??
         lib.plates.find(byId(want)) ??
         lib.cutouts.find(byId(want)) ??
-        lib.objects.find(byId(want));
-      pool = [...lib.logos, ...lib.plates, ...lib.cutouts, ...lib.objects];
+        lib.objects.find(byId(want)) ??
+        lib.masks.find(byId(want));
+      pool = [...lib.logos, ...lib.plates, ...lib.cutouts, ...lib.objects, ...lib.masks];
     }
     if (!entry) {
       throw new Error(
@@ -669,9 +717,12 @@ export async function resolveAsset(
       scope: "library",
       id: entry.meta.id,
       kind: entry.meta.kind,
-      // The approval state rides on the resolution — the one boundary where
-      // the library is read — so no downstream reader re-scans to learn it.
-      ...(entry.meta.kind === "cutout" ? { approval: entry.meta.approval } : {}),
+      // Library metadata a scene needs rides on the resolution — the one
+      // boundary where the library is read — so no downstream reader re-scans
+      // to learn it.
+      ...(entry.meta.kind === "cutout"
+        ? { approval: entry.meta.approval, ...(entry.meta.masks ? { masks: entry.meta.masks } : {}) }
+        : {}),
       bytes,
       mediaType: mediaTypeFor(entry.imagePath),
       hash,

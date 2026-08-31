@@ -182,6 +182,7 @@ function summarizeLayer(
   if (layer.type === "image") {
     summary.asset = layer.asset;
     summary.fit = layer.fit ?? LAYER_DEFAULTS.fit;
+    if (layer.adjust !== undefined) summary.adjust = layer.adjust;
     if (layer.crop !== undefined) summary.crop = layer.crop;
     // Fail fast like the old `.get(id)!`: a validated image layer's asset is
     // always resolved, so a miss here is a contract bug, not an empty field.
@@ -854,6 +855,28 @@ export async function rerenderManifest(
               `asset identity mismatch for layer "${a.layer}": the manifest recorded ${a.hash.slice(0, 12)}… ` +
               `but the input now resolves to ${resolved.hash.slice(0, 12)}….\n` +
               `The content changed since the render — re-render normally to refresh the manifest.`,
+          },
+        ]);
+    }
+    // Named-mask identities verify exactly like layer assets (REQ-019): the
+    // mask bytes a masked render used must still resolve to the same content.
+    for (const [j, m] of (manifest.outputs[i]!.masks ?? []).entries()) {
+      const resolved = result.resolved.masks.get(m.layer);
+      if (!resolved)
+        return invalid([
+          {
+            path: `outputs[${i}].masks[${j}].layer`,
+            message: `layer "${m.layer}" is recorded with a mask in the manifest but has no resolved mask in this scene`,
+          },
+        ]);
+      if (resolved.hash !== m.hash)
+        return invalid([
+          {
+            path: `outputs[${i}].masks[${j}].hash`,
+            message:
+              `mask identity mismatch for layer "${m.layer}": the manifest recorded ${m.hash.slice(0, 12)}… ` +
+              `but the mask now resolves to ${resolved.hash.slice(0, 12)}….\n` +
+              `The mask content changed since the render — re-render normally to refresh the manifest.`,
           },
         ]);
     }

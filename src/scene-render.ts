@@ -159,10 +159,14 @@ function imageMarkup(
   layer: ImageLayer,
   uri: string,
   natural: ImageSize | undefined,
+  maskUri: string | undefined,
 ): string {
   const fit = layer.fit ?? LAYER_DEFAULTS.fit;
   if (!layer.crop) {
-    return `<img src="${uri}" style="width:100%;height:100%;object-fit:${fit};display:block;">`;
+    return (
+      `<img src="${uri}" style="width:100%;height:100%;object-fit:${fit};display:block;">` +
+      adjustOverlayMarkup(layer, maskUri, maskSizeFor(fit))
+    );
   }
   if (!natural)
     throw new Error(
@@ -175,7 +179,55 @@ function imageMarkup(
   return (
     `<div style="position:absolute;left:${win.x}px;top:${win.y}px;width:${win.width}px;height:${win.height}px;overflow:hidden;">` +
     `<img src="${uri}" style="position:absolute;left:${img.x}px;top:${img.y}px;width:${img.width}px;height:${img.height}px;display:block;">` +
+    adjustOverlayMarkup(layer, maskUri, "100% 100%", { x: img.x, y: img.y, width: img.width, height: img.height }) +
     `</div>`
+  );
+}
+
+/**
+ * The CSS mask-size that makes a mask track the same geometry object-fit
+ * gives the layer's img — same intrinsic image pair (mask dimensions equal
+ * the asset's, enforced at the gate), so equal rules land equal pixels.
+ */
+function maskSizeFor(fit: "cover" | "contain" | "fill" | "none"): string {
+  return fit === "fill" ? "100% 100%" : fit === "none" ? "auto" : fit;
+}
+
+/**
+ * The masked colorization overlay (REQ-019): one absolutely-positioned color
+ * layer whose alpha comes from the mask PNG (`-webkit-mask-image`) and whose
+ * color blends with the backdrop via `mix-blend-mode: color` — hue and
+ * saturation from the adjustment, luminance from the asset's own pixels, so
+ * shirt shading survives recoloring. Where the mask's alpha is 0 the overlay
+ * paints nothing and the backdrop is untouched. The `box` form is for
+ * cropped layers: the overlay takes the img's exact geometry (mask-size is
+ * then trivially 100% 100%, since the mask matches the asset pixel-for-pixel).
+ */
+function adjustOverlayMarkup(
+  layer: ImageLayer,
+  maskUri: string | undefined,
+  maskSize: string,
+  box?: { x: number; y: number; width: number; height: number },
+): string {
+  if (!layer.adjust) return "";
+  if (!maskUri)
+    throw new Error(
+      `layer "${layer.id}" has an "adjust" but its named mask did not resolve — the load gate should have rejected this scene`,
+    );
+  const pos = box
+    ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
+    : `left:0;top:0;width:100%;height:100%;`;
+  // Standard mask-* first, -webkit- alongside — Chromium supports both, and
+  // the code then says what the schema and README say (`mask-image`).
+  const mask = (prop: string, value: string) =>
+    `${prop}:${value};-webkit-${prop}:${value};`;
+  return (
+    `<div style="position:absolute;${pos}background:${layer.adjust.color};` +
+    mask("mask-image", `url('${maskUri}')`) +
+    mask("mask-size", maskSize) +
+    mask("mask-position", "center") +
+    mask("mask-repeat", "no-repeat") +
+    `mix-blend-mode:color;"></div>`
   );
 }
 
@@ -428,6 +480,10 @@ function layerMarkup(
     const filter = effectsFilter(layer.effects);
     if (filter) styles.push(filter);
   }
+  // A masked adjustment blends against this layer's own content (REQ-019) —
+  // isolate the wrapper's stacking context so the blend can never see
+  // layers underneath it.
+  if (layer.type === "image" && layer.adjust) styles.push("isolation:isolate");
   const crop = layer.type === "image" && layer.crop ? "overflow:hidden;" : "";
   // A group is a positioned container: children render at their group-local
   // coordinates inside it and transform with it. Nothing flattens — every
@@ -437,7 +493,7 @@ function layerMarkup(
     layer.type === "group"
       ? layer.layers.map((c) => layerMarkup(resolved, c, natural, gradient, boxes, marker)).join("")
       : layer.type === "image"
-        ? imageMarkup(layer, imageUri(resolved, layer.id), natural.get(layer.id))
+        ? imageMarkup(layer, imageUri(resolved, layer.id), natural.get(layer.id), maskUri(resolved, layer.id))
         : layer.type === "shape"
           ? shapeMarkup(layer, gradient)
           : layer.type === "connector"
@@ -451,6 +507,12 @@ function layerMarkup(
 function imageUri(resolved: ResolvedScene, layerId: string): string {
   const asset = resolved.assets.get(layerId)!;
   return `data:${asset.mediaType};base64,${Buffer.from(asset.bytes).toString("base64")}`;
+}
+
+/** The data URI of the mask resolved for an adjusted layer, if any (REQ-019). */
+function maskUri(resolved: ResolvedScene, layerId: string): string | undefined {
+  const mask = resolved.masks.get(layerId);
+  return mask ? `data:${mask.mediaType};base64,${Buffer.from(mask.bytes).toString("base64")}` : undefined;
 }
 
 /**

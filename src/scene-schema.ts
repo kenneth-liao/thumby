@@ -309,6 +309,7 @@ export const SCENE_SCHEMA = {
             "How the asset (after crop) fills the layer box. Default: cover.",
         },
         crop: { $ref: "#/definitions/crop" },
+        adjust: { $ref: "#/definitions/adjust" },
         effects: { $ref: "#/definitions/effects" },
       },
     },
@@ -561,6 +562,33 @@ export const SCENE_SCHEMA = {
             blur: { type: "number", minimum: 0, description: "Blur radius in px." },
             color: { $ref: "#/definitions/color" },
           },
+        },
+      },
+    },
+    adjust: {
+      type: "object",
+      additionalProperties: false,
+      required: ["mask", "color"],
+      description:
+        "Deterministic local colorization (REQ-019): repaints the pixels a " +
+        "named mask of this layer's Creator Asset selects with `color`, " +
+        "blended so the content's own shading survives (CSS `mask-image` + " +
+        "`mix-blend-mode: color`). Every pixel the mask does not select is " +
+        "byte-identical to the unadjusted layer. The source Asset is never " +
+        "flattened or mutated; Variants patch `adjust` as one whole field.",
+      properties: {
+        mask: {
+          type: "string",
+          minLength: 1,
+          description:
+            "A named mask on this layer's asset — the asset's meta.json maps " +
+            "the name to an Asset reference. Unknown names, missing mask " +
+            "assets, non-PNG masks, and dimension mismatches fail at load, " +
+            "before any render.",
+        },
+        color: {
+          $ref: "#/definitions/color",
+          description: "The color the selected pixels are colorized with.",
         },
       },
     },

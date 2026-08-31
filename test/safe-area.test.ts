@@ -66,7 +66,7 @@ const scene = (layers: SceneLayer[]): Scene => ({
  * are shape-only and valid by construction, and the load gate itself is
  * exercised by the CLI tests below.
  */
-const resolved = (layers: SceneLayer[]): ResolvedScene => ({ scene: scene(layers), assets: new Map() });
+const resolved = (layers: SceneLayer[]): ResolvedScene => ({ scene: scene(layers), assets: new Map(), masks: new Map() });
 
 // --- the one definition ------------------------------------------------------
 
