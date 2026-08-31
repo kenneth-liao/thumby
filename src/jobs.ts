@@ -428,7 +428,7 @@ async function recordRun(
   if (batch.candidates.length === 0) throw new Error("Generation returned no candidates");
   if (request.kind !== "plate" && !matte)
     throw new Error(
-      `A ${request.kind} run needs a matting engine — ${request.kind} candidates are adopted as their matte`,
+      `An ${request.kind} run needs a matting engine — ${request.kind} candidates are adopted as their matte`,
     );
   const spec = resolveModel(request.model);
   const dir = jobDir(jobRoot, job.jobId);
