@@ -64,10 +64,10 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
                                             Adopt a candidate (exact hash or unique prefix)
                                             as a new immutable Asset of the job's kind.
                                             Adoption never overwrites an existing asset;
-                                            an object candidate must carry true alpha, a
-                                            creator candidate is adopted as its matte, and
-                                            creator adoption always enters the library as
-                                            trial.
+                                            an object or creator candidate with a matte is
+                                            adopted as that matte (verified true alpha), one
+                                            without is refused; creator adoption always enters
+                                            the library as trial.
 
 plates options
   --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
@@ -212,7 +212,7 @@ export interface JobCliDeps {
   generate: PlateGenerator;
   generateObject: ObjectGenerator;
   generateCreator: CreatorGenerator;
-  /** The matting pass creator candidates are isolated with before they can be adopted. */
+  /** The matting pass creator and object candidates are isolated with before they can be adopted. */
   matte: MatteEngine;
   /** Where job records live (default: <cwd>/out/jobs). */
   jobsRoot: string;
@@ -459,8 +459,9 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
       deps.jobsRoot,
       first,
       generator,
-      // Creator and object runs are matted; the pass is inert for plates.
-      recorded.request.kind !== "plate" ? deps.matte : undefined,
+      // recordRun is the single reader of which kinds are matted; the pass is
+      // inert for plates, so the engine is handed over unconditionally.
+      deps.matte,
     );
     const runIndex = job.runs.length - 1;
     return ok({

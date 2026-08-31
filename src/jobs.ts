@@ -426,8 +426,10 @@ async function recordRun(
   matte?: MatteEngine,
 ): Promise<JobRun> {
   if (batch.candidates.length === 0) throw new Error("Generation returned no candidates");
-  if (request.kind === "creator" && !matte)
-    throw new Error("A creator run needs a matting engine — creator candidates are adopted as their matte");
+  if (request.kind !== "plate" && !matte)
+    throw new Error(
+      `A ${request.kind} run needs a matting engine — ${request.kind} candidates are adopted as their matte`,
+    );
   const spec = resolveModel(request.model);
   const dir = jobDir(jobRoot, job.jobId);
   await mkdir(path.join(dir, "candidates"), { recursive: true });
@@ -577,6 +579,33 @@ export interface AdoptionResult {
  * cannot enter the library under a stale identity. Overwriting an existing
  * asset is unrepresentable — the write path refuses existing ids.
  */
+/**
+ * The one home of the "adopt the matte, keep candidate lineage" rule (REQ-015,
+ * REQ-017): read the candidate's recorded matte, re-verify its content identity,
+ * and gate the exact bytes that will enter the library through the true-alpha
+ * check. Both the creator and the object adopt branches read through this —
+ * the gates cannot drift apart because there is only one.
+ */
+async function loadVerifiedMatte(
+  jobRoot: string,
+  jobId: string,
+  cand: JobCandidate,
+): Promise<{ bytes: Buffer; contentHash: string; engine: string }> {
+  if (!cand.matte)
+    throw new Error(
+      `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
+        `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
+    );
+  const bytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.matte.file));
+  const actual = sha256(bytes);
+  if (actual !== cand.matte.contentHash)
+    throw new Error(
+      `Matte file "${cand.matte.file}" no longer matches its recorded identity (sha-256 ${cand.matte.contentHash}, actual ${actual}) — it cannot be adopted`,
+    );
+  verifyTrueAlpha(bytes, cand.matte.file);
+  return { bytes, contentHash: cand.matte.contentHash, engine: cand.matte.engine };
+}
+
 export async function adoptCandidate(
   jobRoot: string,
   jobId: string,
@@ -621,26 +650,11 @@ export async function adoptCandidate(
   if (job.kind === "creator") {
     // A creator candidate is adopted as its matte — the isolated form the
     // matting pass produced (REQ-017). The raw candidate is opaque by
-    // measurement, so there is no branch here that could adopt it: a
-    // candidate without a matte is refused, naming the pass that must run.
-    if (!cand.matte)
-      throw new Error(
-        `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
-          `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
-      );
-    const matteBytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.matte.file));
-    const matteActual = sha256(matteBytes);
-    if (matteActual !== cand.matte.contentHash)
-      throw new Error(
-        `Matte file "${cand.matte.file}" no longer matches its recorded identity (sha-256 ${cand.matte.contentHash}, actual ${matteActual}) — it cannot be adopted`,
-      );
-    // The same gate as objects, applied to the bytes that actually enter the
-    // library: the matting pass already verified them, and this layer holds
-    // independently of it.
-    verifyTrueAlpha(matteBytes, cand.matte.file);
+    // measurement, so there is no branch here that could adopt it.
+    const matte = await loadVerifiedMatte(jobRoot, jobId, cand);
     // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
     // only Kenneth promotes a Creator Asset through the library CLI.
-    const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, matteBytes, {
+    const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, matte.bytes, {
       kind: "cutout",
       id: assetId,
       name: opts.name ?? assetId,
@@ -648,11 +662,11 @@ export async function adoptCandidate(
       approval: "trial",
       ...provenance,
       matting: "true-alpha",
-      matteEngine: cand.matte.engine,
+      matteEngine: matte.engine,
     });
     // The identity of what was written is the matte's, not the candidate's —
     // the candidate lineage lives in `adoptedFrom` and nowhere else.
-    return { assetId, contentHash: cand.matte.contentHash, imagePath, adoptedFrom };
+    return { assetId, contentHash: matte.contentHash, imagePath, adoptedFrom };
   }
 
   if (job.kind === "object") {
@@ -661,27 +675,19 @@ export async function adoptCandidate(
     // opaque by measurement. Without a matte only a natively isolated
     // candidate qualifies.
     if (cand.matte) {
-      const matteBytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.matte.file));
-      const matteActual = sha256(matteBytes);
-      if (matteActual !== cand.matte.contentHash)
-        throw new Error(
-          `Matte file "${cand.matte.file}" no longer matches its recorded identity (sha-256 ${cand.matte.contentHash}, actual ${matteActual}) — it cannot be adopted`,
-        );
-      // The same gate as the native route, applied to the bytes that actually
-      // enter the library.
-      verifyTrueAlpha(matteBytes, cand.matte.file);
-      const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, matteBytes, {
+      const matte = await loadVerifiedMatte(jobRoot, jobId, cand);
+      const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, matte.bytes, {
         kind: "object",
         id: assetId,
         name: opts.name ?? assetId,
         tags: opts.tags ?? [],
         ...provenance,
         matting: "true-alpha",
-        matteEngine: cand.matte.engine,
+        matteEngine: matte.engine,
       });
       // The identity of what was written is the matte's, not the candidate's —
       // the candidate lineage lives in `adoptedFrom` and nowhere else.
-      return { assetId, contentHash: cand.matte.contentHash, imagePath, adoptedFrom };
+      return { assetId, contentHash: matte.contentHash, imagePath, adoptedFrom };
     }
     // The alpha gate runs before any write: an opaque candidate is exactly
     // the chroma-key shape REQ-015 forbids, and it must not enter the library.

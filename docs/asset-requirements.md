@@ -157,7 +157,8 @@ Adoption's true-alpha gate refuses both by design — RGB chroma-key distance
 cannot qualify an output, and a painted checkerboard is not a matte.
 
 So isolation is a **stage of the job**, and it runs **on this machine**
-(ADR-0006). Every creator candidate goes through the **matting pass**: a
+(ADR-0006). Every creator candidate — and every **object** candidate, which
+ticket #20 measured to fail the same way — goes through the **matting pass**: a
 BiRefNet ONNX segmenter (MIT, fp16) predicts the subject mask through
 `onnxruntime-node` — CoreML on Apple silicon, CPU fallback with a recorded
 warning — and the mask becomes the candidate's alpha channel locally. The
