@@ -217,10 +217,17 @@ function adjustOverlayMarkup(
   const pos = box
     ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
     : `left:0;top:0;width:100%;height:100%;`;
+  // Standard mask-* first, -webkit- alongside — Chromium supports both, and
+  // the code then says what the schema and README say (`mask-image`).
+  const mask = (prop: string, value: string) =>
+    `${prop}:${value};-webkit-${prop}:${value};`;
   return (
     `<div style="position:absolute;${pos}background:${layer.adjust.color};` +
-    `-webkit-mask-image:url('${maskUri}');-webkit-mask-size:${maskSize};` +
-    `-webkit-mask-position:center;-webkit-mask-repeat:no-repeat;mix-blend-mode:color;"></div>`
+    mask("mask-image", `url('${maskUri}')`) +
+    mask("mask-size", maskSize) +
+    mask("mask-position", "center") +
+    mask("mask-repeat", "no-repeat") +
+    `mix-blend-mode:color;"></div>`
   );
 }
 

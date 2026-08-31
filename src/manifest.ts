@@ -31,9 +31,10 @@ export const MANIFEST_VERSION = 4;
  * REQ-018); v2 added `outputs[].optimization` (the 2 MB finalization record);
  * v1 predates both — the fields are optional and self-validating, so one
  * strict gate covers all four. Downgrade limitation, documented in the
- * README: an older reader rejects a newer manifest naming the version (a
- * 0.19 reader reports v4 as an unknown `masks` field) — rerender with the
- * tool version that wrote the manifest.
+ * README: a 0.19 binary rejects every manifest written by 0.20 — it reads
+ * `manifestVersion` 4 as unsupported before it ever looks at the `masks`
+ * field, so this is not masked-render-specific — rerender with the tool
+ * version that wrote the manifest.
  */
 const SUPPORTED_MANIFEST_VERSIONS = [1, 2, 3, 4] as const;
 /** The manifest schema versions this tool reads — derived from the tuple above. */

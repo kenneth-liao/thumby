@@ -525,9 +525,15 @@ field, so Variants recolor the same untouched Creator Asset:
 
 An unknown mask name, a missing mask asset, a non-PNG mask, and a
 dimension mismatch all fail at `scene validate`/`render` with a
-`layers[i].adjust.mask` error before any render. Rollback note: `adjust` is
+`layers[i].adjust.mask` error before any render. The design decision and
+rationale — colorization is a render-time blend, never a baked pixel edit or
+a model hop — live in `docs/adr/0007-masked-colorization-is-a-render-time-blend.md`.
+Rollback notes: `adjust` is
 an optional image-layer property — a Scene using it fails to load on older
-binaries with an unknown-property error, before any render.
+binaries with an unknown-property error, before any render. And downgrading
+to a pre-0.20 binary invalidates **every** manifest 0.20 wrote (schema v4):
+the older binary rejects the version number itself, masked renders or not —
+rerender with the tool version that wrote the manifest.
 
 ### Themes and templates
 

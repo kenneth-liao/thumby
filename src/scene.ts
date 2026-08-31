@@ -654,7 +654,11 @@ async function adjustErrors(
   const name = layer.adjust!.mask;
   try {
     const maskLib = parseAssetRef(ref).scope === "library" ? await getLibrary() : EMPTY_LIBRARY;
-    const mask = await resolveAsset(projectRoot, maskLib, ref);
+    // Kind-restricted: a mask is a mask — a cutout or plate id in a masks map
+    // is library state that failed validation, not a selectable region, and
+    // kind-restriction also keeps the REQ-018 approval gate's subject
+    // unambiguous (masks are not Creator Assets and carry no approval state).
+    const mask = await resolveAsset(projectRoot, maskLib, ref, { kind: "mask" });
     if (mask.mediaType !== "image/png") {
       fail(
         `mask asset "${mask.id ?? mask.path}" for named mask "${name}" is ${mask.mediaType} — ` +

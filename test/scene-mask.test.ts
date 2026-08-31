@@ -192,6 +192,21 @@ describe("schema — adjust on image layers", () => {
 // --- render: pixel invariance and local colorization -----------------------
 
 describe("masked render — local colorization, not a flood fill", () => {
+  // One browser + route-aborting page for the whole describe: every render
+  // must be offline, and shared browser state avoids a launch per test.
+  let page: import("playwright").Page;
+
+  beforeAll(async () => {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch();
+    const ctx = await browser.newContext();
+    await ctx.route("**/*", (route) => route.abort());
+    page = await ctx.newPage();
+    // The browser outlives the tests (bun's teardown, not a finally): a
+    // per-test close is what made a slow launch cascade into timeouts.
+    process.on("exit", () => void browser.close());
+  });
+
   /** Pixels that must be byte-identical between two renders, checked without
    *  a per-pixel expect: returns the count of differing pixels. */
   const diffCount = (a: ReturnType<typeof decodePng>, b: ReturnType<typeof decodePng>) => {
@@ -203,24 +218,20 @@ describe("masked render — local colorization, not a flood fill", () => {
   };
   const lum = (p: number[]) => 0.2126 * p[0]! + 0.7152 * p[1]! + 0.0722 * p[2]!;
 
-  async function renderPair(adjust: Record<string, unknown> | undefined) {
-    const { chromium } = await import("playwright");
-    const resolved = (await load(maskScene([kenLayer(adjust ? { adjust } : {})]))).resolved;
-    const browser = await chromium.launch();
-    try {
-      const ctx = await browser.newContext();
-      await ctx.route("**/*", (route) => route.abort());
-      return await renderScene(resolved, { page: await ctx.newPage() });
-    } finally {
-      await browser.close();
-    }
+  /** Render the same layer geometry with and without the adjustment, decoded.
+   *  `a` is the unadjusted render, `b` the adjusted one. */
+  async function renderPair(layerOver: Record<string, unknown>) {
+    const { adjust, ...baseOver } = layerOver;
+    const a = (await load(maskScene([kenLayer(baseOver)]))).resolved;
+    const b = (await load(maskScene([kenLayer(layerOver)]))).resolved;
+    return {
+      a: decodePng((await renderScene(a, { page })).png),
+      b: decodePng((await renderScene(b, { page })).png),
+    };
   }
 
   it("changes every masked pixel and leaves every pixel outside the mask byte-identical", async () => {
-    const base = await renderPair(undefined);
-    const red = await renderPair({ mask: "shirt", color: "#ff0000" });
-    const a = decodePng(base.png);
-    const b = decodePng(red.png);
+    const { a, b } = await renderPair({ adjust: { mask: "shirt", color: "#ff0000" } });
 
     // Outside the mask: byte-identical to the unadjusted render.
     expect(diffCount(a, b) - 16).toBe(0); // 16 = the 4×4 masked region
@@ -242,8 +253,49 @@ describe("masked render — local colorization, not a flood fill", () => {
     expect(lum(b.px(2, 2))).toBeLessThan(lum(b.px(4, 2)));
   }, 30000);
 
+  it("keeps mask/img alignment on a non-square box with fit: contain", async () => {
+    // A 16×8 box at (100, 60): `contain` scales the square 8×8 asset to 8×8
+    // and centers it at box-local x 4..12 — canvas x 104..112, y 60..68. The
+    // shirt (source 2..6) lands at canvas 106..110 × 62..66. Misaligned
+    // mask-size would repaint red backdrop or empty box area instead.
+    const geo = { position: { x: 100, y: 60 }, size: { width: 16, height: 8 }, fit: "contain" as const };
+    const { a, b } = await renderPair({ ...geo, adjust: { mask: "shirt", color: "#ff0000" } });
+    // Exactly the 16 displayed shirt pixels change — nothing else on canvas.
+    expect(diffCount(a, b)).toBe(16);
+    for (let y = 0; y < 720; y++)
+      for (let x = 0; x < 1280; x++) {
+        const inShirt = x >= 106 && x < 110 && y >= 62 && y < 66;
+        if (!inShirt) expect(b.px(x, y)).toEqual(a.px(x, y));
+        else expect(b.px(x, y).join()).not.toBe(a.px(x, y).join());
+      }
+  }, 30000);
+
+  it("keeps mask/img alignment with crop and adjust", async () => {
+    // Crop keeps the source's top-left quadrant. The box is exactly the crop
+    // window's size, so the scale is 1 and mask edges stay crisp — the strict
+    // byte-identical invariant holds. (At scale ≠ 1 the browser resamples the
+    // mask like the image, so mask-edge display pixels blend partial
+    // selection — documented in ADR-0007; the selection is defined on the
+    // asset's pixel grid.) The cropped-overlay branch must take the img's
+    // exact geometry: a wrong box would compress the mask into the window and
+    // colorize the wrong pixels.
+    const { a, b } = await renderPair({
+      position: { x: 200, y: 300 },
+      size: { width: 4, height: 4 },
+      crop: { left: 0, top: 0, right: 50, bottom: 50 },
+      adjust: { mask: "shirt", color: "#ff0000" },
+    });
+    // Visible shirt: source 2..4 of the 0..4 window → canvas 202..204 × 302..304.
+    expect(diffCount(a, b)).toBe(4);
+    for (let y = 0; y < 720; y++)
+      for (let x = 0; x < 1280; x++) {
+        const inShirt = x >= 202 && x < 204 && y >= 302 && y < 304;
+        if (!inShirt) expect(b.px(x, y)).toEqual(a.px(x, y));
+        else expect(b.px(x, y).join()).not.toBe(a.px(x, y).join());
+      }
+  }, 30000);
+
   it("two Variants colorize differently over the same unchanged Creator Asset", async () => {
-    const { chromium } = await import("playwright");
     const raw = maskScene([kenLayer()]);
     raw.variants = {
       red: { changes: [{ layer: "ken", set: { adjust: { mask: "shirt", color: "#ff0000" } } }] },
@@ -262,22 +314,14 @@ describe("masked render — local colorization, not a flood fill", () => {
     // Same unchanged asset identity under both Variants.
     expect(red.assets.get("ken")!.hash).toBe(blue.assets.get("ken")!.hash);
 
-    const browser = await chromium.launch();
-    try {
-      const ctx = await browser.newContext();
-      await ctx.route("**/*", (route) => route.abort());
-      const page = await ctx.newPage();
-      const r = decodePng((await renderScene(red, { page })).png);
-      const bl = decodePng((await renderScene(blue, { page })).png);
-      // Masked pixels differ between the color variants…
-      for (let y = 2; y <= 5; y++)
-        for (let x = 2; x <= 5; x++) expect(r.px(x, y).join()).not.toBe(bl.px(x, y).join());
-      // …and every pixel outside the mask is identical between them.
-      expect(diffCount(r, bl) - 16).toBe(0);
-    } finally {
-      await browser.close();
-    }
-  }, 30000);
+    const r = decodePng((await renderScene(red, { page })).png);
+    const bl = decodePng((await renderScene(blue, { page })).png);
+    // Masked pixels differ between the color variants…
+    for (let y = 2; y <= 5; y++)
+      for (let x = 2; x <= 5; x++) expect(r.px(x, y).join()).not.toBe(bl.px(x, y).join());
+    // …and every pixel outside the mask is identical between them.
+    expect(diffCount(r, bl) - 16).toBe(0);
+  }, 60000);
 });
 
 // --- manifest and rerender -------------------------------------------------
@@ -390,6 +434,41 @@ describe("mask resolution — Creator Asset named masks through the one contract
     const hit = errors.find((e) => e.path === "layers[0].adjust.mask");
     expect(hit).toBeDefined();
     expect(hit!.message).toMatch(/missing-mask/);
+  });
+
+  it("fails when the mask reference names a non-mask asset (kind-restricted)", async () => {
+    // A cutout id in a masks map is library state that failed validation —
+    // resolution is kind-restricted, so it can never serve as a mask (and a
+    // trial cutout can never enter a render unmarked this way, PROD-1).
+    const libRoot = path.dirname(path.dirname(fix.lib.cutouts[0]!.imagePath));
+    const lib5Root = path.join(path.dirname(libRoot), "library5");
+    await mkdir(path.join(lib5Root, "cutouts", "ken"), { recursive: true });
+    await mkdir(path.join(lib5Root, "cutouts", "ken-copy"), { recursive: true });
+    await writeFile(path.join(lib5Root, "cutouts", "ken", "cutout.png"), cutoutPng);
+    await writeFile(
+      path.join(lib5Root, "cutouts", "ken", "meta.json"),
+      JSON.stringify({
+        kind: "cutout",
+        id: "ken",
+        tags: [],
+        approval: "approved",
+        masks: { shirt: "ken-copy" },
+      }),
+    );
+    await writeFile(path.join(lib5Root, "cutouts", "ken-copy", "cutout.png"), cutoutPng);
+    await writeFile(
+      path.join(lib5Root, "cutouts", "ken-copy", "meta.json"),
+      JSON.stringify({ kind: "cutout", id: "ken-copy", tags: [], approval: "approved" }),
+    );
+    const lib5 = await scanLibrary(lib5Root);
+    const result = await loadScene(fix.projectRoot, async () => lib5, maskScene([
+      kenLayer({ adjust: { mask: "shirt", color: "#ff0000" } }),
+    ]));
+    expect(result.ok).toBe(false);
+    const errors = (result as { ok: false; errors: { path: string; message: string }[] }).errors;
+    const hit = errors.find((e) => e.path === "layers[0].adjust.mask");
+    expect(hit).toBeDefined();
+    expect(hit!.message).toMatch(/unknown library mask "ken-copy"/);
   });
 
   it("fails on a non-PNG mask (dimension checks need raster bytes)", async () => {
