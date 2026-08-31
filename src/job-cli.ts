@@ -83,8 +83,12 @@ plates options
 objects options
   Same as plates minus --zone. The subject must name an isolated non-text
   object — official logos and final text are rejected as targets (logos come
-  from sourced Assets, text is rendered locally; ADR-0001). Adopted Object
-  Assets carry a verified true-alpha matte; an opaque candidate is refused.
+  from sourced Assets, text is rendered locally; ADR-0001). Every object
+  candidate goes through the matting pass — the same local BiRefNet
+  segmenter as creators (ADR-0006), local and unbilled — and adoption adopts
+  that matte, since the models return opaque RGB. A natively isolated
+  candidate is kept as-is. Adopted Object Assets carry a verified true-alpha
+  matte; an opaque candidate with no matte is refused.
 
 creators options
   Same as plates minus --zone. Requires at least one identity reference —
@@ -384,7 +388,7 @@ async function startJob(
     kind === "plate"
       ? await runPlateJob(deps.jobsRoot, jobId, { kind, zone: fields.zone ?? "left", ...common }, deps.generate)
       : kind === "object"
-        ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject)
+        ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject, deps.matte)
         : await runCreatorJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateCreator, deps.matte);
   const runIndex = job.runs.length - 1;
   return ok({
@@ -455,8 +459,8 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
       deps.jobsRoot,
       first,
       generator,
-      // Only creator runs are matted; the engine is inert for other kinds.
-      recorded.request.kind === "creator" ? deps.matte : undefined,
+      // Creator and object runs are matted; the pass is inert for plates.
+      recorded.request.kind !== "plate" ? deps.matte : undefined,
     );
     const runIndex = job.runs.length - 1;
     return ok({

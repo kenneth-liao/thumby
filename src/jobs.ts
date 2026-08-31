@@ -321,9 +321,10 @@ export async function runObjectJob(
   jobId: string,
   request: ObjectJobRequest,
   generate: ObjectGenerator,
+  matte: MatteEngine,
 ): Promise<GenerationJob> {
   validateObjectSubject(request.subject);
-  return runJob(jobRoot, jobId, request, lift("object", generate));
+  return runJob(jobRoot, jobId, request, lift("object", generate), matte);
 }
 
 /**
@@ -391,8 +392,9 @@ export function rerunObjectJob(
   jobRoot: string,
   jobId: string,
   generate: ObjectGenerator,
+  matte: MatteEngine,
 ): Promise<GenerationJob> {
-  return rerunJob(jobRoot, jobId, lift("object", generate));
+  return rerunJob(jobRoot, jobId, lift("object", generate), matte);
 }
 
 export function rerunCreatorJob(
@@ -439,7 +441,10 @@ async function recordRun(
     await writeFile(path.join(dir, file), candidate.bytes);
     const record: JobCandidate = { contentHash, file, mediaType: candidate.mediaType };
 
-    if (matte && request.kind === "creator") {
+    // Creators and objects both leave the model opaque (measured: gpt-image-2
+    // paints even a checkerboard backdrop rather than returning alpha), so
+    // both kinds run the pass; plates are opaque backdrops by contract.
+    if (matte && request.kind !== "plate") {
       try {
         const result = await matteCandidate(candidate.bytes, file, matte);
         warnings.push(...result.warnings);
@@ -651,6 +656,33 @@ export async function adoptCandidate(
   }
 
   if (job.kind === "object") {
+    // An object candidate is adopted as its matte when the run's matting pass
+    // produced one (REQ-015's segmentation route) — the raw candidate is
+    // opaque by measurement. Without a matte only a natively isolated
+    // candidate qualifies.
+    if (cand.matte) {
+      const matteBytes = await readFile(path.join(jobDir(jobRoot, jobId), cand.matte.file));
+      const matteActual = sha256(matteBytes);
+      if (matteActual !== cand.matte.contentHash)
+        throw new Error(
+          `Matte file "${cand.matte.file}" no longer matches its recorded identity (sha-256 ${cand.matte.contentHash}, actual ${matteActual}) — it cannot be adopted`,
+        );
+      // The same gate as the native route, applied to the bytes that actually
+      // enter the library.
+      verifyTrueAlpha(matteBytes, cand.matte.file);
+      const imagePath = await writeObjectAsset(opts.libraryRoot, assetId, matteBytes, {
+        kind: "object",
+        id: assetId,
+        name: opts.name ?? assetId,
+        tags: opts.tags ?? [],
+        ...provenance,
+        matting: "true-alpha",
+        matteEngine: cand.matte.engine,
+      });
+      // The identity of what was written is the matte's, not the candidate's —
+      // the candidate lineage lives in `adoptedFrom` and nowhere else.
+      return { assetId, contentHash: cand.matte.contentHash, imagePath, adoptedFrom };
+    }
     // The alpha gate runs before any write: an opaque candidate is exactly
     // the chroma-key shape REQ-015 forbids, and it must not enter the library.
     verifyTrueAlpha(bytes, cand.file);

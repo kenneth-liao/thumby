@@ -3,6 +3,7 @@ import { mkdtemp, rm, readFile, mkdir, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PlateGenerator, ObjectGenerator } from "../src/jobs.js";
+import type { MatteEngine } from "../src/matte.js";
 import { scanLibrary } from "../src/assets.js";
 import { run as cliRun, PRODUCTION_GENERATOR, generateOptionsFor } from "../src/job-cli.js";
 import { encodePng } from "./png.js";
@@ -38,7 +39,12 @@ function run(
   generate: PlateGenerator = fakeGen,
   generateObject: ObjectGenerator = fakeObjectGen,
 ) {
-  return cliRun(args, { generate, generateObject, jobsRoot, libraryRoot });
+  // The harness matte is a tripwire: the fake object candidates are
+  // native-alpha, so the matting pass must never call it.
+  const matte: MatteEngine = async () => {
+    throw new Error("test engine must not run — candidates are native-alpha");
+  };
+  return cliRun(args, { generate, generateObject, matte, jobsRoot, libraryRoot });
 }
 
 const PLATES_ARGS = ["plates", "neon server room", "--zone", "left", "--count", "2"];

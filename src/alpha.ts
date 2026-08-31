@@ -35,7 +35,7 @@ function refuse(label: string, why: string): never {
     `Candidate "${label}" cannot qualify: ${why}\n` +
       `Adoption requires true alpha (a transparent-background PNG with a real matte) — ` +
       `RGB chroma-key color distance alone cannot qualify an output (REQ-015, REQ-017). ` +
-      `Run the candidate through the segmentation matting pass and adopt the matte.`,
+      `Rerun the job ("jobs rerun <jobId>") so the matting pass mattes fresh candidates, or adopt a candidate that has one.`,
   );
 }
 
