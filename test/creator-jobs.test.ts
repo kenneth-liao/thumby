@@ -15,7 +15,7 @@ import {
   type JobGenerator,
 } from "../src/jobs.js";
 import { scanLibrary, writePlateAsset } from "../src/assets.js";
-import { composeMatte, MattingFailure, type MatteEngine } from "../src/matte.js";
+import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
 let root: string;
@@ -73,8 +73,6 @@ const fakeGen: JobGenerator = async (req) => ({
 const fakeMatte: MatteEngine = async ({ bytes, label }) => ({
   bytes: composeMatte(bytes, MASK_PNG, label),
   engine: "test/segmentation",
-  costUsd: 0.034,
-  costMeasured: true,
 });
 
 const baseRequest = (): CreatorJobRequest => ({
@@ -232,8 +230,9 @@ describe("the matting pass (REQ-017)", () => {
       // The raw candidate is exactly what the model returned — opaque.
       expect(cand.contentHash).not.toBe(cand.matte!.contentHash);
     }
-    // The run's cost covers the matting calls too, not just generation.
-    expect(run.costUsd).toBeCloseTo(0.067 * 2 + 0.034 * 2, 6);
+    // Matting is local and unbilled: the run's cost is generation only.
+    expect(run.costUsd).toBeCloseTo(0.067 * 2, 6);
+    expect(run.costMeasured).toBe(true);
   });
 
   test("keeps a natively isolated candidate's own bytes — no second model call", async () => {
@@ -252,7 +251,6 @@ describe("the matting pass (REQ-017)", () => {
     expect(engineCalls).toBe(0);
     expect(cand.matte!.engine).toBe("native-alpha");
     expect(cand.matte!.contentHash).toBe(cand.contentHash);
-    expect(job.runs[0]!.costUsd).toBeCloseTo(0.067, 6);
   });
 
   test("records why a candidate could not be isolated instead of discarding the run", async () => {
@@ -263,29 +261,21 @@ describe("the matting pass (REQ-017)", () => {
     const cand = job.runs[0]!.candidates[0]!;
     expect(cand.matte).toBeUndefined();
     expect(job.runs[0]!.warnings.join("\n")).toMatch(/matte:.*could not be isolated/i);
-    // Nothing reached a billable call, so the run's cost is generation only.
-    expect(job.runs[0]!.costUsd).toBeCloseTo(0.067, 6);
-    expect(job.runs[0]!.costMeasured).toBe(true);
   });
 
-  test("charges a failed matting attempt that was already billed (RE-2)", async () => {
-    // The mask call returned and is billed; the matte is then refused. The
-    // run must still report what it spent — and that part is unmeasured.
-    const billedFailure: MatteEngine = async () => {
-      throw new MattingFailure("mask model returned no image", {
-        costUsd: 0.034,
-        costMeasured: false,
-        warnings: ["nano-lite: aspectRatio ignored"],
-      });
+  test("a failed matting attempt costs the run nothing — the pass is local (RE-2)", async () => {
+    // Nothing about matting is billed, so there is no spend for a failure to
+    // lose and no unmeasured part to hide: the whole class of bug is gone.
+    const failing: MatteEngine = async () => {
+      throw new Error("the local matting model is unusable: the weights file is not there");
     };
-    const job = await runCreatorJob(jobRoot, "creator-billed-fail", { ...baseRequest(), count: 1 }, fakeGen, billedFailure);
+    const job = await runCreatorJob(jobRoot, "creator-local-fail", { ...baseRequest(), count: 1 }, fakeGen, failing);
     const run = job.runs[0]!;
     expect(run.candidates[0]!.matte).toBeUndefined();
-    expect(run.costUsd).toBeCloseTo(0.067 + 0.034, 6);
-    // A run that dropped the unmeasured part would falsely claim measured cost.
-    expect(run.costMeasured).toBe(false);
-    expect(run.warnings).toContain("nano-lite: aspectRatio ignored");
-    expect(run.warnings.join("\n")).toMatch(/could not be isolated/i);
+    expect(run.costUsd).toBeCloseTo(0.067, 6);
+    expect(run.costMeasured).toBe(true);
+    // The fix-it message reaches the run record, not just a console somewhere.
+    expect(run.warnings.join("\n")).toMatch(/weights file is not there/i);
   });
 });
 

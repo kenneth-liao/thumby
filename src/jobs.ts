@@ -19,7 +19,7 @@ import type { TextZone } from "./generate.js";
 import { resolveModel } from "./models.js";
 import { extensionFor, writePlateAsset, writeObjectAsset, writeCreatorAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
-import { matteCandidate, MattingFailure, UNBILLED, type MatteEngine } from "./matte.js";
+import { matteCandidate, type MatteEngine } from "./matte.js";
 
 /**
  * Job record schema versions. v1 is plate-only; object-capable jobs are v2;
@@ -404,7 +404,8 @@ export function rerunCreatorJob(
  *
  * A matting failure never discards the run: the generation is already paid
  * for and the candidate is still likeness evidence, so the candidate is
- * recorded without a matte and the reason is recorded as a run warning.
+ * recorded without a matte and the reason is recorded as a run warning. The
+ * pass is local, so a failed attempt costs nothing (ADR-0006).
  * Adoption then refuses it by name — the failure surfaces at the point of
  * use instead of being silently swallowed here.
  */
@@ -425,8 +426,6 @@ async function recordRun(
 
   const warnings = [...batch.warnings];
   const candidates: JobCandidate[] = [];
-  let matteCostUsd = 0;
-  let matteCostMeasured = true;
 
   for (const candidate of batch.candidates) {
     const contentHash = sha256(candidate.bytes);
@@ -437,8 +436,6 @@ async function recordRun(
     if (matte && request.kind === "creator") {
       try {
         const result = await matteCandidate(candidate.bytes, file, matte);
-        matteCostUsd += result.costUsd;
-        matteCostMeasured &&= result.costMeasured;
         warnings.push(...result.warnings);
         // Content-addressed like the candidate itself, in its own directory:
         // a matte is derived output, never a candidate in the lineage.
@@ -448,13 +445,6 @@ async function recordRun(
         await writeFile(path.join(dir, matteFile), result.bytes);
         record.matte = { contentHash: matteHash, file: matteFile, engine: result.engine };
       } catch (err) {
-        // A failed attempt still spent what it spent: its cost and the mask
-        // call's own warnings are recorded, so the run never understates its
-        // cost or claims an unmeasured part was measured.
-        const billing = err instanceof MattingFailure ? err.billing : UNBILLED;
-        matteCostUsd += billing.costUsd;
-        matteCostMeasured &&= billing.costMeasured;
-        warnings.push(...billing.warnings);
         warnings.push(
           `matte: candidate ${contentHash.slice(0, 12)} could not be isolated — ${(err as Error).message}`,
         );
@@ -467,10 +457,10 @@ async function recordRun(
     ranAt,
     model: spec.id,
     fullPrompt: batch.fullPrompt,
-    // The matting pass is billed work too — a run cost that counted only the
-    // generation would understate what the run actually spent.
-    costUsd: spec.approxCost * batch.candidates.length + matteCostUsd,
-    costMeasured: spec.costMeasured && matteCostMeasured,
+    // Generation is the only billed work in a run: the matting pass runs
+    // locally, so it has no cost to add and none to lose when it fails.
+    costUsd: spec.approxCost * batch.candidates.length,
+    costMeasured: spec.costMeasured,
     warnings: [...new Set(warnings)],
     candidates,
   };

@@ -1,11 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import {
-  composeMatte,
-  matteCandidate,
-  MattingFailure,
-  NATIVE_ALPHA,
-  type MatteEngine,
-} from "../src/matte.js";
+import { composeMatte, matteCandidate, NATIVE_ALPHA, type MatteEngine } from "../src/matte.js";
 import { verifyTrueAlpha } from "../src/alpha.js";
 import { encodePng, decodePng } from "./png.js";
 
@@ -41,13 +35,8 @@ const NATIVE_ALPHA_PNG = encodePng(16, 16, (x, y) =>
   x < 8 && y < 8 ? [255, 0, 0, 255] : [0, 0, 0, 0],
 );
 
-const engineOf = (mask: Uint8Array, engine = "test/mask-model"): MatteEngine =>
-  async ({ bytes, label }) => ({
-    bytes: composeMatte(bytes, mask, label),
-    engine,
-    costUsd: 0.067,
-    costMeasured: false,
-  });
+const engineOf = (mask: Uint8Array, engine = "test/segmenter"): MatteEngine =>
+  async ({ bytes, label }) => ({ bytes: composeMatte(bytes, mask, label), engine });
 
 describe("composeMatte", () => {
   test("carries the candidate's colour with alpha taken from the mask", () => {
@@ -98,16 +87,23 @@ describe("matteCandidate", () => {
     const result = await matteCandidate(NATIVE_ALPHA_PNG, "native.png", engine);
     expect(calls).toBe(0);
     expect(result.engine).toBe(NATIVE_ALPHA);
-    expect(result.costUsd).toBe(0);
     expect(Buffer.from(result.bytes)).toEqual(Buffer.from(NATIVE_ALPHA_PNG));
   });
 
-  test("mattes an opaque candidate through the engine and records its cost", async () => {
+  test("mattes an opaque candidate through the engine and names it", async () => {
     const result = await matteCandidate(OPAQUE_SUBJECT, "cand.png", engineOf(MASK));
-    expect(result.engine).toBe("test/mask-model");
-    expect(result.costUsd).toBe(0.067);
-    expect(result.costMeasured).toBe(false);
+    expect(result.engine).toBe("test/segmenter");
     expect(verifyTrueAlpha(result.bytes, "cand.png").opaquePx).toBe(64);
+  });
+
+  test("carries an engine's warnings onto the run — e.g. a CoreML fallback", async () => {
+    const noisy: MatteEngine = async ({ bytes, label }) => ({
+      bytes: composeMatte(bytes, MASK, label),
+      engine: "test/segmenter",
+      warnings: ["matte: CoreML is unavailable — the segmenter ran on CPU"],
+    });
+    const result = await matteCandidate(OPAQUE_SUBJECT, "cand.png", noisy);
+    expect(result.warnings).toEqual(["matte: CoreML is unavailable — the segmenter ran on CPU"]);
   });
 
   test("refuses a degenerate matte at the matting boundary, never downstream", async () => {
@@ -118,36 +114,6 @@ describe("matteCandidate", () => {
     await expect(matteCandidate(OPAQUE_SUBJECT, "full.png", engineOf(ALL_WHITE))).rejects.toThrow(
       /effectively opaque|transparent/i,
     );
-  });
-
-  test("keeps the billing of a call that failed after it was billed (RE-2)", async () => {
-    // The mask call returned (and is billed); composition or verification
-    // then fails. The cost and the call's warnings must survive the failure.
-    const billed = { costUsd: 0.034, costMeasured: false, warnings: ["nano-lite: size ignored"] };
-    const failsAfterBilling: MatteEngine = async ({ bytes, label }) => ({
-      bytes: composeMatte(bytes, ALL_BLACK, label), // a degenerate matte — refused downstream
-      engine: "test/mask-model",
-      ...billed,
-    });
-    const err = await matteCandidate(OPAQUE_SUBJECT, "cand.png", failsAfterBilling).catch((e) => e);
-    expect(err).toBeInstanceOf(MattingFailure);
-    expect((err as MattingFailure).billing).toEqual(billed);
-
-    // An engine that throws with its own billing keeps it too.
-    const throwsBilled: MatteEngine = async () => {
-      throw new MattingFailure("mask model returned no image", billed);
-    };
-    const thrown = await matteCandidate(OPAQUE_SUBJECT, "cand.png", throwsBilled).catch((e) => e);
-    expect((thrown as MattingFailure).billing).toEqual(billed);
-  });
-
-  test("charges nothing for a failure that never reached a billable call", async () => {
-    const dead: MatteEngine = async () => {
-      throw new Error("connection refused");
-    };
-    const err = await matteCandidate(OPAQUE_SUBJECT, "cand.png", dead).catch((e) => e);
-    expect(err).toBeInstanceOf(MattingFailure);
-    expect((err as MattingFailure).billing).toEqual({ costUsd: 0, costMeasured: true, warnings: [] });
   });
 
   test("refuses an engine that returns bytes without a real alpha channel", async () => {

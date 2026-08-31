@@ -16,6 +16,12 @@ one you like without paying for generation again.
 bun install
 bunx playwright install chromium      # once
 cp .env.local.example .env.local      # then paste your key
+
+# once, only if you generate Creator Assets — the local matting model (~490 MB,
+# gitignored, pinned by sha-256 in src/segment.ts)
+mkdir -p models
+curl -L -o models/birefnet-fp16.onnx \
+  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
 ```
 
 Key comes from **vercel.com → AI Gateway → API Keys**. Bun loads `.env.local`
@@ -205,14 +211,25 @@ bun run jobs review <jobId>                   # contact sheet, mattes, face deta
 bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
 ```
 
-Isolation is a **stage of the job**, not a prompt instruction: the tested nano
-recipe returns opaque RGB (measured — see *Isolation is a matting pass* in
-`docs/asset-requirements.md`), so every candidate goes through the **matting
-pass** as part of its run. An engine predicts a subject mask and the mask
-becomes the candidate's alpha channel locally — segmentation, never colour
-distance — and the resulting matte is recorded beside the candidate under its
-own content identity. A candidate that already carries a real matte is kept
-as-is (`native-alpha`), with no second call.
+Isolation is a **stage of the job**, and it runs **locally**: the tested nano
+recipe returns opaque RGB (measured — see *Isolation is a local matting pass*
+in `docs/asset-requirements.md`), so every candidate goes through the
+**matting pass** as part of its run. A BiRefNet ONNX segmenter running on this
+machine (`onnxruntime-node`, CoreML on Apple silicon) predicts the subject
+mask, and the mask becomes the candidate's alpha channel — segmentation, never
+colour distance, and nothing billed. A candidate that already carries a real
+matte is kept as-is (`native-alpha`), with no inference at all.
+
+The weights are not in the repo. First use fetches them once into the
+gitignored `models/` cache (~490 MB), pinned by filename and sha-256; a
+missing or mismatched file stops the job with the exact command to fix it —
+the pass never silently skips isolation:
+
+```bash
+mkdir -p models
+curl -L -o models/birefnet-fp16.onnx \
+  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
+```
 
 `jobs review` shows each matte on a checkerboard beside the candidate it came
 from, and says plainly when a candidate has none. `jobs adopt` writes the
@@ -221,9 +238,9 @@ actually enter the library — always as a `trial` Cutout Asset; approval is the
 human likeness gate, never automatic (DEC-004). The adopted Asset records its
 `matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
 Asset's content identity is derived from its bytes, never stored (ADR-0002),
-and `jobs adopt` reports that identity — the bytes it wrote. Reruns append candidates under the job lineage; nothing is ever
-overwritten. The shipped engine predicts the mask through the Gateway; a local
-BiRefNet / BEN2 / RMBG-class runner satisfies the same seam (ADR-0006).
+and `jobs adopt` reports that identity — the bytes it wrote. Reruns append
+candidates under the job lineage; nothing is ever overwritten. Likeness
+generation stays on the Gateway; only isolation is local (ADR-0006).
 
 The green-screen route — a `#00FF00` background pinned in-prompt, keyed with
 `src/chromakey.ts`, added with `bun run library add-cutout` — stays available

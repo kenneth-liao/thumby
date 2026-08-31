@@ -128,7 +128,7 @@ The manual rules that predate the job workflow and still apply:
   compound drift. **Never generate the likeness from text alone.** (Encoded:
   the request boundary refuses creator jobs with no identity anchor.)
 
-### Isolation is a matting pass, not a prompt (measured 2026-08-29)
+### Isolation is a local matting pass (measured 2026-08-29, wired 2026-08-30)
 
 The tested nano recipe does **not** produce usable alpha. Measured through the
 recorded creator-job workflow (`int1-alpha-demo`, nano-2, 3 anchors, true
@@ -138,21 +138,37 @@ imitating a transparency indicator** instead of carrying an alpha channel.
 Adoption's true-alpha gate refuses both by design — RGB chroma-key distance
 cannot qualify an output, and a painted checkerboard is not a matte.
 
-So isolation is a **stage of the job**, not an instruction in the prompt
-(ADR-0006). Every creator candidate goes through the **matting pass**: an
-engine predicts a subject mask, the mask becomes the candidate's alpha channel
-locally, and the resulting matte is recorded beside the candidate under its own
-content identity. `bun run jobs review` shows each matte on a checkerboard
-next to the candidate it came from, and `bun run jobs adopt` writes the
-**matte** — never the opaque candidate — as a trial Cutout Asset. A candidate
-the pass could not isolate is refused at adoption, and the run's warnings say
-why.
+So isolation is a **stage of the job**, and it runs **on this machine**
+(ADR-0006). Every creator candidate goes through the **matting pass**: a
+BiRefNet ONNX segmenter (MIT, fp16) predicts the subject mask through
+`onnxruntime-node` — CoreML on Apple silicon, CPU fallback with a recorded
+warning — and the mask becomes the candidate's alpha channel locally. The
+matte is recorded beside the candidate under its own content identity.
+`bun run jobs review` shows each matte on a checkerboard next to the candidate
+it came from, and `bun run jobs adopt` writes the **matte** — never the opaque
+candidate — as a trial Cutout Asset. A candidate the pass could not isolate is
+refused at adoption, and the run's warnings say why.
 
-The shipped engine predicts the mask through the Gateway (`nano-lite`, one
-call per candidate, ~$0.034 — recorded in the run's cost). A local
-BiRefNet / BEN2 / RMBG-class runner satisfies the same seam and drops in
-without touching the lifecycle or the gate; matte quality per engine is worth
-measuring on real candidates and recording here.
+Likeness generation stays on the Gateway (`nano-2`); only isolation is local.
+Nothing about matting is billed, so a run's recorded cost is generation only.
+
+**Weights.** Not in the repo: the pinned file is cached under `models/`
+(gitignored; `THUMBY_MODEL_DIR` overrides it) and verified by sha-256 once per
+process. Missing or mismatched weights stop the job with the path, the pin,
+and the fetch command — the pass never silently skips isolation.
+
+| what | value |
+|---|---|
+| file | `models/birefnet-fp16.onnx` (~490 MB) |
+| sha-256 | `3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09` |
+| source | `onnx-community/BiRefNet-ONNX`, `onnx/model_fp16.onnx` (MIT) |
+| input | 1024×1024, ImageNet mean/std, per the repo's `preprocessor_config.json` |
+
+**Measured on the recorded candidates (2026-08-30, M4 Pro, CoreML):** both
+`int1-alpha-demo` candidates (1195×896 opaque RGB) matted in **7–10 s** each
+to ~80% transparent / ~19% opaque subject. Inspected at 3× on the hairline:
+clean soft edge, no halo, no colour fringe — the defect the green-screen route
+has. Adoption accepts these; the earlier gap is closed.
 
 The older green-screen route — background pinned to **"one single solid
 #00FF00 edge to edge — no gradient, no vignette, no corners"**, keyed with

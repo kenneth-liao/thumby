@@ -12,61 +12,28 @@
  *   - `composeMatte` — offline, deterministic pixel work: a predicted mask
  *     becomes the candidate's alpha channel. No network, no model.
  *   - `matteCandidate` — the policy: a candidate that already carries a real
- *     matte is kept as-is (the native-alpha route, no model call and no
- *     cost); anything else goes through the injected engine, and the result
- *     is verified against the adoption gate *here*, at the boundary, so a
+ *     matte is kept as-is (the native-alpha route, no inference at all);
+ *     anything else goes through the injected engine, and the result is
+ *     verified against the adoption gate *here*, at the boundary, so a
  *     degenerate matte can never be recorded as one.
  *
- * The engine is a seam: the shipped one predicts the mask through the
- * Gateway (`segmentationMatteEngine` in generate.ts), and a local
- * BiRefNet/BEN2/RMBG-class runner can replace it without touching the
- * lifecycle, the gate, or the Job record.
+ * The engine is a seam. The shipped one runs a BiRefNet ONNX segmenter
+ * **locally** (`src/segment.ts`) — no model call leaves the machine at
+ * matting time, so a matting attempt spends nothing and a failed one has no
+ * cost to lose (ADR-0006). Tests inject their own engine.
  */
 import { decodePng, encodePngRgba, PngParseError } from "./png.js";
 import { verifyTrueAlpha } from "./alpha.js";
 
-/**
- * What a matting attempt spent, whether or not it produced a usable matte.
- * A model call that has already returned is billed even when composition or
- * verification then fails, so this travels with the failure as well as with
- * the success — a run that dropped it would understate its own cost and could
- * claim the cost was measured when the unmeasured part simply vanished.
- */
-export interface MatteBilling {
-  costUsd: number;
-  costMeasured: boolean;
-  warnings: string[];
-}
-
-/** No call was made (or none had returned): nothing was spent. */
-export const UNBILLED: MatteBilling = { costUsd: 0, costMeasured: true, warnings: [] };
-
-/**
- * Every matting failure is this error, so a caller reads billing from one
- * shape instead of guessing which failures cost money.
- */
-export class MattingFailure extends Error {
-  constructor(
-    message: string,
-    readonly billing: MatteBilling,
-    options?: { cause?: unknown },
-  ) {
-    super(message, options);
-    this.name = "MattingFailure";
-  }
-}
-
 /** Engine name recorded when the candidate's own alpha channel is the matte. */
 export const NATIVE_ALPHA = "native-alpha" as const;
 
-/** What an engine returns: the matted bytes plus what it cost to produce them. */
+/** What an engine returns: the matted bytes and how they were produced. */
 export interface MatteEngineResult {
   bytes: Uint8Array;
   /** The engine that produced the matte — recorded on the candidate and the adopted Asset. */
   engine: string;
-  costUsd?: number;
-  costMeasured?: boolean;
-  /** Anything the engine's own model call reported — recorded on the run. */
+  /** Anything worth recording on the run (e.g. the segmenter fell back to CPU). */
   warnings?: string[];
 }
 
@@ -76,9 +43,10 @@ export type MatteEngine = (input: {
   label: string;
 }) => Promise<MatteEngineResult>;
 
-export interface MatteOutcome extends MatteBilling {
+export interface MatteOutcome {
   bytes: Uint8Array;
   engine: string;
+  warnings: string[];
 }
 
 /** Rec. 709 luminance — a predicted mask is read as brightness, white = subject. */
@@ -134,8 +102,8 @@ function read(bytes: Uint8Array, what: string) {
  * Produce the adoptable matte for one candidate.
  *
  * Native alpha first: when a model does return a real matte, that matte is
- * the candidate's own bytes — no second model call, no cost, and the exact
- * bytes the human reviewed. Otherwise the engine runs, and its output must
+ * the candidate's own bytes — no inference at all, and the exact bytes the
+ * human reviewed. Otherwise the engine runs, and its output must
  * pass the same true-alpha gate adoption applies. Verifying here means a
  * matte that cuts away everything (or nothing) fails at the pass that
  * produced it, naming the engine, instead of surfacing later as a confusing
@@ -148,39 +116,19 @@ export async function matteCandidate(
 ): Promise<MatteOutcome> {
   try {
     verifyTrueAlpha(bytes, label);
-    return { bytes, engine: NATIVE_ALPHA, ...UNBILLED };
+    return { bytes, engine: NATIVE_ALPHA, warnings: [] };
   } catch {
     // Not natively isolated — the ordinary case, and exactly why this pass exists.
   }
 
-  let result: MatteEngineResult;
-  try {
-    result = await engine({ bytes, label });
-  } catch (err) {
-    // An engine that got far enough to be billed says so by throwing a
-    // MattingFailure; anything else (a connection error, a bad model id)
-    // never reached a billable call.
-    throw err instanceof MattingFailure
-      ? err
-      : new MattingFailure(`The matting pass failed for "${label}": ${(err as Error).message}`, UNBILLED, {
-          cause: err,
-        });
-  }
-
-  const billing: MatteBilling = {
-    costUsd: result.costUsd ?? 0,
-    costMeasured: result.costMeasured ?? false,
-    warnings: result.warnings ?? [],
-  };
+  const result = await engine({ bytes, label });
   try {
     verifyTrueAlpha(result.bytes, label);
   } catch (err) {
-    // The call already happened, so its cost and warnings survive the refusal.
-    throw new MattingFailure(
+    throw new Error(
       `The matting pass ("${result.engine}") did not produce a usable matte for "${label}": ${(err as Error).message}`,
-      billing,
       { cause: err },
     );
   }
-  return { bytes: result.bytes, engine: result.engine, ...billing };
+  return { bytes: result.bytes, engine: result.engine, warnings: result.warnings ?? [] };
 }

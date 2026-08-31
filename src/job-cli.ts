@@ -36,13 +36,8 @@ import {
   type ObjectJobRequest,
   type CreatorJobRequest,
 } from "./jobs.js";
-import {
-  generatePlates,
-  generateObjects,
-  generateCreators,
-  segmentationMatteEngine,
-  type GenerateOptions,
-} from "./generate.js";
+import { generatePlates, generateObjects, generateCreators, type GenerateOptions } from "./generate.js";
+import { localSegmentationMatteEngine } from "./segment.js";
 import type { MatteEngine } from "./matte.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL } from "./models.js";
@@ -98,12 +93,14 @@ creators options
   (source-to-edit). Defaults to nano-2, the measured likeness workhorse.
   References are attached identity-anchors-first and pose-last; the run's
   fullPrompt role-assigns every reference, so the provenance preserves each
-  declared role. Every candidate then goes through the matting pass — a
-  predicted segmentation mask applied locally as a true alpha channel, since
-  the models return opaque RGB (ADR-0006) — and "jobs adopt" writes that
-  matte, always as a trial Cutout Asset; approval is Kenneth's alone
-  (DEC-004). A candidate the pass could not isolate is refused at adoption
-  and the run's warnings say why.
+  declared role. Every candidate then goes through the matting pass — a local
+  BiRefNet segmenter predicts the subject mask and it becomes the candidate's
+  alpha channel, since the models return opaque RGB (ADR-0006) — and
+  "jobs adopt" writes that matte, always as a trial Cutout Asset; approval is
+  Kenneth's alone (DEC-004). The pass is local and unbilled: run cost is
+  generation only. First use needs the pinned weights cached under models/ —
+  a missing file fails loudly with the exact fetch command. A candidate the
+  pass could not isolate is refused at adoption and the run's warnings say why.
 
 A plate job is a bare backdrop by definition (REQ-014): no person, product,
 device, or independently editable foreground object is baked in — subjects
@@ -198,12 +195,13 @@ export const PRODUCTION_CREATOR_GENERATOR: CreatorGenerator = async (request: Cr
 };
 
 /**
- * The shipped matting pass (REQ-017): a segmentation matte predicted through
- * the Gateway and applied locally as a true alpha channel. It runs on every
- * creator candidate the model does not already return isolated, which —
- * measured — is all of them.
+ * The shipped matting pass (REQ-017, ADR-0006): a BiRefNet segmenter running
+ * locally predicts the subject mask, applied as a true alpha channel. It runs
+ * on every creator candidate the model does not already return isolated,
+ * which — measured — is all of them. Nothing leaves the machine, and nothing
+ * is billed.
  */
-export const PRODUCTION_MATTE_ENGINE: MatteEngine = segmentationMatteEngine();
+export const PRODUCTION_MATTE_ENGINE: MatteEngine = localSegmentationMatteEngine();
 
 export interface JobCliDeps {
   generate: PlateGenerator;

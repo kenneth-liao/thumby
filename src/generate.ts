@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveModel, type ModelSpec } from "./models.js";
-import { composeMatte, MattingFailure, type MatteEngine } from "./matte.js";
 
 export type TextZone = "left" | "right" | "bottom" | "none";
 
@@ -379,62 +378,6 @@ export async function loadCreatorRefs(ordered: CreatorRefInput[]): Promise<Loade
       return { path: r.path, bytes };
     }),
   );
-}
-
-// --- the matting pass's model call (REQ-017) ---------------------------------
-
-/**
- * The default matte model. The mask is a segmentation task, not a likeness
- * one, so it does not need the likeness workhorse's price: `nano-lite` is the
- * cheapest multimodal model that accepts the candidate as a reference image.
- */
-export const DEFAULT_MATTE_MODEL = "nano-lite";
-
-/**
- * Ask for a subject matte, not a cutout. The model returns a mask image; the
- * alpha channel is applied locally by `composeMatte`, so nothing here depends
- * on the model being able to emit transparency — which, measured, it cannot
- * (docs/asset-requirements.md).
- */
-const MASK_PROMPT = [
-  "Produce a segmentation matte for the person in the attached image.",
-  "",
-  "Output a single black-and-white mask image at exactly the same dimensions, framing, and alignment as the attached image — every pixel must line up with the original.",
-  "Pure white (#FFFFFF) everywhere the person is, including hair, glasses, and clothing. Pure black (#000000) everywhere else.",
-  "Use intermediate greys ONLY as a one-to-two-pixel soft edge along hair and silhouette boundaries.",
-  "CRITICAL: output the mask only — do not redraw, restyle, recolour, crop, or resize the person, do not paint a checkerboard or any transparency indicator, and render no text, numbers, or watermarks.",
-].join("\n");
-
-/**
- * The shipped matting engine: predict the subject mask through the Gateway,
- * then apply it locally as a true alpha channel. Segmentation, not chroma
- * key — no pixel is ever judged by its colour distance to a background.
- *
- * This is the seam's default, not its contract: a local BiRefNet/BEN2/
- * RMBG-class runner satisfies the same `MatteEngine` type and drops in
- * without touching the Job lifecycle or the adoption gate.
- */
-export function segmentationMatteEngine(model: string = DEFAULT_MATTE_MODEL): MatteEngine {
-  const spec = resolveModel(model);
-  return async ({ bytes, label }) => {
-    // Everything after this call is billed whether or not it succeeds: the
-    // mask call has returned, so its cost and warnings travel with any later
-    // failure rather than vanishing with it.
-    const { plates, warnings } = await runGeneration(spec, MASK_PROMPT, [{ bytes }], 1);
-    const billing = { costUsd: spec.approxCost, costMeasured: spec.costMeasured, warnings };
-    const mask = plates[0];
-    if (!mask)
-      throw new MattingFailure(`${spec.id} returned no matte mask for "${label}"`, billing);
-    try {
-      return { bytes: composeMatte(bytes, mask.bytes, label), engine: `segmentation:${spec.id}`, ...billing };
-    } catch (err) {
-      throw new MattingFailure(
-        `${spec.id} returned a mask that could not be applied to "${label}": ${(err as Error).message}`,
-        billing,
-        { cause: err },
-      );
-    }
-  };
 }
 
 /**

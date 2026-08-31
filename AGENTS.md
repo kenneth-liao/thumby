@@ -28,7 +28,12 @@ Single-context repo: `CONTEXT.md` and `docs/adr/` at the root. See `docs/agents/
   process is the stable shape; an isolated hang or browser crash is a known
   flake to re-run, not a new bug (#27).
 - Model costs: measure from real Gateway billing (`✓` figures only) — never copy from price tables.
-- The tool must keep working offline for everything except plate generation.
+- The tool must keep working offline for everything except generation itself.
+  Creator isolation is local inference (BiRefNet via `onnxruntime-node`,
+  ADR-0006): weights are cached under `models/` (gitignored), pinned by
+  sha-256 in `src/segment.ts`, and never loaded by the unit suite — tests
+  inject a fake `MatteEngine`, and the live check in `test/segment.test.ts`
+  skips when the weights are absent.
 - Core design decision (model paints background only, text is local CSS —
   ADR-0001): do not move text rendering onto the model.
 
