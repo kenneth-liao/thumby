@@ -239,11 +239,19 @@ actually enter the library — always as a `trial` Cutout Asset; approval is the
 human likeness gate, never automatic (DEC-004). Promotion from trial to
 approved is `bun run library approve <id> [--approver s] [--note s]` — the
 only promotion path, recording who approved, when, and (optionally) why on
-the Asset. Scenes honor the same gate (REQ-018): a Scene referencing a trial
+the Asset. Approval binds to the Asset's current bytes: the content identity
+is always derived, never stored (ADR-0002), so if a cutout file is ever
+replaced in place, an unpinned Scene reference follows the new bytes — pin
+`<id>@<sha256>` in the Scene to bind it to the exact approved likeness.
+
+Scenes honor the approval gate (REQ-018): a Scene referencing a trial
 Creator Asset fails validation with a layer-specific error, and
 `scene render --experimental` is the one explicit override, producing a
 clearly-marked non-final Render (a `.trial` output name, a NON-FINAL warning,
-and `experimental: true` on the manifest). The adopted Asset records its
+and `experimental: true` on the manifest when trial assets were actually
+used). The gate is Scene-scoped: the legacy `thumb --cutout` command does not
+enforce it (tracked separately); use Scene rendering for anything gated on
+approval. The adopted Asset records its
 `matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
 Asset's content identity is derived from its bytes, never stored (ADR-0002),
 and `jobs adopt` reports that identity — the bytes it wrote. Reruns append
@@ -323,9 +331,11 @@ comply fails with its observed size. A successful render also writes a portable
 Render manifest beside the output(s) (`<out>.manifest.json`): the scene
 identity, selected variants, exact Asset identities, tool version, outputs,
 and warnings, with every path relative to the manifest itself. Manifests are
-schema version 2 (version 1 predates the optimization record); this tool reads
-both, but 0.14 and earlier reject version 2 manifests naming the version —
-rerender with the tool version that wrote the manifest. Moving the
+schema version 3 (`experimental`, the non-final marker of a render made under
+the trial-Creator override; version 2 added the optimization record, version
+1 predates it); this tool reads all three, but an older binary rejects a
+newer manifest naming the version — rerender with the tool version that
+wrote the manifest. Moving the
 whole project directory changes nothing, so `scene rerender` rewrites the
 recorded outputs offline after relocation — but only after verifying the
 scene bytes and every recorded Asset identity; a missing or drifted input

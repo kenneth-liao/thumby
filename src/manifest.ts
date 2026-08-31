@@ -22,17 +22,19 @@ import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
 import type { Optimization } from "./finalize.js";
 
-export const MANIFEST_VERSION = 2;
+export const MANIFEST_VERSION = 3;
 
 /**
- * Versions this reader accepts. v2 added `outputs[].optimization` (the 2 MB
- * finalization record); v1 manifests predate it and are read unchanged — the
- * field is optional and self-validating, so one strict gate covers both.
- * Downgrade limitation, documented in the README: a v1 reader (thumby ≤ 0.14)
- * rejects v2 manifests naming the version — rerender with the tool version
- * that wrote the manifest.
+ * Versions this reader accepts. v3 added `experimental` (the non-final marker
+ * for renders made under the trial-Creator override, REQ-018); v2 added
+ * `outputs[].optimization` (the 2 MB finalization record); v1 predates both —
+ * the fields are optional and self-validating, so one strict gate covers all
+ * three. Downgrade limitation, documented in the README: an older reader
+ * rejects a newer manifest naming the version (a 0.18 reader reports v3 as an
+ * unknown `experimental` field) — rerender with the tool version that wrote
+ * the manifest.
  */
-const SUPPORTED_MANIFEST_VERSIONS = [1, 2] as const;
+const SUPPORTED_MANIFEST_VERSIONS = [1, 2, 3] as const;
 /** The manifest schema versions this tool reads — derived from the tuple above. */
 export type ManifestVersion = (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
 

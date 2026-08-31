@@ -83,6 +83,15 @@ Options
                  inspect: inspect the Scene resolved with that Variant —
                  the variant's stored sparse changes come back verbatim.
   --force        init: allow --out to overwrite an existing file
+  --experimental render only: permit trial Creator Assets (approval:
+                 "trial") in this render. The output is explicitly non-final:
+                 the default output name carries a .trial suffix, and when
+                 trial Creator Asset(s) were actually used, the result and
+                 manifest record "experimental": true and every output's
+                 warnings say the Render is non-final (rerender keeps the
+                 marker). validate, inspect, guidelines, and a non-
+                 experimental rerender never relax the gate — approve the
+                 asset (bun run library approve <id>) instead.
 
 Themes and templates
   A Scene may pin a bundled theme: "theme": { "name", "revision" }. Precedence
@@ -308,6 +317,10 @@ async function renderVariants(
     resolved: ResolvedScene;
     optimization?: Optimization;
   }[] = [];
+  // The recorded non-final marker — derived from actual trial usage (INT-4),
+  // not from the flag: --experimental on an all-approved scene must not mint
+  // a manifest that carries a standing gate relaxation for future rerenders.
+  let nonFinal = false;
   for (const name of names) {
     const applied = resolveVariant(raw, name);
     if (!applied.ok) return invalid(applied.errors);
@@ -326,11 +339,11 @@ async function renderVariants(
       );
     // renderScene assembles the complete warnings (scene-level + safe-area,
     // ADR-0005) — the one home every render path reads through. The
-    // experimental override appends the non-final marker to the same set
-    // (only when the scene actually used a trial Creator Asset).
+    // experimental override appends the non-final marker to the same set.
     const { png, width, height, warnings } = await renderScene(result.resolved);
     const trialWarning = trialOverrideWarning(result.resolved);
     const marked = trialWarning ? [trialWarning] : [];
+    if (trialWarning) nonFinal = true;
     // Finalization happens in phase 1: an uncompliant render leaves out/
     // untouched instead of half-updating it.
     const fin = finalizeRender(png, { at: output });
@@ -386,7 +399,7 @@ async function renderVariants(
     sceneFile,
     sceneSha256,
     variant: rendered.map((r) => r.name),
-    experimental,
+    experimental: nonFinal,
     outputs: rendered.map((r) => ({
       output: r.output,
       width: r.width,
@@ -403,7 +416,7 @@ async function renderVariants(
     ok: true,
     outputs,
     manifest: manifestFile,
-    ...(experimental ? { experimental: true } : {}),
+    ...(nonFinal ? { experimental: true } : {}),
     ...(contact ? { contact } : {}),
   });
 }
@@ -611,11 +624,13 @@ async function dispatch(
       );
     // renderScene assembles the complete warnings (scene-level + safe-area,
     // ADR-0005) — in the command output and the manifest alike. The
-    // experimental override appends the non-final marker to the same set
-    // (only when the scene actually used a trial Creator Asset).
+    // experimental override appends the non-final marker to the same set.
     const { png, width, height, warnings } = await renderScene(resolved);
     const trialWarning = trialOverrideWarning(resolved);
     const marked = trialWarning ? [trialWarning] : [];
+    // The recorded marker derives from actual trial usage (INT-4): a flag
+    // alone must not mint a standing bypass token on the manifest.
+    const nonFinal = experimental && trialWarning !== undefined;
     const fin = finalizeRender(png, { at: output });
     if (!fin.ok) return invalid(fin.errors);
     await mkdir(path.dirname(output), { recursive: true });
@@ -628,7 +643,7 @@ async function dispatch(
         sceneFile,
         sceneSha256: contentHash(read.bytes),
         variant: [],
-        experimental,
+        experimental: nonFinal,
         outputs: [
           {
             output,
@@ -650,7 +665,7 @@ async function dispatch(
       bytes: fin.png.length,
       warnings: [...warnings, ...marked],
       manifest: manifestFile,
-      ...(experimental ? { experimental: true } : {}),
+      ...(nonFinal ? { experimental: true } : {}),
       ...(fin.optimization ? { optimization: fin.optimization } : {}),
     });
   }
@@ -844,7 +859,12 @@ export async function rerenderManifest(
     }
     // Rerender reports the same warnings a normal render of this scene would —
     // renderScene assembles the complete set, never the manifest's stale copy.
+    // A render made under the trial-Creator override keeps its non-final
+    // marker through the rerender (INT-2/PROD-2): the same trial assets are
+    // still in the scene, so the same NON-FINAL warning is re-derived.
     const { png, width, height, warnings } = await renderScene(result.resolved, opts);
+    const trialWarning = trialOverrideWarning(result.resolved);
+    const marked = trialWarning ? [trialWarning] : [];
     const output = path.resolve(manifestDir, manifest.outputs[i]!.output);
     // Rerender publishes the same final contract: every rewritten output must
     // still satisfy the 2 MB limit, through the same deterministic pipeline.
@@ -855,7 +875,7 @@ export async function rerenderManifest(
       png: fin.png,
       width,
       height,
-      warnings,
+      warnings: [...warnings, ...marked],
       ...(fin.optimization ? { optimization: fin.optimization } : {}),
     });
   }
@@ -877,6 +897,9 @@ export async function rerenderManifest(
     ok: true,
     manifest: path.resolve(manifestFile),
     variant: manifest.variant,
+    // A recorded experimental render stays marked through the rerender —
+    // the rewritten output is non-final, like the original (INT-2/PROD-2).
+    ...(manifest.experimental ? { experimental: true } : {}),
     outputs: rendered.map((r, i) => ({
       ...(selected[i] !== null ? { variant: selected[i] } : {}),
       output: r.output,

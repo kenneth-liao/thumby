@@ -224,7 +224,7 @@ describe("manifest shape — build and strict read", () => {
     const [err] = (bad as { ok: false; errors: { path: string; message: string }[] }).errors;
     expect(err!.path).toBe("manifestVersion");
     expect(err!.message).toMatch(/manifestVersion 99/);
-    expect(err!.message).toMatch(/versions 1 and 2/);
+    expect(err!.message).toMatch(/versions 1 and 2 and 3/);
   });
 
   it("reads a version 1 manifest — the pre-optimization schema", async () => {

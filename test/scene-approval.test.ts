@@ -389,7 +389,11 @@ describe("scene cli approval enforcement", () => {
     const out = output as { output: string; manifest: string };
     const { exitCode: code2, output: out2 } = await cli(["rerender", out.manifest]);
     expect(code2).toBe(0);
-    expect(out2).toMatchObject({ ok: true });
+    // The non-final marker survives the rerender: the result echoes
+    // experimental and the rewritten output's warnings carry NON-FINAL.
+    expect(out2).toMatchObject({ ok: true, experimental: true });
+    const rerun = out2 as { outputs: { warnings: string[] }[] };
+    expect(rerun.outputs[0]!.warnings.join(" ")).toMatch(/NON-FINAL/);
     const bytes = await readFile(out.output);
     expect(bytes.readUInt32BE(16)).toBe(1280);
   }, 40000);

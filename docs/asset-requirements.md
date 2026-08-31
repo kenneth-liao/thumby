@@ -216,10 +216,23 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
 
 - Generate via `bun run thumb` (writes `run.json` + `rerun.sh`), key,
   then `bun run library add-cutout <file> --id <id> --tags <pose facets>
-  --derived-from <approved id> --edit-prompt "…"`.
-- New cutouts enter as `trial`; **only Kenny's approval promotes to
-  `approved`** (`--source` points at the provenance record in the content
-  repo). Reuse-first: scan `bun run library list` before generating.
+  --derived-from <approved id> --edit-prompt "…"` — or generate creator
+  candidates through a Generation Job (`bun run jobs creators …`) and adopt
+  one with `bun run jobs adopt`.
+- New cutouts enter as `trial`. **Only Kenny's approval promotes to
+  `approved`, and the one promotion path is
+  `bun run library approve <id> [--approver <s>] [--note <s>]`** — it records
+  the approver decision on the Asset and refuses to re-decide one already
+  approved. `add-cutout --approval approved --source` is the sourced
+  identity-kit import path, not a promotion.
+- Approval binds to the Asset's current bytes (the content identity is always
+  derived, never stored — ADR-0002). If a cutout file is ever replaced in
+  place, an unpinned Scene reference follows the new bytes; pin
+  `<id>@<sha256>` in a Scene to bind it to the exact approved likeness.
+- Scenes enforce the gate (REQ-018): a Scene referencing a trial Creator
+  Asset fails validation; `scene render --experimental` is the explicit
+  non-final override. The legacy `thumb --cutout` command does not enforce
+  the gate. Reuse-first: scan `bun run library list` before generating.
 
 ## Naming and metadata
 
