@@ -247,6 +247,26 @@ const outsideDir = (dir: string, target: string): boolean => {
 };
 
 /**
+ * The non-final marker (REQ-018): every output of an experimental render
+ * carries this warning, naming the trial Creator Asset(s) it used. One home —
+ * both render paths call it.
+ */
+function trialOverrideWarning(resolved: ResolvedScene): string | undefined {
+  const trials = [...resolved.assets.values()]
+    .filter((a) => a.approval === "trial")
+    .map((a) => a.id);
+  if (trials.length === 0) return undefined;
+  return (
+    `NON-FINAL render — produced under the experimental trial-Creator override; ` +
+    `not approved for publication. Trial Creator Asset(s) used: ${trials.join(", ")}.`
+  );
+}
+
+/** Default output name under the experimental override: a .trial suffix marks the file non-final. */
+const trialOutputName = (file: string): string =>
+  file.replace(/\.png$/, ".trial.png");
+
+/**
  * Render one or more named Variants of an already-gated Scene document.
  * Each Variant resolves (sparse patch over the base) and re-enters the one
  * gate; every output lands in the scene's out/ directory named after its
@@ -267,6 +287,7 @@ async function renderVariants(
   outArg: string | undefined,
   sceneFile: string,
   sceneSha256: string,
+  experimental: boolean,
 ): Promise<CliResult> {
   if (names.length === 0 || names.some((n) => !n))
     return usageError("--variant needs at least one variant name");
@@ -290,17 +311,26 @@ async function renderVariants(
   for (const name of names) {
     const applied = resolveVariant(raw, name);
     if (!applied.ok) return invalid(applied.errors);
-    const result = await loadScene(projectDir, library, applied.raw);
+    const result = await loadScene(projectDir, library, applied.raw, {
+      allowTrialCreator: experimental,
+    });
     if (!result.ok) return invalid(result.errors);
     const output =
-      outArg ?? path.join(projectDir, "out", `${baseName}.${name}.png`);
+      outArg ??
+      (experimental
+        ? trialOutputName(path.join(projectDir, "out", `${baseName}.${name}.png`))
+        : path.join(projectDir, "out", `${baseName}.${name}.png`));
     if (outsideDir(projectDir, output))
       return usageError(
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
     // renderScene assembles the complete warnings (scene-level + safe-area,
-    // ADR-0005) — the one home every render path reads through.
+    // ADR-0005) — the one home every render path reads through. The
+    // experimental override appends the non-final marker to the same set
+    // (only when the scene actually used a trial Creator Asset).
     const { png, width, height, warnings } = await renderScene(result.resolved);
+    const trialWarning = trialOverrideWarning(result.resolved);
+    const marked = trialWarning ? [trialWarning] : [];
     // Finalization happens in phase 1: an uncompliant render leaves out/
     // untouched instead of half-updating it.
     const fin = finalizeRender(png, { at: output });
@@ -310,7 +340,7 @@ async function renderVariants(
       png: fin.png,
       width,
       height,
-      warnings,
+      warnings: [...warnings, ...marked],
       output,
       resolved: result.resolved,
       ...(fin.optimization ? { optimization: fin.optimization } : {}),
@@ -339,7 +369,9 @@ async function renderVariants(
   let contactInput: Parameters<typeof buildManifest>[0]["contact"];
   if (sheets.length > 1) {
     const sheet = await renderContactSheet(sheets);
-    const contactPath = path.join(projectDir, "out", `${baseName}.contact.png`);
+    const contactPath = experimental
+      ? trialOutputName(path.join(projectDir, "out", `${baseName}.contact.png`))
+      : path.join(projectDir, "out", `${baseName}.contact.png`);
     await mkdir(path.dirname(contactPath), { recursive: true });
     await writeFile(contactPath, sheet.png);
     contact = { output: contactPath, width: sheet.width, height: sheet.height };
@@ -354,6 +386,7 @@ async function renderVariants(
     sceneFile,
     sceneSha256,
     variant: rendered.map((r) => r.name),
+    experimental,
     outputs: rendered.map((r) => ({
       output: r.output,
       width: r.width,
@@ -370,11 +403,18 @@ async function renderVariants(
     ok: true,
     outputs,
     manifest: manifestFile,
+    ...(experimental ? { experimental: true } : {}),
     ...(contact ? { contact } : {}),
   });
 }
 
-async function dispatch(args: string[]): Promise<CliResult> {
+async function dispatch(
+  args: string[],
+  deps?: { libraryRoot?: string },
+): Promise<CliResult> {
+  // The library root is a seam for tests (and a portable-library override):
+  // every command reads the library through this one provider.
+  const library = () => scanLibrary(deps?.libraryRoot ?? LIBRARY_ROOT);
   const [cmd, file, ...rest] = args;
 
   if (cmd === "schema" && file === undefined) return ok(SCENE_SCHEMA);
@@ -420,7 +460,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
     // loudly here instead of shipping an invalid Scene to an agent.
     const result = await loadScene(
       outArg ? path.dirname(path.resolve(outArg)) : process.cwd(),
-      () => scanLibrary(LIBRARY_ROOT),
+      library,
       scene,
     );
     if (!result.ok) return invalid(result.errors);
@@ -449,6 +489,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
   if ((cmd === "validate" || cmd === "inspect" || cmd === "render") && file) {
     let outArg: string | undefined;
     let variantArg: string | undefined;
+    let experimental = false;
     // Strict flag parsing: a flag is never consumed as a value, and no flag
     // repeats — ambiguity between two homes for one option is a usage error.
     const setFlag = (flag: string, value: string | undefined): string | undefined => {
@@ -466,8 +507,13 @@ async function dispatch(args: string[]): Promise<CliResult> {
           const bad = setFlag("--variant", rest[i + 1]);
           if (bad) return usageError(bad);
           variantArg = rest[i + 1];
+        } else if (rest[i] === "--experimental" && !experimental) {
+          experimental = true;
+          i -= 1; // a boolean flag — the loop's += 2 would skip the next argument
         } else
-          return usageError("render accepts --out <path> and --variant <name[,name...]>, each at most once");
+          return usageError(
+            "render accepts --out <path>, --variant <name[,name...]>, and --experimental, each at most once",
+          );
       }
     } else if (cmd === "inspect") {
       if (rest.length === 2 && rest[0] === "--variant") variantArg = rest[1];
@@ -479,8 +525,12 @@ async function dispatch(args: string[]): Promise<CliResult> {
     if ("errors" in read) return invalid(read.errors);
     // The one validation gate — every failure lands here, before any browser.
     // The library is a provider: scanned only if the scene names a library asset.
+    // render alone may relax the Creator approval gate (--experimental);
+    // validate and inspect always enforce it.
     const sceneDir = path.dirname(path.resolve(file));
-    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), read.raw);
+    const result = await loadScene(sceneDir, library, read.raw, {
+      allowTrialCreator: cmd === "render" && experimental,
+    });
     if (!result.ok) return invalid(result.errors);
     const { resolved } = result;
     if (cmd === "validate") {
@@ -499,12 +549,13 @@ async function dispatch(args: string[]): Promise<CliResult> {
       return renderVariants(
         sceneDir,
         path.basename(file, ".json"),
-        () => scanLibrary(LIBRARY_ROOT),
+        library,
         read.raw,
         variantArg.split(","),
         outArg,
         path.resolve(file),
         contentHash(read.bytes),
+        experimental,
       );
 
     if (cmd === "inspect") {
@@ -514,7 +565,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
       if (variantArg !== undefined) {
         const applied = resolveVariant(read.raw, variantArg);
         if (!applied.ok) return invalid(applied.errors);
-        const vResult = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), applied.raw);
+        const vResult = await loadScene(sceneDir, library, applied.raw);
         if (!vResult.ok) return invalid(vResult.errors);
         // Both assertions hold by construction: the base gate validated the
         // document (so variants exist and are structurally sound) and
@@ -550,9 +601,8 @@ async function dispatch(args: string[]): Promise<CliResult> {
 
     const sceneFile = path.resolve(file);
     const projectDir = path.dirname(sceneFile);
-    const output = outArg
-      ? path.resolve(outArg)
-      : path.join(projectDir, "out", `${path.basename(sceneFile, ".json")}.png`);
+    const defaultOut = path.join(projectDir, "out", `${path.basename(sceneFile, ".json")}.png`);
+    const output = outArg ? path.resolve(outArg) : experimental ? trialOutputName(defaultOut) : defaultOut;
     // Render output belongs beside the scene — the same containment its
     // project-scope assets obey, so a scene read/write never crosses its directory.
     if (outsideDir(projectDir, output))
@@ -560,8 +610,12 @@ async function dispatch(args: string[]): Promise<CliResult> {
         `--out "${outArg}" must stay inside the scene's directory (${projectDir})`,
       );
     // renderScene assembles the complete warnings (scene-level + safe-area,
-    // ADR-0005) — in the command output and the manifest alike.
+    // ADR-0005) — in the command output and the manifest alike. The
+    // experimental override appends the non-final marker to the same set
+    // (only when the scene actually used a trial Creator Asset).
     const { png, width, height, warnings } = await renderScene(resolved);
+    const trialWarning = trialOverrideWarning(resolved);
+    const marked = trialWarning ? [trialWarning] : [];
     const fin = finalizeRender(png, { at: output });
     if (!fin.ok) return invalid(fin.errors);
     await mkdir(path.dirname(output), { recursive: true });
@@ -574,12 +628,13 @@ async function dispatch(args: string[]): Promise<CliResult> {
         sceneFile,
         sceneSha256: contentHash(read.bytes),
         variant: [],
+        experimental,
         outputs: [
           {
             output,
             width,
             height,
-            warnings,
+            warnings: [...warnings, ...marked],
             png: fin.png,
             resolved,
             ...(fin.optimization ? { optimization: fin.optimization } : {}),
@@ -593,8 +648,9 @@ async function dispatch(args: string[]): Promise<CliResult> {
       width,
       height,
       bytes: fin.png.length,
-      warnings,
+      warnings: [...warnings, ...marked],
       manifest: manifestFile,
+      ...(experimental ? { experimental: true } : {}),
       ...(fin.optimization ? { optimization: fin.optimization } : {}),
     });
   }
@@ -611,7 +667,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
     const read = await readSceneFile(file);
     if ("errors" in read) return invalid(read.errors);
     const sceneDir = path.dirname(path.resolve(file));
-    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), read.raw);
+    const result = await loadScene(sceneDir, library, read.raw);
     if (!result.ok) return invalid(result.errors);
     const output = outArg
       ? path.resolve(outArg)
@@ -649,7 +705,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
   }
   if (cmd === "guidelines") return usageError(`"scene guidelines" takes exactly one scene file`);
 
-  if (cmd === "rerender" && file && rest.length === 0) return rerenderManifest(file);
+  if (cmd === "rerender" && file && rest.length === 0) return rerenderManifest(file, { library });
   if (cmd === "rerender")
     return usageError(`"scene rerender" takes exactly one manifest path`);
 
@@ -676,7 +732,7 @@ async function dispatch(args: string[]): Promise<CliResult> {
  */
 export async function rerenderManifest(
   manifestFile: string,
-  opts?: { page?: Page },
+  opts?: { page?: Page; library?: () => Promise<Library> },
 ): Promise<CliResult> {
   const read = await readManifest(manifestFile);
   if (!read.ok) return invalid(read.errors);
@@ -758,7 +814,11 @@ export async function rerenderManifest(
       if (!applied.ok) return invalid(applied.errors);
       doc = applied.raw;
     }
-    const result = await loadScene(sceneDir, () => scanLibrary(LIBRARY_ROOT), doc);
+    const result = await loadScene(sceneDir, opts?.library ?? (() => scanLibrary(LIBRARY_ROOT)), doc, {
+      // A manifest marked experimental recorded a legitimate non-final
+      // render — rerender honors that; anything else hits the normal gate.
+      allowTrialCreator: manifest.experimental === true,
+    });
     if (!result.ok) return invalid(result.errors);
     // Asset identity verification — the manifest is the exactness contract:
     // every recorded layer must still resolve to the very bytes it rendered.
@@ -835,10 +895,13 @@ export async function rerenderManifest(
  * (render crash, I/O error, corrupt library) is structured JSON like any
  * other — never a stack trace on stdout's contract.
  */
-export async function run(args: string[]): Promise<CliResult> {
+export async function run(
+  args: string[],
+  deps?: { libraryRoot?: string },
+): Promise<CliResult> {
   const [cmd] = args;
   try {
-    return await dispatch(args);
+    return await dispatch(args, deps);
   } catch (err) {
     return invalid([
       {

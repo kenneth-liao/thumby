@@ -198,6 +198,12 @@ export interface RenderManifest {
   scene: { path: string; sha256: string };
   /** The selected Variants — `[]` renders the base Scene. */
   variant: string[];
+  /**
+   * Present (`true`) when the render used the explicit experimental override
+   * to render trial Creator Asset(s) — the output is non-final (REQ-018).
+   * Rerender honors it: the recorded render was legitimately experimental.
+   */
+  experimental?: true;
   outputs: ManifestOutput[];
   contact?: ManifestContact;
 }
@@ -225,6 +231,8 @@ export function buildManifest(opts: {
   sceneFile: string;
   sceneSha256: string;
   variant: string[];
+  /** True when this render used the experimental trial-Creator override. */
+  experimental?: boolean;
   outputs: ManifestRenderInput[];
   contact?: { output: string; width: number; height: number; png: Buffer };
 }): RenderManifest {
@@ -237,6 +245,7 @@ export function buildManifest(opts: {
       sha256: opts.sceneSha256,
     },
     variant: opts.variant,
+    ...(opts.experimental ? { experimental: true as const } : {}),
     outputs: opts.outputs.map((o) => ({
       output: relPath(opts.manifestDir, o.output),
       width: o.width,
@@ -363,9 +372,11 @@ export async function readManifest(
   if (!isObject(raw)) return { ok: false, errors: [{ path: "manifest", message: "the manifest must be a JSON object" }] };
   for (const k of Object.keys(raw))
     if (
-      !["manifestVersion", "tool", "schemaVersion", "scene", "variant", "outputs", "contact"].includes(k)
+      !["manifestVersion", "tool", "schemaVersion", "scene", "variant", "experimental", "outputs", "contact"].includes(k)
     )
       errs.at(k, `"${k}" is not a valid manifest field`);
+  if (raw.experimental !== undefined && raw.experimental !== true)
+    errs.at("experimental", `"experimental" must be true when present — it marks a non-final render`);
 
   if (!isManifestVersion(raw.manifestVersion))
     errs.at(

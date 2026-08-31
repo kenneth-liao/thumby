@@ -236,7 +236,14 @@ curl -L -o models/birefnet-fp16.onnx \
 from, and says plainly when a candidate has none. `jobs adopt` writes the
 **matte** — the same true-alpha gate as objects, applied to the bytes that
 actually enter the library — always as a `trial` Cutout Asset; approval is the
-human likeness gate, never automatic (DEC-004). The adopted Asset records its
+human likeness gate, never automatic (DEC-004). Promotion from trial to
+approved is `bun run library approve <id> [--approver s] [--note s]` — the
+only promotion path, recording who approved, when, and (optionally) why on
+the Asset. Scenes honor the same gate (REQ-018): a Scene referencing a trial
+Creator Asset fails validation with a layer-specific error, and
+`scene render --experimental` is the one explicit override, producing a
+clearly-marked non-final Render (a `.trial` output name, a NON-FINAL warning,
+and `experimental: true` on the manifest). The adopted Asset records its
 `matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
 Asset's content identity is derived from its bytes, never stored (ADR-0002),
 and `jobs adopt` reports that identity — the bytes it wrote. Reruns append
@@ -296,7 +303,7 @@ bun run scene templates                    # bundled scene templates
 bun run scene init scene-template [--out p] # initialize a Scene from a template
 bun run scene validate scene.json          # field-specific errors before any render
 bun run scene inspect scene.json           # layer summary + resolved asset hashes
-bun run scene render scene.json [--out p]  # render to PNG (1280×720, YouTube 2 MB-compliant)
+bun run scene render scene.json [--out p] [--experimental]  # render to PNG (1280×720, YouTube 2 MB-compliant)
 bun run scene guidelines scene.json [--out p] # the safe-area guideline view (review only)
 bun run scene rerender out/scene.manifest.json  # re-render from its Render manifest
 ```
@@ -327,7 +334,15 @@ report `layerCount` counting every layer in the tree, group children
 included. Validation happens
 entirely before the browser starts: unsupported schema versions, duplicate
 layer ids, missing assets, invalid transforms, and unknown layer types are
-rejected naming the offending field (e.g. `layers[2].asset`).
+rejected naming the offending field (e.g. `layers[2].asset`). So is a
+disallowed Creator Asset approval state: a Scene referencing a trial
+Creator Asset is invalid for normal and final rendering — approve it
+(`bun run library approve <id>`) or render explicitly non-final with
+`--experimental`.
+
+Swapping a pose or outfit is editing one Creator layer's `asset` reference
+to another approved Cutout — no regeneration of anything else, and local
+edits never trigger generation (REQ-018).
 
 ```json
 {

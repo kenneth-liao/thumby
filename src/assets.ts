@@ -63,6 +63,10 @@ export interface CutoutMeta {
   tags: string[];
   /** trials are working assets; approved ones are human-gated. */
   approval: "trial" | "approved";
+  /** Recorded approver decision (REQ-018) — the promotion through approveCutout. */
+  approvedBy?: string;
+  approvedAt?: string;
+  approvalNote?: string;
   /** Governance home when approved (e.g. a content-repo provenance record). */
   source?: string;
   /** The cutout this one was edited from — always an approved original. */
@@ -362,6 +366,74 @@ export async function writeCreatorAsset(
   return writeKindAsset(root, "cutouts", "cutout", id, bytes, meta, "image/png");
 }
 
+// --- the Creator approval operation (REQ-018) --------------------------------
+//
+// The one promotion path from trial to approved. Adoption (src/jobs.ts) and
+// `library add-cutout` only ever write the state a source claims — adoption
+// forces "trial", and `--approval approved` is the sourced identity-kit
+// import path, not a promotion. Promotion happens here and nowhere else:
+// it requires a recorded approver decision and refuses to re-decide an
+// already-approved asset.
+
+/** The recorded human decision that promotes a trial Creator Asset. */
+export interface ApprovalDecision {
+  /** Who approved — an explicit, non-empty decision record. */
+  approvedBy: string;
+  /** When, as an ISO 8601 instant. */
+  approvedAt: string;
+  /** Optional free-text rationale. */
+  approvalNote?: string;
+}
+
+/**
+ * Promote one trial Creator Asset to approved, recording the approver
+ * decision on its meta. The image bytes are never touched — approval selects
+ * the asset's immutable content identity, and no hash is stored in meta.json
+ * (ADR-0002: the hash is always derived from the bytes).
+ */
+export async function approveCutout(
+  root: string,
+  id: string,
+  decision: ApprovalDecision,
+): Promise<CutoutMeta> {
+  // The id names a path segment below the cutouts directory — the same shape
+  // adoption enforces, so a crafted id cannot reach outside the library.
+  if (!ASSET_ID_PATTERN.test(id))
+    throw new Error(`Invalid asset id "${id}" — use lowercase letters/digits/hyphens`);
+  if (!decision.approvedBy.trim())
+    throw new Error(`an approval decision needs an approver — record who approved "${id}"`);
+  if (Number.isNaN(Date.parse(decision.approvedAt)))
+    throw new Error(`approvedAt must be an ISO 8601 instant (got "${decision.approvedAt}")`);
+  const metaFile = path.join(root, "cutouts", id, "meta.json");
+  let meta: CutoutMeta;
+  try {
+    meta = JSON.parse(await readFile(metaFile, "utf8")) as CutoutMeta;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT")
+      throw new Error(`no cutout "${id}" in the library at ${root} — nothing to approve`);
+    throw err;
+  }
+  if (meta.kind !== "cutout")
+    throw new Error(`"${id}" is a ${meta.kind}, not a Creator Asset — approval applies to cutouts only`);
+  if (meta.approval === "approved")
+    throw new Error(
+      `"${id}" is already approved` +
+        (meta.approvedBy
+          ? ` by ${meta.approvedBy} at ${meta.approvedAt}`
+          : "") +
+        ` — approval is a decision, not a toggle`,
+    );
+  const updated: CutoutMeta = {
+    ...meta,
+    approval: "approved",
+    approvedBy: decision.approvedBy.trim(),
+    approvedAt: decision.approvedAt,
+    ...(decision.approvalNote !== undefined ? { approvalNote: decision.approvalNote } : {}),
+  };
+  await writeFile(metaFile, JSON.stringify(updated, null, 2) + "\n");
+  return updated;
+}
+
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {
   const m = entry.meta;
   const hay = [m.id, m.name, ...m.tags, ...("aliases" in m ? m.aliases ?? [] : [])]
@@ -522,6 +594,8 @@ export interface ResolvedAsset {
   id?: string;
   /** Library scope: the asset kind. */
   kind?: AssetKind;
+  /** Library scope, cutouts only: the Creator Asset approval state (REQ-018). */
+  approval?: CutoutMeta["approval"];
   /** Project scope: the path relative to the project root, in portable `/` form. */
   path?: string;
   bytes: Uint8Array;
@@ -595,6 +669,9 @@ export async function resolveAsset(
       scope: "library",
       id: entry.meta.id,
       kind: entry.meta.kind,
+      // The approval state rides on the resolution — the one boundary where
+      // the library is read — so no downstream reader re-scans to learn it.
+      ...(entry.meta.kind === "cutout" ? { approval: entry.meta.approval } : {}),
       bytes,
       mediaType: mediaTypeFor(entry.imagePath),
       hash,

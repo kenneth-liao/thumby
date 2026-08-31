@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0]
+
+### Added
+
+- Creator Asset approval enforcement (REQ-018, #17): a trial Creator Asset (a library Cutout with `approval: "trial"`) can no longer reach normal or final Scene rendering — `loadScene` rejects the reference with a layer-specific error (`layers[i].asset`) naming the asset, and `scene validate`/`inspect`/`guidelines`/`rerender` enforce the same gate; approval state rides on the asset resolution, so no reader re-scans the library to learn it (#17)
+- `bun run library approve <id> [--approver <s>] [--note <s>]` — the one promotion path from trial to approved, recording the approver decision (`approvedBy`, `approvedAt`, optional `approvalNote`) on the Asset; it refuses unknown ids, non-cutouts, and already-approved assets (a decision, not a toggle). The bytes never change — approval selects the Asset's immutable content identity, and no hash is stored in meta (ADR-0002). `library add-cutout --approval approved --source` is unchanged: it stays the sourced identity-kit import path, not a promotion (#17)
+- `scene render --experimental` — the explicit override for trial rendering: the gate is relaxed for that render only, and the output is clearly marked non-final — the default output name carries a `.trial` suffix, every output's warnings carry a NON-FINAL notice naming the trial asset(s), the result and manifest record `experimental: true`, and `scene rerender` honors a recorded experimental manifest without the flag (#17)
+
+### Changed
+
+- **Breaking for Scenes referencing trial Creator Assets:** existing trial cutouts (all current library cutouts are trial) now fail Scene validation/rendering until explicitly approved with `library approve` — intentional; the approval gate is the likeness contract (DEC-004), and nothing is auto-approved (#17)
+
 ## [0.18.0]
 
 ### Added
