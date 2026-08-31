@@ -35,6 +35,7 @@ import path from "node:path";
 import { decodePng, encodePngRgba, PngParseError } from "./png.js";
 import type { Scene, SceneError } from "./scene.js";
 import { escapeHtml, fileUrl } from "./html.js";
+import { outsideDir, escapesDirReal } from "./paths.js";
 
 /** The canvas a reference must align with — the one output profile (DEC-002). */
 export const REFERENCE_WIDTH = 1280;
@@ -52,12 +53,6 @@ export interface CheckedReference {
 export type ReferenceCheck =
   | { ok: true; reference?: CheckedReference }
   | { ok: false; errors: SceneError[] };
-
-/** True when `target` escapes `dir` — the containment rule project files obey. */
-const outsideDir = (dir: string, target: string): boolean => {
-  const relative = path.relative(dir, target);
-  return relative.startsWith("..") || path.isAbsolute(relative);
-};
 
 /**
  * Validate the Scene's reference association. Absent `reference` is a no-op —
@@ -86,6 +81,15 @@ export async function checkReference(projectRoot: string, scene: Scene): Promise
         `Save the reference image at that path, or update reference.path.`,
     );
   }
+  // Containment is checked on the file actually read — an in-project symlink
+  // to an out-of-tree file is still an escape (src/paths.ts, the project-
+  // asset precedent in src/assets.ts).
+  if (await escapesDirReal(projectRoot, absolute))
+    return fail(
+      `reference "${authored}" escapes the scene's directory (${projectRoot}) through a symlink — ` +
+        `a project bundle cannot reference files outside itself, even through an in-project alias. ` +
+        `Move the target file beside the scene.`,
+    );
   let width: number;
   let height: number;
   let rgba: Buffer;

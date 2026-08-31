@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { scanLibrary, type Library } from "../src/assets.js";
@@ -160,6 +160,20 @@ describe("checkReference", () => {
     expect(errors[0]!.message).toMatch(/inside the scene's directory/);
   });
 
+  it("an in-project symlink to an out-of-tree file is refused too — containment resolves aliases", async () => {
+    await writePng(path.join(fix.root, "outside.png"), solid(1280, 720, [0, 0, 0, 255]));
+    await symlink(
+      path.join(fix.root, "outside.png"),
+      path.join(fix.projectRoot, "alias.png"),
+    );
+    const file = await sceneWith({ reference: { path: "./alias.png" } }, "alias.json");
+    for (const cmd of ["validate", "compare"] as const) {
+      const errors = await cliErrors([cmd, file]);
+      expect(errors[0]!.path).toBe("reference.path");
+      expect(errors[0]!.message).toMatch(/escapes the scene's directory.*symlink/);
+    }
+  });
+
   it("render ignores the reference entirely — a missing reference file still renders", async () => {
     const file = await sceneWith({ reference: { path: "./gone.png" } }, "renderable.json");
     const out = path.join(fix.projectRoot, "out", "renderable.png");
@@ -242,13 +256,12 @@ describe("scene compare", () => {
     };
     expect(px(100)).toEqual([0, 0, 0]);
     expect(px(1200)[0]).toBeGreaterThan(200);
-    // Review artifacts, never a Render: no manifest beside them.
+    // Review artifacts, never a Render: no manifest beside them. Order is
+    // the filesystem's, not the assertion's — compare as sorted sets.
     const files = await readdir(path.join(fix.projectRoot, "out"));
-    expect(files.filter((f) => f.startsWith("compare."))).toEqual([
-      "compare.compare.html",
-      "compare.diff.png",
-      "compare.compare.render.png",
-    ]);
+    expect(files.filter((f) => f.startsWith("compare.")).sort()).toEqual(
+      ["compare.compare.html", "compare.diff.png", "compare.compare.render.png"].sort(),
+    );
   }, 20000);
 
   it("a scene with an invalid reference fails before any artifact is written", async () => {
@@ -258,6 +271,21 @@ describe("scene compare", () => {
     const files = await readdir(path.join(fix.projectRoot, "out"));
     expect(files.filter((f) => f.startsWith("bad-compare."))).toEqual([]);
   });
+
+  it("refuses to overwrite a recorded Render output and writes no artifacts", async () => {
+    // A previous render claimed the default diff path via --out; its manifest
+    // records it. Compare must refuse before any browser work or file write.
+    const seeder = await sceneWith({}, "seeder.json");
+    const claimed = path.join(fix.projectRoot, "out", "conflict.diff.png");
+    const seeded = await cliRun(["render", seeder, "--out", claimed]);
+    expect(seeded.exitCode).toBe(0);
+    const file = await sceneWith({ reference: { path: "./ref.png" } }, "conflict.json");
+    const errors = await cliErrors(["compare", file]);
+    expect(errors[0]!.path).toBe("compare");
+    expect(errors[0]!.message).toMatch(/never overwrite a final Render/);
+    const files = await readdir(path.join(fix.projectRoot, "out"));
+    expect(files.filter((f) => f.startsWith("conflict.compare."))).toEqual([]);
+  }, 20000);
 
   it("the render manifest never records the reference — it is not Render input", async () => {
     const file = await sceneWith({ reference: { path: "./ref.png" } }, "manifest.json");

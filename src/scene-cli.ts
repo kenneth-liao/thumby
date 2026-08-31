@@ -36,6 +36,7 @@ import {
   writeManifest,
 } from "./manifest.js";
 import { finalizeRender, type Optimization } from "./finalize.js";
+import { outsideDir } from "./paths.js";
 import { closeBrowser } from "./browser.js";
 
 const HELP = `
@@ -256,12 +257,6 @@ function resolvedAssetSummary(resolved: {
     mediaType: resolved.mediaType,
   };
 }
-
-/** True when `target` escapes `dir` — the containment rule render outputs obey. */
-const outsideDir = (dir: string, target: string): boolean => {
-  const relative = path.relative(dir, target);
-  return relative.startsWith("..") || path.isAbsolute(relative);
-};
 
 /**
  * The non-final marker (REQ-018): every output of an experimental render
@@ -557,8 +552,11 @@ async function dispatch(
     if (cmd === "validate") {
       // The reference association (REQ-020) is review metadata, not Render
       // input — validate (and compare) read the file itself; render ignores
-      // the field entirely. The check runs through this same gate so agents
-      // get one structured error shape.
+      // the field entirely. Unlike the safe-area precedent (ADR-0005), a bad
+      // reference is a hard failure, not data: safe-area overlap is computed
+      // geometry a reviewer may accept, while a reference that fails the gate
+      // is an explicit authored association pointing at nothing usable — and
+      // review tooling that silently ignores it produces false evidence.
       const ref = await checkReference(sceneDir, resolved.scene);
       if (!ref.ok) return invalid(ref.errors);
       return ok({
