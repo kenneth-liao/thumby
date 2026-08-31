@@ -428,7 +428,8 @@ async function recordRun(
   if (batch.candidates.length === 0) throw new Error("Generation returned no candidates");
   if (request.kind !== "plate" && !matte)
     throw new Error(
-      `An ${request.kind} run needs a matting engine — ${request.kind} candidates are adopted as their matte`,
+      // Article-free plural: reads right for every non-plate kind.
+      `${request.kind} runs need a matting engine — ${request.kind} candidates are adopted as their matte`,
     );
   const spec = resolveModel(request.model);
   const dir = jobDir(jobRoot, job.jobId);
@@ -567,19 +568,6 @@ export interface AdoptionResult {
 }
 
 /**
- * Adopt a recorded candidate as a new immutable Asset — the kind follows the
- * job: a plate job adopts a Plate Asset; an object job verifies the
- * candidate's true alpha (REQ-015) and adopts an Object Asset; a creator job
- * adopts the candidate's matte — the isolated form the matting pass produced
- * — through the same true-alpha gate, always as a trial Cutout Asset
- * (REQ-017).
- * The candidate
- * is addressed by exact content hash (a unique prefix is accepted); its bytes
- * are re-derived and verified before adoption, so a tampered or missing file
- * cannot enter the library under a stale identity. Overwriting an existing
- * asset is unrepresentable — the write path refuses existing ids.
- */
-/**
  * The one home of the "adopt the matte, keep candidate lineage" rule (REQ-015,
  * REQ-017): read the candidate's recorded matte, re-verify its content identity,
  * and gate the exact bytes that will enter the library through the true-alpha
@@ -606,6 +594,21 @@ async function loadVerifiedMatte(
   return { bytes, contentHash: cand.matte.contentHash, engine: cand.matte.engine };
 }
 
+/**
+ * Adopt a recorded candidate as a new immutable Asset — the kind follows the
+ * job: a plate job adopts a Plate Asset; a creator job adopts the candidate's
+ * verified matte as a trial Cutout Asset (REQ-017); an object job adopts the
+ * candidate's verified matte when its run produced one, or the candidate's
+ * own natively isolated bytes otherwise, as an Object Asset (REQ-015). Both
+ * matte routes read through loadVerifiedMatte, so the identity gates are one
+ * rule, and the true-alpha gate holds either way.
+ *
+ * The candidate is addressed by exact content hash (a unique prefix is
+ * accepted); its bytes are re-derived and verified before adoption, so a
+ * tampered or missing file cannot enter the library under a stale identity.
+ * Overwriting an existing asset is unrepresentable — the write path refuses
+ * existing ids.
+ */
 export async function adoptCandidate(
   jobRoot: string,
   jobId: string,
