@@ -10,6 +10,7 @@ import {
   searchLibrary,
   resolveAsset,
   writePlateAsset,
+  writeMaskAsset,
   approveCutout,
   type Library,
   type CutoutMeta,
@@ -17,13 +18,14 @@ import {
 import { parseFacets, IDENTITY_KIT_DIR } from "./identity.js";
 
 const HELP = `
-library — the reusable asset library (plates + logos + cutouts + objects + identity sources)
+library — the reusable asset library (plates + logos + cutouts + objects + masks + identity sources)
 
   bun run library list [query] [options]      Search the library. Empty query lists all.
   bun run library resolve <ref> [options]     Resolve an asset reference to its exact content identity.
   bun run library add-logo <file> --id <id>   Add a logo image to the library.
   bun run library adopt <plate.png> --id <id> Adopt a generated plate (with its provenance).
   bun run library add-cutout <file> --id <id> Add a transparent-PNG cutout.
+  bun run library add-mask <file> --id <id>   Add a named-mask PNG (alpha selects).
   bun run library approve <id> [options]      Promote a trial Creator Asset to approved —
                                               the only promotion path (REQ-018).
 
@@ -105,8 +107,8 @@ if (values.help || positionals.length === 0) {
 }
 
 const command = positionals[0]!;
-if (!["list", "resolve", "add-logo", "adopt", "add-cutout", "approve"].includes(command)) {
-  fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout | approve`);
+if (!["list", "resolve", "add-logo", "adopt", "add-cutout", "add-mask", "approve"].includes(command)) {
+  fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout | add-mask | approve`);
 }
 if (command !== "list" && values.facets?.length)
   fail(`--facets applies to "list" only`);
@@ -137,6 +139,7 @@ async function writeSheet(lib: Library) {
     lib.plates.length === 0 &&
     lib.cutouts.length === 0 &&
     lib.objects.length === 0 &&
+    lib.masks.length === 0 &&
     identity.length === 0
   )
     return;
@@ -164,7 +167,7 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 img.plate-img{max-width:100%;max-height:none;width:100%}
 img.cutout-img{max-width:180px;max-height:180px;object-fit:contain}
 .empty{color:#5c5c64;font-size:12px;margin:8px 4px}
-</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length + lib.objects.length + identity.length}</h1>
+</style><h1>Asset library · ${lib.logos.length + lib.plates.length + lib.cutouts.length + lib.objects.length + lib.masks.length + identity.length}</h1>
 ${section(
   "logos",
   lib.logos
@@ -205,6 +208,15 @@ ${section(
     )
     .join("\n"),
   "(none — add one with bun run library add-cutout <cutout.png> --id <name>)",
+)}
+${section(
+  "masks",
+  lib.masks
+    .map((m) =>
+      figure("masks", m.meta.id, path.basename(m.imagePath), `${m.meta.id} [${m.meta.tags.join(", ")}]`),
+    )
+    .join("\n"),
+  "(none — add one with bun run library add-mask <mask.png> --id <name>)",
 )}
 ${section(
   "identity sources",
@@ -255,6 +267,11 @@ if (command === "list") {
       `    ${c.meta.id.padEnd(22)} [${c.meta.tags.join(", ")}]  ${c.meta.approval}  @${c.hash.slice(0, 12)}`,
     );
   }
+  console.log(`\n  Masks (${found.masks.length})`);
+  if (found.masks.length === 0) console.log(`    (none — add one with: bun run library add-mask <mask.png> --id <name>)`);
+  for (const m of found.masks) {
+    console.log(`    ${m.meta.id.padEnd(22)} [${m.meta.tags.join(", ")}]  @${m.hash.slice(0, 12)}`);
+  }
   console.log(`\n  Identity sources (${found.identity.entries.length})`);
   if (!lib.identity.present) {
     console.log(`    (no identity kit in this library — ${IDENTITY_KIT_DIR} is absent)`);
@@ -274,7 +291,7 @@ if (command === "list") {
   }
   if (
     values.sheet &&
-    (found.logos.length || found.plates.length || found.cutouts.length || found.identity.entries.length)
+    (found.logos.length || found.plates.length || found.cutouts.length || found.masks.length || found.identity.entries.length)
   )
     console.log(`\n  sheet    ${path.relative(process.cwd(), path.join(LIBRARY_ROOT, "index.html"))}`);
   console.log("");
@@ -346,10 +363,11 @@ if (command === "approve") {
   process.exit(0);
 }
 
-const KIND_OF: Record<string, "logos" | "plates" | "cutouts"> = {
+const KIND_OF: Record<string, "logos" | "plates" | "cutouts" | "masks"> = {
   "add-logo": "logos",
   adopt: "plates",
   "add-cutout": "cutouts",
+  "add-mask": "masks",
 };
 const id = requireId();
 const dir = path.join(LIBRARY_ROOT, KIND_OF[command]!, id);
@@ -357,14 +375,16 @@ const existing = await scanOrDie();
 if (
   existing.logos.some((l) => l.meta.id === id) ||
   existing.plates.some((p) => p.meta.id === id) ||
-  existing.cutouts.some((c) => c.meta.id === id)
+  existing.cutouts.some((c) => c.meta.id === id) ||
+  existing.masks.some((m) => m.meta.id === id)
 ) {
   fail(`"${id}" already exists in the library.`);
 }
 
-// adopt creates its own asset directory exclusively inside writePlateAsset;
-// add-logo / add-cutout still own their directory creation here.
-if (command !== "adopt") await mkdir(dir, { recursive: true });
+// adopt and add-mask write through writePlateAsset / writeMaskAsset, which
+// create their asset directories exclusively; add-logo / add-cutout still
+// own their directory creation here.
+if (command !== "adopt" && command !== "add-mask") await mkdir(dir, { recursive: true });
 try {
   if (command === "add-logo") {
     const src = path.resolve(positionals[1] ?? "");
@@ -434,6 +454,19 @@ try {
     } else {
       console.log(`  note     no sibling run.json — provenance not carried`);
     }
+  } else if (command === "add-mask") {
+    // Add a named mask (REQ-019): a PNG whose alpha selects pixels of the
+    // Creator Asset that references it. Written through writeMaskAsset —
+    // exclusive create, cross-kind id, hardcoded mask.png name.
+    const src = path.resolve(positionals[1] ?? "");
+    if (!src || !/\.png$/i.test(src)) fail("add-mask needs a PNG mask (its alpha selects)");
+    const imagePath = await writeMaskAsset(LIBRARY_ROOT, id, new Uint8Array(await readFile(src)), {
+      kind: "mask",
+      id,
+      name: values.name ?? values.id!,
+      tags: csv(values.tags!),
+    });
+    console.log(`  mask     ${id} → ${path.relative(process.cwd(), imagePath)}`);
   } else {
     // Add a cutout: a transparent PNG whose reuse value is its role — the
     // pose/expression/outfit facets its tags name.

@@ -22,19 +22,20 @@ import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
 import type { Optimization } from "./finalize.js";
 
-export const MANIFEST_VERSION = 3;
+export const MANIFEST_VERSION = 4;
 
 /**
- * Versions this reader accepts. v3 added `experimental` (the non-final marker
- * for renders made under the trial-Creator override, REQ-018); v2 added
- * `outputs[].optimization` (the 2 MB finalization record); v1 predates both —
- * the fields are optional and self-validating, so one strict gate covers all
- * three. Downgrade limitation, documented in the README: an older reader
- * rejects a newer manifest naming the version (a 0.18 reader reports v3 as an
- * unknown `experimental` field) — rerender with the tool version that wrote
- * the manifest.
+ * Versions this reader accepts. v4 added `outputs[].masks` (the named-mask
+ * asset identities a masked render used, REQ-019); v3 added `experimental`
+ * (the non-final marker for renders made under the trial-Creator override,
+ * REQ-018); v2 added `outputs[].optimization` (the 2 MB finalization record);
+ * v1 predates both — the fields are optional and self-validating, so one
+ * strict gate covers all four. Downgrade limitation, documented in the
+ * README: an older reader rejects a newer manifest naming the version (a
+ * 0.19 reader reports v4 as an unknown `masks` field) — rerender with the
+ * tool version that wrote the manifest.
  */
-const SUPPORTED_MANIFEST_VERSIONS = [1, 2, 3] as const;
+const SUPPORTED_MANIFEST_VERSIONS = [1, 2, 3, 4] as const;
 /** The manifest schema versions this tool reads — derived from the tuple above. */
 export type ManifestVersion = (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
 
@@ -150,7 +151,7 @@ export interface ManifestAsset {
   /** Library scope: the resolved asset id (post-alias). */
   id?: string;
   /** Library scope: the asset kind. */
-  kind?: "logo" | "plate" | "cutout" | "object";
+  kind?: "logo" | "plate" | "cutout" | "object" | "mask";
   /** Project scope: the path relative to the scene's directory, as resolved. */
   path?: string;
   hash: string;
@@ -179,6 +180,13 @@ export interface ManifestOutput {
   sha256: string;
   warnings: string[];
   assets: ManifestAsset[];
+  /**
+   * Named-mask identities for adjusted layers (REQ-019) — present when the
+   * render used at least one `adjust`. Same shape as `assets`, keyed by the
+   * image layer id the mask belongs to; a rerender verifies these exactly
+   * like the layer assets, so mask bytes cannot drift silently.
+   */
+  masks?: ManifestAsset[];
   /** Present when finalization optimized the render to meet the 2 MB output limit. */
   optimization?: Optimization;
 }
@@ -255,6 +263,9 @@ export function buildManifest(opts: {
       sha256: sha256(o.png),
       warnings: o.warnings,
       assets: [...o.resolved.assets.entries()].map(([layer, a]) => assetEntry(layer, a)),
+      ...(o.resolved.masks.size
+        ? { masks: [...o.resolved.masks.entries()].map(([layer, a]) => assetEntry(layer, a)) }
+        : {}),
       ...(o.optimization ? { optimization: o.optimization } : {}),
     })),
     ...(opts.contact
@@ -297,7 +308,7 @@ class ManifestErrors {
 }
 
 /** Known keys per object — unknown keys are rejected, never silently ignored. */
-const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets", "optimization"]);
+const OUTPUT_KEYS = new Set(["output", "width", "height", "sha256", "warnings", "assets", "masks", "optimization"]);
 const ASSET_KEYS = new Set(["layer", "scope", "id", "kind", "path", "hash", "mediaType"]);
 
 function checkAsset(at: string, v: unknown, errs: ManifestErrors): void {
@@ -309,8 +320,9 @@ function checkAsset(at: string, v: unknown, errs: ManifestErrors): void {
   if (!isHex64(v.hash)) errs.at(`${at}.hash`, `"hash" must be a full sha-256 hex digest`);
   if (typeof v.mediaType !== "string" || !v.mediaType) errs.at(`${at}.mediaType`, `"mediaType" must be a string`);
   if (v.id !== undefined && (typeof v.id !== "string" || !v.id)) errs.at(`${at}.id`, `"id" must be a string`);
-  if (v.kind !== undefined && v.kind !== "logo" && v.kind !== "plate" && v.kind !== "cutout" && v.kind !== "object")
-    errs.at(`${at}.kind`, `"kind" must be "logo", "plate", "cutout", or "object"`);
+  if (v.kind !== undefined &&
+    v.kind !== "logo" && v.kind !== "plate" && v.kind !== "cutout" && v.kind !== "object" && v.kind !== "mask")
+    errs.at(`${at}.kind`, `"kind" must be "logo", "plate", "cutout", "object", or "mask"`);
   if (v.path !== undefined && !isRelPath(v.path)) errs.at(`${at}.path`, `"path" must be a relative path`);
   if (v.scope === "library" && typeof v.id !== "string")
     errs.at(`${at}.id`, `a library asset identity needs the resolved asset "id"`);
@@ -329,6 +341,10 @@ function checkOutput(at: string, v: unknown, errs: ManifestErrors): void {
     errs.at(`${at}.warnings`, `"warnings" must be an array of strings`);
   if (!Array.isArray(v.assets)) errs.at(`${at}.assets`, `"assets" must be an array`);
   else v.assets.forEach((a, i) => checkAsset(`${at}.assets[${i}]`, a, errs));
+  if (v.masks !== undefined) {
+    if (!Array.isArray(v.masks)) errs.at(`${at}.masks`, `"masks" must be an array`);
+    else v.masks.forEach((m, i) => checkAsset(`${at}.masks[${i}]`, m, errs));
+  }
   if (v.optimization !== undefined) {
     const at2 = `${at}.optimization`;
     if (!isObject(v.optimization)) errs.at(at2, `"optimization" must be an object`);

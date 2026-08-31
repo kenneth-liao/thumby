@@ -487,6 +487,48 @@ its bounding box:
 A worked grouped component lives at
 `test/fixtures/shape-group/logo-card.json` — render it and inspect the PNG.
 
+### Named masks — local colorization
+
+A Creator Asset can reference **named semantic masks** — PNGs whose alpha
+selects a region of the asset (a `shirt`, a `logo`, a background) — through
+its `meta.json`:
+
+```json
+{ "kind": "cutout", "id": "ken", "approval": "approved",
+  "masks": { "shirt": "ken-shirt" } }
+```
+
+The mask reference is a normal Asset reference (`library:<id>` or a bare id,
+pinnable with `@<sha256>`), added with `bun run library add-mask`. A mask must
+be a PNG with exactly the Creator Asset's pixel dimensions.
+
+An Image layer can then apply a **masked colorization** (REQ-019) through one
+named mask:
+
+```json
+{ "id": "ken", "type": "image", "asset": "ken",
+  "adjust": { "mask": "shirt", "color": "#1565d8" } }
+```
+
+The adjustment repaints only the pixels the mask selects, blended so the
+asset's own shading survives (hue and saturation from `color`, luminance from
+the asset) — a shirt recolor keeps every fold and highlight. Every pixel the
+mask does not select is byte-identical to the unadjusted render, and the
+source Asset is never flattened or mutated. `adjust` patches as one whole
+field, so Variants recolor the same untouched Creator Asset:
+
+```json
+{ "variants": {
+  "blue-shirt": { "changes": [{ "layer": "ken",
+    "set": { "adjust": { "mask": "shirt", "color": "#1565d8" } } }] } } }
+```
+
+An unknown mask name, a missing mask asset, a non-PNG mask, and a
+dimension mismatch all fail at `scene validate`/`render` with a
+`layers[i].adjust.mask` error before any render. Rollback note: `adjust` is
+an optional image-layer property — a Scene using it fails to load on older
+binaries with an unknown-property error, before any render.
+
 ### Themes and templates
 
 **Themes** are bundled named defaults for style properties — `text` (weight,

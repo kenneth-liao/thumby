@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.20.0]
+
+### Added
+
+- Named semantic masks on Creator Assets (REQ-019, #18): a cutout's `meta.json` can map mask names to Asset references (`masks: { "shirt": "ken-shirt" }`) through the one resolution contract — hash-pinnable, added with `bun run library add-mask` (new `mask` library kind: PNG-only, `assets/masks/<id>/mask.png`)
+- Masked colorization on Image layers (`adjust: { mask, color }`, #18): repaints only the pixels the named mask selects, blended so the asset's own shading survives (`mask-image` + `mix-blend-mode: color`) — every pixel outside the mask is byte-identical to the unadjusted render, and the source Asset is never flattened or mutated. `adjust` patches as one whole field, so Variants recolor the same unchanged Creator Asset with no generation call
+- Pre-render gate for masked adjustments (#18): an unknown mask name (listing the available ones), an asset that defines no masks, a missing mask reference, a non-PNG mask, and a dimension-mismatched mask all fail at load with a `layers[i].adjust.mask` error before any render
+- Render manifests are schema version 4: outputs record the named-mask identities they used (`outputs[].masks`); readers accept 1–4 and `scene rerender` verifies mask bytes exactly like layer assets, so mask content cannot drift silently since a render
+- `scene inspect` surfaces an image layer's `adjust` (and `library list` shows a Masks section)
+
 ## [0.19.0]
 
 ### Added

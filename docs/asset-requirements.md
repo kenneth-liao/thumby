@@ -82,6 +82,24 @@ Known asset caveats:
   be derived from the other. `overlay.ts` draws an SVG approximation
   (`claudeMark`) — replace it if a transparent coral mark turns up.
 
+## Masks
+
+Named semantic masks (REQ-019) select a region of the Creator Asset that
+references them — the selection an `adjust` colorization repaints. Add one
+with `bun run library add-mask <mask.png> --id <name>`.
+
+- **PNG only** — the scene gate reads pixel dimensions from the bytes; an
+  SVG mask cannot be dimension-checked.
+- **Same pixel dimensions as the asset it adjusts** — a mask is an alpha
+  map over that asset's pixel grid, enforced at load.
+- **Alpha selects** — opaque (alpha 255) pixels are colorized; transparent
+  pixels are untouched; soft alpha blends. Draw the mask in grayscale, paint
+  the region white, delete to transparent — never rely on color, only alpha.
+- **One selection per mask, named for the region** (`shirt`, not `mask2`) —
+  the name is the Creator Asset's editing vocabulary.
+- **Match the asset's edges, not its box** — a mask that spills past the
+  subject's alpha would paint flat color onto transparency.
+
 ## Plates
 
 Plates are AI-generated at **1536×864** (exact 16:9), so they already exceed
