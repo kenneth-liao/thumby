@@ -1,5 +1,5 @@
 node_modules
-out/
+/out
 test-plate.png
 .env
 .env.local
@@ -13,4 +13,7 @@ overlays/*.local.json
 .worktrees/
 # Local matting weights: pinned by sha-256 in src/segment.ts, fetched on
 # demand, never committed (half a gigabyte of third-party model bytes).
-models/
+# (Root-anchored, no trailing slash: the worktree convenience symlink must be
+# ignored too — a committed symlink holds an absolute path that breaks fresh
+# checkouts — while src/models.ts and future nested names stay trackable.)
+/models

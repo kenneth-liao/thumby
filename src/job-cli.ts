@@ -64,10 +64,10 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
                                             Adopt a candidate (exact hash or unique prefix)
                                             as a new immutable Asset of the job's kind.
                                             Adoption never overwrites an existing asset;
-                                            an object candidate must carry true alpha, a
-                                            creator candidate is adopted as its matte, and
-                                            creator adoption always enters the library as
-                                            trial.
+                                            an object or creator candidate with a matte is
+                                            adopted as that matte (verified true alpha), one
+                                            without is refused; creator adoption always enters
+                                            the library as trial.
 
 plates options
   --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
@@ -83,8 +83,12 @@ plates options
 objects options
   Same as plates minus --zone. The subject must name an isolated non-text
   object — official logos and final text are rejected as targets (logos come
-  from sourced Assets, text is rendered locally; ADR-0001). Adopted Object
-  Assets carry a verified true-alpha matte; an opaque candidate is refused.
+  from sourced Assets, text is rendered locally; ADR-0001). Every object
+  candidate goes through the matting pass — the same local BiRefNet
+  segmenter as creators (ADR-0006), local and unbilled — and adoption adopts
+  that matte, since the models return opaque RGB. A natively isolated
+  candidate is kept as-is. Adopted Object Assets carry a verified true-alpha
+  matte; an opaque candidate with no matte is refused.
 
 creators options
   Same as plates minus --zone. Requires at least one identity reference —
@@ -208,7 +212,7 @@ export interface JobCliDeps {
   generate: PlateGenerator;
   generateObject: ObjectGenerator;
   generateCreator: CreatorGenerator;
-  /** The matting pass creator candidates are isolated with before they can be adopted. */
+  /** The matting pass creator and object candidates are isolated with before they can be adopted. */
   matte: MatteEngine;
   /** Where job records live (default: <cwd>/out/jobs). */
   jobsRoot: string;
@@ -384,7 +388,7 @@ async function startJob(
     kind === "plate"
       ? await runPlateJob(deps.jobsRoot, jobId, { kind, zone: fields.zone ?? "left", ...common }, deps.generate)
       : kind === "object"
-        ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject)
+        ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject, deps.matte)
         : await runCreatorJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateCreator, deps.matte);
   const runIndex = job.runs.length - 1;
   return ok({
@@ -455,8 +459,9 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
       deps.jobsRoot,
       first,
       generator,
-      // Only creator runs are matted; the engine is inert for other kinds.
-      recorded.request.kind === "creator" ? deps.matte : undefined,
+      // recordRun is the single reader of which kinds are matted; the pass is
+      // inert for plates, so the engine is handed over unconditionally.
+      deps.matte,
     );
     const runIndex = job.runs.length - 1;
     return ok({

@@ -1,7 +1,7 @@
 # ADR-0006: Isolation is a local matting pass in the Job lifecycle
 
-- Status: Accepted (from ticket #16, `REQ-017`)
-- Context: Creator candidates must reach the library as isolated Cutout Assets with a verified true-alpha matte, but the tested likeness recipe cannot produce one
+- Status: Accepted (from ticket #16, `REQ-017`); amended from ticket #20 — object candidates run the same pass
+- Context: Creator candidates must reach the library as isolated Cutout Assets with a verified true-alpha matte, but the tested likeness recipe cannot produce one. Ticket #20 measured the same for object candidates: `gpt-image-2` paints even a checkerboard backdrop rather than returning alpha, so an opaque object could never be adopted
 
 ## Decision
 
@@ -12,6 +12,11 @@ and adoption, and it runs **locally**:
   as part of its run. The pass produces the candidate's **matte** — true-alpha
   bytes recorded beside the candidate under their own content identity, with
   the engine that produced them.
+- **Amendment (ticket #20):** object candidates run the same pass. `REQ-015`
+  already named segmentation-quality matting as an object's isolation route,
+  and the measured reality is that image models return objects opaque. An
+  object candidate adopted through its matte carries the matte's identity and
+  records the engine; a natively isolated candidate is kept as-is.
 - The engine is a **local ONNX subject segmenter** (`src/segment.ts`):
   BiRefNet (MIT), fp16, run through `onnxruntime-node` with the CoreML
   execution provider on Apple silicon and CPU otherwise. The predicted mask

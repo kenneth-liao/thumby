@@ -107,6 +107,8 @@ export interface ObjectMeta {
   adoptedFrom?: string;
   /** How the object was isolated — adoption only accepts verified true alpha. */
   matting: "true-alpha";
+  /** The matting engine that produced it ("native-alpha" when the model returned one). */
+  matteEngine?: string;
 }
 
 /**

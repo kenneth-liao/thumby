@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.22.0]
+
+### Added
+
+- Object candidates run the local matting pass (REQ-015, #20): measured reality is that image models return objects opaque — `gpt-image-2` paints even a checkerboard backdrop rather than returning alpha — so `jobs objects` now runs the same local BiRefNet pass as creators (ADR-0006, unbilled), records each candidate's matte under its own content identity, and adoption adopts that verified true-alpha matte (identity is the matte's; the engine is recorded on the Asset). A natively isolated candidate is kept as-is with no inference. `runObjectJob`/`rerunObjectJob` take the engine as a required parameter, mirroring creators — an object job that could record never-adoptable candidates cannot be created; a failed pass is a recorded warning, never a silent discard, and the opaque-adoption error now says to rerun
+
 ## [0.21.0]
 
 ### Added

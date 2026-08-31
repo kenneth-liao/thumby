@@ -3,6 +3,7 @@ import { mkdtemp, rm, readFile, mkdir, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PlateGenerator, ObjectGenerator } from "../src/jobs.js";
+import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { scanLibrary } from "../src/assets.js";
 import { run as cliRun, PRODUCTION_GENERATOR, generateOptionsFor } from "../src/job-cli.js";
 import { encodePng } from "./png.js";
@@ -37,8 +38,9 @@ function run(
   args: string[],
   generate: PlateGenerator = fakeGen,
   generateObject: ObjectGenerator = fakeObjectGen,
+  matte: MatteEngine = tripwireMatte,
 ) {
-  return cliRun(args, { generate, generateObject, jobsRoot, libraryRoot });
+  return cliRun(args, { generate, generateObject, matte, jobsRoot, libraryRoot });
 }
 
 const PLATES_ARGS = ["plates", "neon server room", "--zone", "left", "--count", "2"];
@@ -211,6 +213,22 @@ const ALPHA_PNG = encodePng(16, 16, (x, y) =>
   x < 4 && y < 4 ? [255, 0, 0, 255] : [0, 0, 0, 0],
 );
 
+/** Opaque PNG (color type 2): a subject over a painted backdrop, no alpha. */
+const OPAQUE_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [230, 120, 80, 255] : [20, 90, 200, 255]),
+  { colorType: 2 },
+);
+
+/** The segmentation mask the working fake engine predicts for it. */
+const MASK_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [255, 255, 255, 255] : [0, 0, 0, 255]),
+  { colorType: 2 },
+);
+
 let objN = 0;
 const fakeObjectGen: ObjectGenerator = async (req) => ({
   candidates: Array.from({ length: req.count }, () => ({
@@ -219,6 +237,26 @@ const fakeObjectGen: ObjectGenerator = async (req) => ({
   })),
   warnings: [],
   fullPrompt: `OBJECT<${req.subject}>`,
+});
+
+/** The harness matte is a tripwire: native-alpha candidates must never reach it. */
+const tripwireMatte: MatteEngine = async () => {
+  throw new Error("test engine must not run — candidates are native-alpha");
+};
+
+/** The measured reality: an opaque candidate whose backdrop is painted pixels. */
+const opaqueObjectGen: ObjectGenerator = async (req) => ({
+  candidates: [
+    { bytes: Buffer.concat([OPAQUE_PNG, Buffer.from(`-${objN++}`)]), mediaType: "image/png" },
+  ],
+  warnings: [],
+  fullPrompt: `OBJECT<${req.subject}>`,
+});
+
+/** A working fake engine: the predicted mask composed on by the real composer. */
+const workingMatte: MatteEngine = async ({ bytes, label }) => ({
+  bytes: composeMatte(bytes, MASK_PNG, label),
+  engine: "test/segmentation",
 });
 
 describe("jobs objects", () => {
@@ -262,6 +300,45 @@ describe("jobs objects", () => {
     const out = second.output as Record<string, any>;
     expect(out.kind).toBe("object");
     expect(out.job.runs).toHaveLength(2);
+  });
+
+  test("an opaque object job is matted end-to-end through the CLI — run, rerun, adopt", async () => {
+    // The measured reality through the real command path: the model returns
+    // opaque candidates, the CLI hands the engine to the run and the rerun,
+    // and adoption writes the matte. Reverting the CLI's object-engine wiring
+    // fails this test instead of leaving CI green.
+    await run(
+      ["objects", "a chrome fishing hook", "--job", "obj-opaque-cli"],
+      undefined,
+      opaqueObjectGen,
+      workingMatte,
+    );
+    const rerun = await run(["rerun", "obj-opaque-cli"], undefined, opaqueObjectGen, workingMatte);
+    expect(rerun.exitCode).toBe(0);
+    const job = ((rerun.output as Record<string, any>).job) as Record<string, any>;
+    expect(job.runs).toHaveLength(2);
+    for (const run_ of job.runs)
+      for (const cand of run_.candidates) {
+        expect(cand.matte).toBeDefined();
+        expect(cand.matte.engine).toBe("test/segmentation");
+      }
+
+    // Adopt from the rerun's candidates: the matte enters the library, not
+    // the opaque candidate — the asset's hash is the matte's.
+    const rerunCandidates = job.runs[1].candidates as Array<Record<string, any>>;
+    const res = await run([
+      "adopt",
+      "obj-opaque-cli",
+      (rerunCandidates[0]!.contentHash as string).slice(0, 12),
+      "--id",
+      "hook-tile",
+    ]);
+    expect(res.exitCode).toBe(0);
+    const lib = await scanLibrary(libraryRoot);
+    const asset = lib.objects.find((o) => o.meta.id === "hook-tile")!;
+    expect(asset.hash).toBe(rerunCandidates[0]!.matte.contentHash);
+    expect(asset.meta.matting).toBe("true-alpha");
+    expect(asset.meta.matteEngine).toBe("test/segmentation");
   });
 
   test("adopt dispatches to the alpha-gated object path", async () => {

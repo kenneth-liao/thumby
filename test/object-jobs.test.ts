@@ -13,6 +13,7 @@ import {
   type ObjectGenerator,
   type ObjectJobRequest,
 } from "../src/jobs.js";
+import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { scanLibrary, writePlateAsset } from "../src/assets.js";
 import { loadScene } from "../src/scene.js";
 import { buildManifest, readManifest } from "../src/manifest.js";
@@ -40,6 +41,22 @@ const ALPHA_PNG = encodePng(16, 16, (x, y) =>
   x < 4 && y < 4 ? [255, 0, 0, 255] : [0, 0, 0, 0],
 );
 
+/** The measured reality: an opaque candidate whose backdrop is painted pixels. */
+const OPAQUE_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [230, 120, 80, 255] : [20, 90, 200, 255]),
+  { colorType: 2 },
+);
+
+/** The segmentation mask the matting engine predicts for it. */
+const MASK_PNG = encodePng(
+  16,
+  16,
+  (x, y) => (x < 8 && y < 8 ? [255, 255, 255, 255] : [0, 0, 0, 255]),
+  { colorType: 2 },
+);
+
 let genCounter = 0;
 const fakeGen: ObjectGenerator = async (req) => ({
   candidates: Array.from({ length: req.count }, () => ({
@@ -50,6 +67,20 @@ const fakeGen: ObjectGenerator = async (req) => ({
   })),
   warnings: [],
   fullPrompt: `OBJECT<${req.subject}>`,
+});
+
+const opaqueGen: ObjectGenerator = async (req) => ({
+  candidates: [
+    { bytes: Buffer.concat([OPAQUE_PNG, Buffer.from(`-${genCounter++}`)]), mediaType: "image/png" },
+  ],
+  warnings: [],
+  fullPrompt: `OBJECT<${req.subject}>`,
+});
+
+/** The matting seam under test: a predicted mask applied by the real composer. */
+const fakeMatte: MatteEngine = async ({ bytes, label }) => ({
+  bytes: composeMatte(bytes, MASK_PNG, label),
+  engine: "test/segmentation",
 });
 
 const baseRequest = (): ObjectJobRequest => ({
@@ -80,7 +111,7 @@ describe("validateObjectSubject", () => {
 
 describe("runObjectJob", () => {
   test("creates an object job record with the same run contract as plates", async () => {
-    const job = await runObjectJob(jobRoot, "obj-lamp", baseRequest(), fakeGen);
+    const job = await runObjectJob(jobRoot, "obj-lamp", baseRequest(), fakeGen, fakeMatte);
 
     expect(job.kind).toBe("object");
     expect(job.request).toEqual(baseRequest());
@@ -103,23 +134,87 @@ describe("runObjectJob", () => {
       return fakeGen(req);
     };
     await expect(
-      runObjectJob(jobRoot, "obj-logo", { ...baseRequest(), subject: "the OpenAI logo" }, spy),
+      runObjectJob(jobRoot, "obj-logo", { ...baseRequest(), subject: "the OpenAI logo" }, spy, fakeMatte),
     ).rejects.toThrow(/logo|text/i);
     expect(calls).toBe(0);
   });
 
   test("refuses to create over an existing job id", async () => {
-    await runObjectJob(jobRoot, "obj-dup", baseRequest(), fakeGen);
-    await expect(runObjectJob(jobRoot, "obj-dup", baseRequest(), fakeGen)).rejects.toThrow(
-      /rerun|already exists/i,
+    await runObjectJob(jobRoot, "obj-dup", baseRequest(), fakeGen, fakeMatte);
+    await expect(
+      runObjectJob(jobRoot, "obj-dup", baseRequest(), fakeGen, fakeMatte),
+    ).rejects.toThrow(/rerun|already exists/i);
+  });
+
+  test("mattes every opaque object candidate — the model's opaque output becomes adoptable", async () => {
+    const job = await runObjectJob(jobRoot, "obj-matted", baseRequest(), opaqueGen, fakeMatte);
+    expect(job.runs).toHaveLength(1);
+    for (const cand of job.runs[0]!.candidates) {
+      expect(cand.matte).toBeDefined();
+      expect(cand.matte!.engine).toBe("test/segmentation");
+      expect(cand.matte!.file.startsWith("mattes/")).toBe(true);
+      // The recorded matte is on disk under its own content identity.
+      const bytes = await readFile(path.join(jobRoot, "obj-matted", cand.matte!.file));
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(cand.matte!.contentHash);
+      // The matte differs from the raw candidate — isolation changed the bytes.
+      expect(cand.contentHash).not.toBe(cand.matte!.contentHash);
+    }
+  });
+
+  test("keeps a native-alpha object candidate as-is — no inference", async () => {
+    let engineCalls = 0;
+    const spyMatte: MatteEngine = async (input) => {
+      engineCalls++;
+      return fakeMatte(input);
+    };
+    const job = await runObjectJob(jobRoot, "obj-native", baseRequest(), fakeGen, spyMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    expect(engineCalls).toBe(0);
+    expect(cand.matte!.engine).toBe("native-alpha");
+    expect(cand.matte!.contentHash).toBe(cand.contentHash);
+  });
+
+  test("a failed object matte is recorded as a warning, not a discard", async () => {
+    const brokenMatte: MatteEngine = async () => {
+      throw new Error("segmenter unavailable");
+    };
+    const job = await runObjectJob(jobRoot, "obj-nomatte", { ...baseRequest(), count: 1 }, opaqueGen, brokenMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+    expect(cand.matte).toBeUndefined();
+    expect(job.runs[0]!.warnings.join("\n")).toMatch(/matte:.*could not be isolated/i);
+  });
+
+  test("rerun mattes its fresh candidates under the same contract", async () => {
+    await runObjectJob(jobRoot, "obj-rerun-matte", { ...baseRequest(), count: 1 }, opaqueGen, fakeMatte);
+    const second = await rerunObjectJob(jobRoot, "obj-rerun-matte", opaqueGen, fakeMatte);
+    expect(second.runs).toHaveLength(2);
+    for (const cand of second.runs[1]!.candidates) {
+      expect(cand.matte).toBeDefined();
+      expect(cand.matte!.engine).toBe("test/segmentation");
+    }
+  });
+
+  test("preflights the matting engine before any paid generation", async () => {
+    const notReady: MatteEngine = Object.assign(
+      (input: { bytes: Uint8Array; label: string }) => fakeMatte(input),
+      { preflight: async () => { throw new Error("weights missing — fetch them first"); } },
     );
+    let calls = 0;
+    const spy: ObjectGenerator = async (req) => {
+      calls++;
+      return opaqueGen(req);
+    };
+    await expect(
+      runObjectJob(jobRoot, "obj-preflight", baseRequest(), spy, notReady),
+    ).rejects.toThrow(/weights missing/);
+    expect(calls).toBe(0);
   });
 });
 
 describe("rerunObjectJob", () => {
   test("appends a run under the lineage without touching prior candidates", async () => {
-    const first = await runObjectJob(jobRoot, "obj-lineage", baseRequest(), fakeGen);
-    const second = await rerunObjectJob(jobRoot, "obj-lineage", fakeGen);
+    const first = await runObjectJob(jobRoot, "obj-lineage", baseRequest(), fakeGen, fakeMatte);
+    const second = await rerunObjectJob(jobRoot, "obj-lineage", fakeGen, fakeMatte);
     expect(second.runs).toHaveLength(2);
     expect(second.runs[0]).toEqual(first.runs[0]);
     const hashes = second.runs.flatMap((r) => r.candidates.map((c) => c.contentHash));
@@ -129,7 +224,7 @@ describe("rerunObjectJob", () => {
 
 describe("adoptCandidate for object jobs", () => {
   test("adopts a true-alpha candidate as an Object Asset with provenance", async () => {
-    const job = await runObjectJob(jobRoot, "obj-adopt", baseRequest(), fakeGen);
+    const job = await runObjectJob(jobRoot, "obj-adopt", baseRequest(), fakeGen, fakeMatte);
     const cand = job.runs[0]!.candidates[0]!;
 
     const result = await adoptCandidate(jobRoot, "obj-adopt", cand.contentHash, "lamp", {
@@ -152,21 +247,43 @@ describe("adoptCandidate for object jobs", () => {
     expect(result.imagePath).toBe(asset.imagePath);
   });
 
-  test("refuses an opaque candidate — chroma-key color distance cannot qualify", async () => {
-    const opaqueGen: ObjectGenerator = async (req) => ({
-      candidates: [
-        { bytes: encodePng(16, 16, () => [20, 90, 200, 255]), mediaType: "image/png" },
-      ],
-      warnings: [],
-      fullPrompt: `OBJECT<${req.subject}>`,
+  test("adopts a matted candidate's matte — verified true alpha enters the library", async () => {
+    const job = await runObjectJob(jobRoot, "obj-adopt-matte", { ...baseRequest(), count: 1 }, opaqueGen, fakeMatte);
+    const cand = job.runs[0]!.candidates[0]!;
+
+    const result = await adoptCandidate(jobRoot, "obj-adopt-matte", cand.contentHash, "tile", {
+      libraryRoot,
+      name: "Hook Tile",
+      tags: ["hook-scene"],
     });
-    await runObjectJob(jobRoot, "obj-opaque", { ...baseRequest(), count: 1 }, opaqueGen);
+
+    // The asset's identity is the matte's — the isolated form is what ships.
+    expect(result.contentHash).toBe(cand.matte!.contentHash);
+    expect(result.adoptedFrom).toBe(`job:obj-adopt-matte#${cand.contentHash}`);
+    const lib = await scanLibrary(libraryRoot);
+    const asset = lib.objects.find((o) => o.meta.id === "tile")!;
+    expect(asset.hash).toBe(cand.matte!.contentHash);
+    expect(asset.meta.kind).toBe("object");
+    if (asset.meta.kind === "object") {
+      expect(asset.meta.matting).toBe("true-alpha");
+      expect(asset.meta.matteEngine).toBe("test/segmentation");
+      expect(asset.meta.subject).toBe("a retro desk lamp");
+      expect(asset.meta.model).toBe("openai/gpt-image-2");
+    }
+    expect(result.imagePath).toBe(asset.imagePath);
+  });
+
+  test("refuses an opaque candidate with no matte — chroma-key color distance cannot qualify", async () => {
+    const brokenMatte: MatteEngine = async () => {
+      throw new Error("segmenter unavailable");
+    };
+    await runObjectJob(jobRoot, "obj-opaque", { ...baseRequest(), count: 1 }, opaqueGen, brokenMatte);
     const job = await loadJob(jobRoot, "obj-opaque");
     const hash = job.runs[0]!.candidates[0]!.contentHash;
 
     await expect(
       adoptCandidate(jobRoot, "obj-opaque", hash, "opaque-lamp", { libraryRoot }),
-    ).rejects.toThrow(/chroma-key|alpha/i);
+    ).rejects.toThrow(/matte|chroma-key|alpha/i);
     // Nothing entered the library.
     const lib = await scanLibrary(libraryRoot);
     expect(lib.objects).toHaveLength(0);
@@ -178,16 +295,16 @@ describe("adoptCandidate for object jobs", () => {
       warnings: [],
       fullPrompt: "p",
     });
-    await runObjectJob(jobRoot, "obj-jpeg", { ...baseRequest(), count: 1 }, jpegGen);
+    await runObjectJob(jobRoot, "obj-jpeg", { ...baseRequest(), count: 1 }, jpegGen, fakeMatte);
     const job = await loadJob(jobRoot, "obj-jpeg");
     const hash = job.runs[0]!.candidates[0]!.contentHash;
     await expect(
       adoptCandidate(jobRoot, "obj-jpeg", hash, "jpeg-lamp", { libraryRoot }),
-    ).rejects.toThrow(/PNG|alpha/i);
+    ).rejects.toThrow(/PNG|alpha|matte/i);
   });
 
   test("never overwrites an existing asset", async () => {
-    await runObjectJob(jobRoot, "obj-overwrite", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-overwrite", baseRequest(), fakeGen, fakeMatte);
     const job = await loadJob(jobRoot, "obj-overwrite");
     const [a, b] = job.runs[0]!.candidates;
     await adoptCandidate(jobRoot, "obj-overwrite", a!.contentHash, "taken", { libraryRoot });
@@ -199,7 +316,7 @@ describe("adoptCandidate for object jobs", () => {
 
 describe("loadJob record integrity", () => {
   test("refuses a record whose kind contradicts its request kind — one discriminant or none", async () => {
-    await runObjectJob(jobRoot, "obj-contradiction", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-contradiction", baseRequest(), fakeGen, fakeMatte);
     const file = path.join(jobRoot, "obj-contradiction", "job.json");
     const tampered = JSON.parse(await readFile(file, "utf8"));
     tampered.kind = "plate"; // claims the plate contract while carrying an object request
@@ -212,13 +329,13 @@ describe("loadJob record integrity", () => {
   });
 
   test("writes object jobs as schemaVersion 2 and keeps plate records at v1", async () => {
-    await runObjectJob(jobRoot, "obj-v2", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-v2", baseRequest(), fakeGen, fakeMatte);
     const objRecord = JSON.parse(await readFile(path.join(jobRoot, "obj-v2", "job.json"), "utf8"));
     expect(objRecord.schemaVersion).toBe(2);
   });
 
   test("rejects a v1 record claiming kind object — v1 is plate-only, the rollback boundary", async () => {
-    await runObjectJob(jobRoot, "obj-forged-v1", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-forged-v1", baseRequest(), fakeGen, fakeMatte);
     const file = path.join(jobRoot, "obj-forged-v1", "job.json");
     const rec = JSON.parse(await readFile(file, "utf8"));
     rec.schemaVersion = 1; // what a 0.15.1-era plate-only record would carry
@@ -235,7 +352,7 @@ describe("loadJob record integrity", () => {
       warnings: [],
       fullPrompt: "p",
     });
-    await runObjectJob(jobRoot, "obj-mislabeled", { ...baseRequest(), count: 1 }, mislabeled);
+    await runObjectJob(jobRoot, "obj-mislabeled", { ...baseRequest(), count: 1 }, mislabeled, fakeMatte);
     const job = await loadJob(jobRoot, "obj-mislabeled");
     const hash = job.runs[0]!.candidates[0]!.contentHash;
     const result = await adoptCandidate(jobRoot, "obj-mislabeled", hash, "lamp", { libraryRoot });
@@ -249,7 +366,7 @@ describe("loadJob record integrity", () => {
 
 describe("listJobs with object jobs", () => {
   test("summarizes both kinds from one jobs root", async () => {
-    await runObjectJob(jobRoot, "obj-a", { ...baseRequest(), count: 1 }, fakeGen);
+    await runObjectJob(jobRoot, "obj-a", { ...baseRequest(), count: 1 }, fakeGen, fakeMatte);
     const jobs = await listJobs(jobRoot);
     const a = jobs.find((j) => j.jobId === "obj-a")!;
     expect(a.kind).toBe("object");
@@ -260,7 +377,7 @@ describe("listJobs with object jobs", () => {
 
 describe("an adopted Object Asset in a Scene", () => {
   test("loads as an Image layer behind and in front of other layers, movable and hideable", async () => {
-    await runObjectJob(jobRoot, "obj-scene", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-scene", baseRequest(), fakeGen, fakeMatte);
     const job = await loadJob(jobRoot, "obj-scene");
     await adoptCandidate(jobRoot, "obj-scene", job.runs[0]!.candidates[0]!.contentHash, "lamp", {
       libraryRoot,
@@ -302,7 +419,7 @@ describe("an adopted Object Asset in a Scene", () => {
   });
 
   test("records the object kind in a Render manifest that verifies on read", async () => {
-    await runObjectJob(jobRoot, "obj-manifest", baseRequest(), fakeGen);
+    await runObjectJob(jobRoot, "obj-manifest", baseRequest(), fakeGen, fakeMatte);
     const job = await loadJob(jobRoot, "obj-manifest");
     await adoptCandidate(jobRoot, "obj-manifest", job.runs[0]!.candidates[0]!.contentHash, "lamp", {
       libraryRoot,
