@@ -1,5 +1,6 @@
 import { generateText, generateImage } from "ai";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveModel, type ModelSpec } from "./models.js";
 
@@ -60,6 +61,79 @@ function buildObjectPrompt(subject: string): string {
   ].join("\n");
 }
 
+// --- creator generation (REQ-017) --------------------------------------------
+
+/** A creator reference as the prompt sees it: a role plus its image. */
+export interface CreatorRefInput {
+  role: string;
+  path: string;
+  /** Recorded content identity — when present, the bytes sent to the model are verified against it. */
+  contentHash?: string;
+}
+
+/**
+ * Per-role instructions, role-assigning every reference in the prompt —
+ * unassigned references make the model average faces (the chubby-drift
+ * failure mode, docs/asset-requirements.md). The likeness recipe lines are
+ * the tested rules from that document.
+ */
+const CREATOR_ROLE_INSTRUCTIONS: Record<string, string> = {
+  identity:
+    "identity anchor — copy this person's face exactly: do not widen, round, age, or blend the face with any other reference",
+  pose: "pose reference — body pose, gesture, and framing only; never take a face from it",
+  expression: "expression reference — facial expression only; never take a face from it",
+  outfit: "outfit reference — clothing and styling only",
+  style: "style reference — lighting and visual style only",
+  edit: "source-to-edit — the image to change; keep its person's identity exactly",
+};
+
+/**
+ * The model-adapted reference order (REQ-017): identity anchors first, the
+ * pose reference last, every other role in declared order between — the
+ * ordering the tested likeness recipe prescribes. The prompt's role manifest
+ * is built from this same order, so the recorded fullPrompt always describes
+ * how the images were actually attached, whatever the model's call shape.
+ */
+export function creatorRefOrder(refs: CreatorRefInput[]): CreatorRefInput[] {
+  const identity = refs.filter((r) => r.role === "identity");
+  const pose = refs.filter((r) => r.role === "pose");
+  const middle = refs.filter((r) => r.role !== "identity" && r.role !== "pose");
+  return [...identity, ...middle, ...pose];
+}
+
+/**
+ * The creator prompt: the subject, a numbered role manifest of the attached
+ * references, the tested likeness recipe, and the isolation contract. The
+ * The isolation contract is what the matting pass needs — a plain flat
+ * background and crisp edges — not a request for transparency the model
+ * cannot honour (ADR-0006). The role
+ * manifest is what preserves each reference's declared role in the Job's
+ * effective-prompt provenance — by ordinal and role label only: local paths
+ * are machine details and never leave the box (they live in the Job's typed
+ * request record).
+ */
+export function buildCreatorPrompt(subject: string, orderedRefs: CreatorRefInput[]): string {
+  const manifest = orderedRefs
+    .map((r, i) => {
+      const what = CREATOR_ROLE_INSTRUCTIONS[r.role];
+      return `image ${i + 1} — ${r.role}${what ? ` (${what})` : ""}`;
+    })
+    .join("\n");
+  return [
+    subject,
+    "",
+    "Reference images are attached in this exact order — role-assign every one:",
+    manifest,
+    "",
+    "Copy the face from the identity anchors exactly — do not widen, round, or blend. Do not average the references into a different person.",
+    "",
+    "Format: exactly one single isolated creator figure, fully inside the frame with clear margins around it, on a plain, uniform, evenly lit background — no environment, no scene, no room, no props, no surface it stands on.",
+    "Style: clean readable silhouette at small sizes, even studio-like lighting, crisp well-defined edges the matting pass can cut cleanly.",
+    "Do not paint a checkerboard or any other transparency indicator: isolation is done locally after generation, so the background here must be a plain flat colour.",
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, no UI elements, and no composite thumbnail layout — this figure will be composited into a design by local tooling.",
+  ].join("\n");
+}
+
 /** AI SDK warnings are objects; flatten to one readable line. */
 function describeWarning(model: string, w: unknown): string {
   const o = w as { type?: string; feature?: string; setting?: string; details?: string; message?: string };
@@ -67,18 +141,23 @@ function describeWarning(model: string, w: unknown): string {
   return `${model}: ${o?.details ?? o?.message ?? `unsupported ${what}`}`;
 }
 
-async function refParts(refs: string[]) {
+/** A generation reference: a path to read, or already-verified bytes. */
+type GenRef = string | { bytes: Uint8Array };
+
+async function refParts(refs: GenRef[]) {
   return Promise.all(
-    refs.map(async (p) => ({
+    refs.map(async (r) => ({
       type: "image" as const,
-      image: await readFile(path.resolve(p)),
+      image: typeof r === "string" ? await readFile(path.resolve(r)) : r.bytes,
     })),
   );
 }
 
 /** Image models take raw bytes in GenerateImagePrompt.images, not file parts. */
-async function refBytes(refs: string[]) {
-  return Promise.all(refs.map((p) => readFile(path.resolve(p))));
+function refBytes(refs: GenRef[]) {
+  return Promise.all(
+    refs.map((r) => (typeof r === "string" ? readFile(path.resolve(r)) : Promise.resolve(r.bytes))),
+  );
 }
 
 export interface GenerateOptions {
@@ -101,6 +180,15 @@ export interface GenerateObjectOptions {
   subject: string;
   model: string;
   refs: string[];
+  count: number;
+  temperature?: number;
+}
+
+/** A creator-candidate generation request (REQ-017). */
+export interface GenerateCreatorOptions {
+  subject: string;
+  model: string;
+  refs: CreatorRefInput[];
   count: number;
   temperature?: number;
 }
@@ -132,7 +220,7 @@ export interface GeneratedPlate {
 async function runGeneration(
   spec: ModelSpec,
   prompt: string,
-  refs: string[],
+  refs: GenRef[],
   count: number,
   temperature?: number,
 ): Promise<{ plates: GeneratedPlate[]; warnings: string[] }> {
@@ -249,6 +337,80 @@ export async function generateObjects(
     warnings: [
       ...warnings,
       "object: transparency is requested in-prompt — adoption verifies true alpha and refuses opaque candidates (REQ-015)",
+    ],
+    fullPrompt: prompt,
+  };
+}
+
+/** A reference whose exact bytes are already loaded — no re-read, no drift. */
+export interface LoadedRef {
+  path: string;
+  bytes: Uint8Array;
+}
+
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * Load creator references and verify each file's bytes against the identity
+ * recorded at request time. The returned bytes are exactly what the model is
+ * sent — generation never re-reads a mutable path, so the provider cannot
+ * receive different content than the Job records (INT: request-to-generation
+ * drift is refused, not sent).
+ */
+export async function loadCreatorRefs(ordered: CreatorRefInput[]): Promise<LoadedRef[]> {
+  return Promise.all(
+    ordered.map(async (r): Promise<LoadedRef> => {
+      let bytes: Buffer;
+      try {
+        bytes = await readFile(path.resolve(r.path));
+      } catch {
+        throw new Error(
+          `Creator reference "${r.path}" (role ${r.role}) is missing — cannot start the generation`,
+        );
+      }
+      if (r.contentHash !== undefined) {
+        const actual = sha256(bytes);
+        if (actual !== r.contentHash)
+          throw new Error(
+            `Creator reference "${r.path}" (role ${r.role}) changed content identity after the request was recorded — sha-256 ${r.contentHash}, actual ${actual}. Record a new job for different references.`,
+          );
+      }
+      return { path: r.path, bytes };
+    }),
+  );
+}
+
+/**
+ * Creator candidate generation (REQ-017): typed references are adapted to the
+ * tested ordering (identity anchors first, pose last) and role-assigned in the
+ * effective prompt by ordinal, so the recorded fullPrompt preserves every
+ * declared role for any model call shape — with no local path sent off-box.
+ * The prompt asks for a clean, evenly lit figure on a flat background — the
+ * best input for the matting pass — and never for transparency: asking for it
+ * produced a painted checkerboard (ADR-0006).
+ * Reference bytes are verified against the recorded identities and those exact
+ * bytes are what the model receives. Isolation is requested in-prompt;
+ * adoption verifies true alpha — nothing hinges on the model's compliance.
+ */
+export async function generateCreators(
+  opts: GenerateCreatorOptions,
+): Promise<GenerateResult> {
+  const spec = resolveModel(opts.model);
+  const ordered = creatorRefOrder(opts.refs);
+  const verified = await loadCreatorRefs(ordered);
+  const prompt = buildCreatorPrompt(opts.subject, ordered);
+  const { plates, warnings } = await runGeneration(
+    spec,
+    prompt,
+    verified,
+    opts.count,
+    opts.temperature,
+  );
+  return {
+    plates,
+    warnings: [
+      ...warnings,
+      "creator: isolation comes from the matting pass, not the prompt — every candidate is matted before it is recorded, and adoption verifies the matte's true alpha (REQ-017)",
     ],
     fullPrompt: prompt,
   };

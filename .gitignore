@@ -11,3 +11,6 @@ assets/*
 !assets/fonts/
 overlays/*.local.json
 .worktrees/
+# Local matting weights: pinned by sha-256 in src/segment.ts, fetched on
+# demand, never committed (half a gigabyte of third-party model bytes).
+models/

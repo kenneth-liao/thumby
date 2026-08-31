@@ -103,22 +103,80 @@ preference — each carries its evidence.
 ### The identity recipe (tested 2026-08-26, re-tested 2026-08-27)
 
 Derived cutouts are generated through **`nano-2` / `nano-pro`** with a
-single edit pass from the identity kit (`assets/identity/kenny-headshots/`):
+single edit pass from the identity kit (`assets/identity/kenny-headshots/`).
+The recorded Generation Job workflow (`bun run jobs creators`) encodes the
+tested rules as request structure: reference roles are typed (`identity`,
+`pose`, `expression`, `outfit`, `style`, `edit`), anchors are attached first
+and the pose reference last, every reference is role-assigned in the effective
+prompt by ordinal, and ≥1 identity anchor is mandatory — a likeness is never
+generated from text alone. Review evidence comes from `bun run jobs review`
+(contact sheet + same-crop face-detail views against the anchors).
+
+The manual rules that predate the job workflow and still apply:
 
 - **Pass 4 headshot anchors first**, then **one
-  pose-only reference last**. Role-assign every ref in the prompt
-  ("images 1–4 = identity, image 5 = pose"). Unassigned refs make the model
-  average faces — the chubby-drift failure mode.
-- **Pick anchors by tag from `index.json`** (verified per-image at ~1028px,
-  2026-08-27): e.g. `frontal` + `teeth-smile` for a bright opener, `thinking`
-  for explainers. **Exclude `wide-eyes`/`shocked` anchors for calm
-  expressions** — they drag the expression wide-eyed.
-- The prompt must say **"copy his face exactly — do not widen, round, or
-  blend"**.
-- Background: **"one single solid #00FF00 edge to edge — no gradient, no
-  vignette, no corners"**, then key it with `src/chromakey.ts`.
+  pose-only reference last**. Unassigned refs make the model
+  average faces — the chubby-drift failure mode. (The job workflow's adapter
+  enforces the ordering; pick anchors by tag from `index.json` — verified
+  per-image at ~1028px, 2026-08-27: e.g. `frontal` + `teeth-smile` for a
+  bright opener, `thinking` for explainers. **Exclude
+  `wide-eyes`/`shocked` anchors for calm expressions** — they drag the
+  expression wide-eyed.)
+- The prompt says **"copy his face exactly — do not widen, round, or
+  blend"** (encoded in the job workflow's role manifest).
 - **One edit pass per cutout, always from the identity kit.** Stacked edits
-  compound drift. **Never generate the likeness from text alone.**
+  compound drift. **Never generate the likeness from text alone.** (Encoded:
+  the request boundary refuses creator jobs with no identity anchor.)
+
+### Isolation is a local matting pass (measured 2026-08-29, wired 2026-08-30)
+
+The tested nano recipe does **not** produce usable alpha. Measured through the
+recorded creator-job workflow (`int1-alpha-demo`, nano-2, 3 anchors, true
+transparency explicitly requested in-prompt): both candidates came back
+opaque RGB PNGs (color type 2), and one **painted a fake checkerboard texture
+imitating a transparency indicator** instead of carrying an alpha channel.
+Adoption's true-alpha gate refuses both by design — RGB chroma-key distance
+cannot qualify an output, and a painted checkerboard is not a matte.
+
+So isolation is a **stage of the job**, and it runs **on this machine**
+(ADR-0006). Every creator candidate goes through the **matting pass**: a
+BiRefNet ONNX segmenter (MIT, fp16) predicts the subject mask through
+`onnxruntime-node` — CoreML on Apple silicon, CPU fallback with a recorded
+warning — and the mask becomes the candidate's alpha channel locally. The
+matte is recorded beside the candidate under its own content identity.
+`bun run jobs review` shows each matte on a checkerboard next to the candidate
+it came from, and `bun run jobs adopt` writes the **matte** — never the opaque
+candidate — as a trial Cutout Asset. A candidate the pass could not isolate is
+refused at adoption, and the run's warnings say why.
+
+Likeness generation stays on the Gateway (`nano-2`); only isolation is local.
+Nothing about matting is billed, so a run's recorded cost is generation only.
+
+**Weights.** Not in the repo: the pinned file is cached under `models/`
+(gitignored; `THUMBY_MODEL_DIR` overrides it) and verified by sha-256 once per
+process. Missing or mismatched weights stop the job **before the first
+generation call** — on a rerun too — with the path, the pin, and the fetch
+command. Nothing is paid for that the pass could not isolate, and the pass
+never silently skips isolation.
+
+| what | value |
+|---|---|
+| file | `models/birefnet-fp16.onnx` (~490 MB) |
+| sha-256 | `3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09` |
+| source | `onnx-community/BiRefNet-ONNX`, `onnx/model_fp16.onnx` (MIT) |
+| input | 1024×1024, ImageNet mean/std, per the repo's `preprocessor_config.json` |
+
+**Measured on the recorded candidates (2026-08-30, M4 Pro, CoreML):** both
+`int1-alpha-demo` candidates (1195×896 opaque RGB) matted in **7–10 s** each
+to ~80% transparent / ~19% opaque subject. Inspected at 3× on the hairline:
+clean soft edge, no halo, no colour fringe — the defect the green-screen route
+has. Adoption accepts these; the earlier gap is closed.
+
+The older green-screen route — background pinned to **"one single solid
+#00FF00 edge to edge — no gradient, no vignette, no corners"**, keyed with
+`src/chromakey.ts`, adopted with `library add-cutout` — remains available for
+hand-keying an existing image. It is not the Job path: colour distance is not
+a matte, and green fringe on hair is its known defect.
 
 ### Model ranking for likeness (measured, 2026-08-27 three-way, same 5 refs)
 
@@ -145,8 +203,8 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
   `run.json`) for future experiments, but best-of-N is the variance mechanism.
 
 - **Chroma keying leaves green fringe on hair** for every model (RGB-distance
-  band, not a real matte). A segmentation matte (BiRefNet / BEN2 / RMBG-2.0)
-  would produce true alpha — the planned upgrade.
+  band, not a real matte) — one reason the Job path mattes by segmentation
+  instead (ADR-0006).
 - **Generative likeness ceiling:** every generated face is synthesized, so
   drift can shrink but never reach zero. The only pixel-exact path is
   matting real photos (one session covering the pose × expression × outfit

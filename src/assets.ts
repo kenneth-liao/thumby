@@ -71,6 +71,13 @@ export interface CutoutMeta {
   editPrompt?: string;
   model?: string;
   adoptedFrom?: string;
+  /** Provenance carried from the generating job (creator adoption). */
+  subject?: string;
+  fullPrompt?: string;
+  /** How the cutout was isolated — job adoption only accepts a verified true-alpha matte. */
+  matting?: "true-alpha";
+  /** The matting engine that produced it ("native-alpha" when the model returned one). */
+  matteEngine?: string;
 }
 
 /**
@@ -277,7 +284,7 @@ async function reserveAssetId(root: string, id: string): Promise<string> {
  */
 async function writeKindAsset(
   root: string,
-  kindDir: "plates" | "objects",
+  kindDir: "plates" | "objects" | "cutouts",
   fileBase: string,
   id: string,
   bytes: Uint8Array,
@@ -336,6 +343,23 @@ export async function writeObjectAsset(
   meta: ObjectMeta,
 ): Promise<string> {
   return writeKindAsset(root, "objects", "object", id, bytes, meta, "image/png");
+}
+
+/**
+ * Write a generated creator candidate into the library as a Cutout Asset
+ * (REQ-017). Callers must have verified true alpha first and must force
+ * `approval: "trial"` — this function records the claims it is given, it does
+ * not re-check pixels or approval. The media type is not a parameter:
+ * adoption verifies the bytes are PNG, so the contract's `cutout.png` is
+ * hardcoded here and a mislabeled candidate cannot produce a .jpg asset.
+ */
+export async function writeCreatorAsset(
+  root: string,
+  id: string,
+  bytes: Uint8Array,
+  meta: CutoutMeta,
+): Promise<string> {
+  return writeKindAsset(root, "cutouts", "cutout", id, bytes, meta, "image/png");
 }
 
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {

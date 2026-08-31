@@ -22,6 +22,7 @@ import {
   parseTypedRef,
   runPlateJob,
   runObjectJob,
+  runCreatorJob,
   rerunJob,
   lift,
   loadJob,
@@ -29,14 +30,19 @@ import {
   adoptCandidate,
   type PlateGenerator,
   type ObjectGenerator,
+  type CreatorGenerator,
   type JobGenerator,
   type PlateJobRequest,
   type ObjectJobRequest,
+  type CreatorJobRequest,
 } from "./jobs.js";
-import { generatePlates, generateObjects, type GenerateOptions } from "./generate.js";
+import { generatePlates, generateObjects, generateCreators, type GenerateOptions } from "./generate.js";
+import { localSegmentationMatteEngine } from "./segment.js";
+import type { MatteEngine } from "./matte.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
+import { reviewCreatorJob } from "./review.js";
 
 const HELP = `
 thumby jobs — the Generation Job lifecycle (request → candidates → adoption)
@@ -44,15 +50,24 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
   bun run jobs plates <subject> [options]   Start a plate Generation Job
   bun run jobs objects <subject> [options]  Start an object Generation Job —
                                             one isolated non-text object
+  bun run jobs creators <subject> [options] Start a creator Generation Job —
+                                            an isolated creator candidate from
+                                            typed identity anchors
   bun run jobs rerun <jobId>                Rerun a job's recorded request — appends
                                             candidates under the lineage, replaces nothing
   bun run jobs show <jobId>                 Full job record: request, typed references, runs
   bun run jobs list                         Summarize recorded jobs
+  bun run jobs review <jobId>               Creator review: contact sheet + face-detail
+                                            views against the identity anchors
+                                            (writes <jobDir>/review.html, offline)
   bun run jobs adopt <jobId> <hash> --id <assetId>
                                             Adopt a candidate (exact hash or unique prefix)
                                             as a new immutable Asset of the job's kind.
                                             Adoption never overwrites an existing asset;
-                                            object candidates must carry true alpha.
+                                            an object candidate must carry true alpha, a
+                                            creator candidate is adopted as its matte, and
+                                            creator adoption always enters the library as
+                                            trial.
 
 plates options
   --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
@@ -70,6 +85,23 @@ objects options
   object — official logos and final text are rejected as targets (logos come
   from sourced Assets, text is rendered locally; ADR-0001). Adopted Object
   Assets carry a verified true-alpha matte; an opaque candidate is refused.
+
+creators options
+  Same as plates minus --zone. Requires at least one identity reference —
+  a likeness is never generated from text alone. Accepted reference roles:
+  identity (repeatable anchors), pose, expression, outfit, style, and edit
+  (source-to-edit). Defaults to nano-2, the measured likeness workhorse.
+  References are attached identity-anchors-first and pose-last; the run's
+  fullPrompt role-assigns every reference, so the provenance preserves each
+  declared role. Every candidate then goes through the matting pass — a local
+  BiRefNet segmenter predicts the subject mask and it becomes the candidate's
+  alpha channel, since the models return opaque RGB (ADR-0006) — and
+  "jobs adopt" writes that matte, always as a trial Cutout Asset; approval is
+  Kenneth's alone (DEC-004). The pass is local and unbilled: run cost is
+  generation only. First use needs the pinned weights cached under models/ —
+  a missing file fails loudly with the exact fetch command, before any
+  generation is paid for. A candidate the pass could not isolate is refused
+  at adoption and the run's warnings say why.
 
 A plate job is a bare backdrop by definition (REQ-014): no person, product,
 device, or independently editable foreground object is baked in — subjects
@@ -145,9 +177,39 @@ export const PRODUCTION_OBJECT_GENERATOR: ObjectGenerator = async (request: Obje
   };
 };
 
+/** The creator request→generateCreators mapping (REQ-017). */
+export const PRODUCTION_CREATOR_GENERATOR: CreatorGenerator = async (request: CreatorJobRequest) => {
+  const result = await generateCreators({
+    subject: request.subject,
+    model: request.model,
+    // Recorded identities travel with the request: generation verifies the
+    // bytes against them before anything is sent to the model.
+    refs: request.refs.map((r) => ({ role: r.role, path: r.path, contentHash: r.contentHash })),
+    count: request.count,
+    ...(request.temperature != null ? { temperature: request.temperature } : {}),
+  });
+  return {
+    candidates: result.plates.map((p) => ({ bytes: p.bytes, mediaType: p.mediaType })),
+    warnings: result.warnings,
+    fullPrompt: result.fullPrompt,
+  };
+};
+
+/**
+ * The shipped matting pass (REQ-017, ADR-0006): a BiRefNet segmenter running
+ * locally predicts the subject mask, applied as a true alpha channel. It runs
+ * on every creator candidate the model does not already return isolated,
+ * which — measured — is all of them. Nothing leaves the machine, and nothing
+ * is billed.
+ */
+export const PRODUCTION_MATTE_ENGINE: MatteEngine = localSegmentationMatteEngine();
+
 export interface JobCliDeps {
   generate: PlateGenerator;
   generateObject: ObjectGenerator;
+  generateCreator: CreatorGenerator;
+  /** The matting pass creator candidates are isolated with before they can be adopted. */
+  matte: MatteEngine;
   /** Where job records live (default: <cwd>/out/jobs). */
   jobsRoot: string;
   /** Library root for adoption (default: the repo asset library). */
@@ -156,7 +218,7 @@ export interface JobCliDeps {
 
 const ZONES: TextZone[] = ["left", "right", "bottom", "none"];
 
-function autoJobId(kind: "plate" | "object"): string {
+function autoJobId(kind: "plate" | "object" | "creator"): string {
   const day = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const suffix = crypto.randomUUID().slice(0, 8);
   return `${kind}-${day}-${suffix}`;
@@ -276,10 +338,30 @@ async function objectsCommand(
   return startJob(deps, "object", subject, { ...collected.fields });
 }
 
+async function creatorsCommand(
+  deps: JobCliDeps,
+  subject: string | undefined,
+  rest: string[],
+): Promise<CliResult> {
+  if (!subject?.trim())
+    return usageError(
+      '"jobs creators" needs a subject describing the pose, expression, outfit, or edit — and at least one --ref identity:<file>',
+    );
+  const collected = await collectGenerationFlags(rest, usageError);
+  if ("error" in collected) return collected.error;
+  // Creator jobs default to the measured likeness workhorse (gpt-image cannot
+  // take the mandatory identity anchors). An explicit --model is honored as
+  // written — the generation call refusing it is the honest failure, not a
+  // silent model swap.
+  const fields = collected.fields;
+  if (!fields.extra.has("model")) fields.model = "nano-2";
+  return startJob(deps, "creator", subject, { ...fields });
+}
+
 /** Build the request, run the job, and print the run record. */
 async function startJob(
   deps: JobCliDeps,
-  kind: "plate" | "object",
+  kind: "plate" | "object" | "creator",
   subject: string,
   fields: {
     model: string;
@@ -291,25 +373,19 @@ async function startJob(
   },
 ): Promise<CliResult> {
   const jobId = fields.jobId || autoJobId(kind);
+  const common = {
+    subject,
+    model: fields.model,
+    count: fields.count,
+    ...(fields.temperature !== undefined ? { temperature: fields.temperature } : {}),
+    refs: fields.refs,
+  };
   const job =
     kind === "plate"
-      ? await runPlateJob(deps.jobsRoot, jobId, {
-          kind,
-          subject,
-          zone: fields.zone ?? "left",
-          model: fields.model,
-          count: fields.count,
-          ...(fields.temperature !== undefined ? { temperature: fields.temperature } : {}),
-          refs: fields.refs,
-        }, deps.generate)
-      : await runObjectJob(deps.jobsRoot, jobId, {
-          kind,
-          subject,
-          model: fields.model,
-          count: fields.count,
-          ...(fields.temperature !== undefined ? { temperature: fields.temperature } : {}),
-          refs: fields.refs,
-        }, deps.generateObject);
+      ? await runPlateJob(deps.jobsRoot, jobId, { kind, zone: fields.zone ?? "left", ...common }, deps.generate)
+      : kind === "object"
+        ? await runObjectJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateObject)
+        : await runCreatorJob(deps.jobsRoot, jobId, { kind, ...common }, deps.generateCreator, deps.matte);
   const runIndex = job.runs.length - 1;
   return ok({
     ok: true,
@@ -360,6 +436,9 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
   if (cmd === "objects")
     return objectsCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
 
+  if (cmd === "creators")
+    return creatorsCommand(deps, first, [second, ...rest].filter((a) => a !== undefined));
+
   if (cmd === "rerun") {
     if (!first || second !== undefined) return usageError('"jobs rerun" takes exactly one <jobId>');
     // The generator follows the loaded job's kind — a recorded lineage is
@@ -367,8 +446,18 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
     // lifted generator refuses the other kind outright.
     const recorded = await loadJob(deps.jobsRoot, first);
     const generator: JobGenerator =
-      recorded.request.kind === "object" ? lift("object", deps.generateObject) : lift("plate", deps.generate);
-    const job = await rerunJob(deps.jobsRoot, first, generator);
+      recorded.request.kind === "object"
+        ? lift("object", deps.generateObject)
+        : recorded.request.kind === "creator"
+          ? lift("creator", deps.generateCreator)
+          : lift("plate", deps.generate);
+    const job = await rerunJob(
+      deps.jobsRoot,
+      first,
+      generator,
+      // Only creator runs are matted; the engine is inert for other kinds.
+      recorded.request.kind === "creator" ? deps.matte : undefined,
+    );
     const runIndex = job.runs.length - 1;
     return ok({
       ok: true,
@@ -392,12 +481,28 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
     return ok({ ok: true, jobs: await listJobs(deps.jobsRoot) });
   }
 
+  if (cmd === "review") {
+    if (!first || second !== undefined) return usageError('"jobs review" takes exactly one <jobId>');
+    const review = await reviewCreatorJob(deps.jobsRoot, first);
+    return ok({
+      ok: true,
+      jobId: review.jobId,
+      review: review.reviewPath,
+      candidates: review.candidates.map((c) => ({
+        contentHash: c.contentHash,
+        runIndex: c.runIndex,
+        file: c.file,
+      })),
+      anchors: review.anchors.map((a) => ({ id: a.id, path: a.path })),
+    });
+  }
+
   if (cmd === "adopt") return adoptCommand(deps, first, second, rest);
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected plates, objects, rerun, show, list, or adopt"
-      : `unknown command "${cmd}" — expected plates, objects, rerun, show, list, or adopt`,
+      ? "missing command — expected plates, objects, creators, rerun, show, list, review, or adopt"
+      : `unknown command "${cmd}" — expected plates, objects, creators, rerun, show, list, review, or adopt`,
   );
 }
 
@@ -412,6 +517,8 @@ export async function run(
   const resolved: JobCliDeps = {
     generate: deps?.generate ?? PRODUCTION_GENERATOR,
     generateObject: deps?.generateObject ?? PRODUCTION_OBJECT_GENERATOR,
+    generateCreator: deps?.generateCreator ?? PRODUCTION_CREATOR_GENERATOR,
+    matte: deps?.matte ?? PRODUCTION_MATTE_ENGINE,
     jobsRoot: deps?.jobsRoot ?? path.resolve("out", "jobs"),
     libraryRoot: deps?.libraryRoot ?? LIBRARY_ROOT,
   };

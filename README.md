@@ -16,6 +16,12 @@ one you like without paying for generation again.
 bun install
 bunx playwright install chromium      # once
 cp .env.local.example .env.local      # then paste your key
+
+# once, only if you generate Creator Assets — the local matting model (~490 MB,
+# gitignored, pinned by sha-256 in src/segment.ts)
+mkdir -p models
+curl -L -o models/birefnet-fp16.onnx \
+  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
 ```
 
 Key comes from **vercel.com → AI Gateway → API Keys**. Bun loads `.env.local`
@@ -188,6 +194,59 @@ Asset, never the composite (models may produce isolated non-text Assets but
 never final text or the final composite — ADR-0004); it enters a Scene as its
 own Image layer, movable, resizable, hideable, and replaceable with no
 regeneration of anything else.
+
+**Creator Assets** (REQ-017) are isolated creator candidates generated from
+typed identity anchors — never from text alone. Reference roles are typed
+(`identity`, `pose`, `expression`, `outfit`, `style`, `edit` = source-to-edit);
+references are attached identity-anchors-first and pose-last, and the run's
+recorded prompt role-assigns every reference, so provenance preserves each
+declared role:
+
+```bash
+bun run jobs creators "arms crossed, explaining to camera" \
+  --ref identity:assets/identity/kenny-headshots/k1.png \
+  --ref identity:assets/identity/kenny-headshots/k2.png \
+  --ref pose:pose.png --count 4
+bun run jobs review <jobId>                   # contact sheet, mattes, face detail
+bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
+```
+
+Isolation is a **stage of the job**, and it runs **locally**: the tested nano
+recipe returns opaque RGB (measured — see *Isolation is a local matting pass*
+in `docs/asset-requirements.md`), so every candidate goes through the
+**matting pass** as part of its run. A BiRefNet ONNX segmenter running on this
+machine (`onnxruntime-node`, CoreML on Apple silicon) predicts the subject
+mask, and the mask becomes the candidate's alpha channel — segmentation, never
+colour distance, and nothing billed. A candidate that already carries a real
+matte is kept as-is (`native-alpha`), with no inference at all.
+
+The weights are not in the repo. First use fetches them once into the
+gitignored `models/` cache (~490 MB), pinned by filename and sha-256; a
+missing or mismatched file stops the job **before the first billed
+generation call** (and before a rerun's) with the exact command to fix it, so
+no candidate is ever paid for that the pass cannot isolate:
+
+```bash
+mkdir -p models
+curl -L -o models/birefnet-fp16.onnx \
+  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
+```
+
+`jobs review` shows each matte on a checkerboard beside the candidate it came
+from, and says plainly when a candidate has none. `jobs adopt` writes the
+**matte** — the same true-alpha gate as objects, applied to the bytes that
+actually enter the library — always as a `trial` Cutout Asset; approval is the
+human likeness gate, never automatic (DEC-004). The adopted Asset records its
+`matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
+Asset's content identity is derived from its bytes, never stored (ADR-0002),
+and `jobs adopt` reports that identity — the bytes it wrote. Reruns append
+candidates under the job lineage; nothing is ever overwritten. Likeness
+generation stays on the Gateway; only isolation is local (ADR-0006).
+
+The green-screen route — a `#00FF00` background pinned in-prompt, keyed with
+`src/chromakey.ts`, added with `bun run library add-cutout` — stays available
+for hand-keying an existing image, outside the Job path; green fringe on hair
+is its known defect.
 
 Overlay specs reference library logos by id, so no absolute paths:
 
