@@ -168,8 +168,22 @@ try {
 
 if (values.help) {
   console.log(HELP);
+  console.log(
+    "  DEPRECATED — the long-form thumbnail command is superseded by Scenes.\n" +
+      "  Supported workflow: bun run jobs (generate assets) + bun run scene (author, validate, render).\n" +
+      "  See README.md → Scenes. This command still runs but no longer receives compatibility fixes.\n",
+  );
   process.exit(0);
 }
+
+// Deprecated legacy path (REQ-023, #22): the Scene workflow is the supported
+// default. The command stays runnable — historical rerun.sh scripts must keep
+// working — but stderr says so on every invocation, and flag-for-flag
+// compatibility is no longer promised.
+console.error(
+  "warning: `bun run thumb` is deprecated — Scenes are the supported workflow\n" +
+    "  (bun run jobs + bun run scene; see README.md → Scenes). This command still runs.\n",
+);
 
 if (values.list) {
   console.log("\n  Models        per image        \n");

@@ -233,11 +233,10 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
 
 ### Provenance and approval
 
-- Generate via `bun run thumb` (writes `run.json` + `rerun.sh`), key,
-  then `bun run library add-cutout <file> --id <id> --tags <pose facets>
-  --derived-from <approved id> --edit-prompt "…"` — or generate creator
-  candidates through a Generation Job (`bun run jobs creators …`) and adopt
-  one with `bun run jobs adopt`.
+- Creator candidates come through a Generation Job (`bun run jobs creators …`)
+  and are adopted with `bun run jobs adopt`. (`bun run thumb` — the legacy
+  path that writes `run.json` + `rerun.sh` — is deprecated; `library
+  add-cutout` stays available for importing existing cutouts.)
 - New cutouts enter as `trial`. **Only Kenny's approval promotes to
   `approved`, and the one promotion path is
   `bun run library approve <id> [--approver <s>] [--note <s>]`** — it records
@@ -251,7 +250,9 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
 - Scenes enforce the gate (REQ-018): a Scene referencing a trial Creator
   Asset fails validation; `scene render --experimental` is the explicit
   non-final override. The legacy `thumb --cutout` command does not enforce
-  the gate. Reuse-first: scan `bun run library list` before generating.
+  the gate (and the command itself is deprecated — #40 tracks whether the
+  gate is still worth adding there). Reuse-first: scan `bun run library
+  list` before generating.
 
 ## Naming and metadata
 
