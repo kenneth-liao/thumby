@@ -69,6 +69,24 @@ export const SCENE_SCHEMA = {
         "A change's `set` replaces whole fields; patching is validated against the " +
         "target layer's own schema branch at load.",
     },
+    reference: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      description:
+        "Review metadata only (REQ-020): the associated Reference Thumbnail — a PNG at exactly " +
+        "1280×720 used by the agent as a structural and stylistic target (DEC-003). Never a layer: " +
+        "the renderer and the Render manifest ignore it entirely. `scene validate` and `scene compare` " +
+        "read the file itself; render does not.",
+      properties: {
+        path: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Project-relative PNG path, resolved against the scene file's directory.",
+        },
+      },
+    },
     theme: {
       type: "object",
       additionalProperties: false,

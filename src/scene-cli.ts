@@ -27,6 +27,7 @@ import { renderScene, renderContactSheet, renderGuidelines, countLayers } from "
 import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
+import { checkReference, diffPng, renderCompareSheet } from "./compare.js";
 import {
   buildManifest,
   manifestPathFor,
@@ -47,6 +48,12 @@ thumby scene — versioned, locally rendered thumbnail compositions
   bun run scene inspect  <scene.json>   Structured layer summary (resolved asset hashes,
                                         theme-pinned identity, effective values)
   bun run scene validate <scene.json>   Validate: field-specific errors before any render
+  bun run scene compare  <scene.json>   Compare the Scene's Render with its associated Reference
+                                        Thumbnail (reference.path): writes an offline sheet
+                                        (side by side at full size and 168px, an adjustable
+                                        alpha overlay, and a per-channel difference view) plus
+                                        the diff and render PNGs into out/. Review artifacts
+                                        only — never a manifest, never the final Render.
   bun run scene render   <scene.json>   Render to PNG (1280×720). The output must fit
                                         YouTube's 2 MB limit: compliant renders pass
                                         through untouched; oversized ones are optimized
@@ -548,6 +555,12 @@ async function dispatch(
     if (!result.ok) return invalid(result.errors);
     const { resolved } = result;
     if (cmd === "validate") {
+      // The reference association (REQ-020) is review metadata, not Render
+      // input — validate (and compare) read the file itself; render ignores
+      // the field entirely. The check runs through this same gate so agents
+      // get one structured error shape.
+      const ref = await checkReference(sceneDir, resolved.scene);
+      if (!ref.ok) return invalid(ref.errors);
       return ok({
         ok: true,
         schemaVersion: SCHEMA_VERSION,
@@ -555,6 +568,7 @@ async function dispatch(
         ...(resolved.scene.variants
           ? { variantCount: Object.keys(resolved.scene.variants).length }
           : {}),
+        ...(resolved.scene.reference ? { reference: resolved.scene.reference.path } : {}),
         safeAreaViolations: findSafeAreaViolations(resolved),
       });
     }
@@ -725,10 +739,76 @@ async function dispatch(
   if (cmd === "rerender")
     return usageError(`"scene rerender" takes exactly one manifest path`);
 
+  if (cmd === "compare" && file) {
+    if (rest.length) return usageError(`"scene compare" takes exactly one scene file and no options`);
+    const read = await readSceneFile(file);
+    if ("errors" in read) return invalid(read.errors);
+    const sceneDir = path.dirname(path.resolve(file));
+    // The one validation gate — every failure lands here, before any browser.
+    const result = await loadScene(sceneDir, library, read.raw);
+    if (!result.ok) return invalid(result.errors);
+    // The reference gate: format, dimensions, containment. Compare is the one
+    // command that needs the reference bytes, so the check runs here (and in
+    // validate) — never in render, which does not read the reference.
+    const ref = await checkReference(sceneDir, result.resolved.scene);
+    if (!ref.ok) return invalid(ref.errors);
+    if (!ref.reference)
+      return invalid([
+        {
+          path: "reference",
+          message:
+            `this Scene has no associated Reference Thumbnail — set the "reference.path" field to a ` +
+            `project-relative PNG at exactly 1280×720, e.g. { "reference": { "path": "reference.png" } }, to enable comparison.`,
+        },
+      ]);
+    const base = path.basename(path.resolve(file), ".json");
+    const outDir = path.join(sceneDir, "out");
+    const renderPath = path.join(outDir, `${base}.compare.render.png`);
+    const diffPath = path.join(outDir, `${base}.diff.png`);
+    const sheetPath = path.join(outDir, `${base}.compare.html`);
+    // The compare artifacts are review output, but a Render output recorded by
+    // a manifest must never be overwritten by one — same rule as guidelines.
+    for (const [p, what] of [
+      [renderPath, "compare render"],
+      [diffPath, "difference view"],
+    ] as const) {
+      const conflict = await renderOutputConflict(p);
+      if (conflict)
+        return invalid([
+          {
+            path: "compare",
+            message:
+              `the default ${what} path "${p}" is a Render output — the manifest "${path.basename(conflict.manifest)}" ` +
+              `records it, and a review artifact must never overwrite a final Render. Rename the scene file or the recorded output.`,
+          },
+        ]);
+    }
+    const { png, width, height, warnings } = await renderScene(result.resolved);
+    const diff = diffPng(png, ref.reference);
+    await mkdir(outDir, { recursive: true });
+    await writeFile(renderPath, png);
+    await writeFile(diffPath, diff);
+    await writeFile(
+      sheetPath,
+      renderCompareSheet({ scene: base, referencePath: ref.reference.path, renderPath, diffPath }),
+    );
+    return ok({
+      ok: true,
+      output: sheetPath,
+      render: renderPath,
+      diff: diffPath,
+      reference: result.resolved.scene.reference!.path,
+      width,
+      height,
+      warnings,
+    });
+  }
+  if (cmd === "compare") return usageError(`"scene compare" takes exactly one scene file`);
+
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, render, guidelines, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, render, guidelines, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender`,
   );
 }
 
