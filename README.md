@@ -1,14 +1,23 @@
 # thumby
 
-YouTube thumbnails, hybrid approach: an AI model paints the background plate,
-the text layer is rendered locally in CSS and screenshotted at exactly
-1280×720. Typography is pixel-exact and repeatable, so you can spin six
-headline variants over one background in about a second and A/B the copy
-without regenerating anything.
+YouTube thumbnails, agent-driven: a versioned **Scene** — an ordered list of
+image, text, shape, group, and connector layers — is the canonical editable
+recipe, rendered locally to exactly 1280×720. Models supply isolated source
+Assets (background plates, objects, creator images) through Generation Jobs;
+final composition and all text stay local, deterministic, and offline
+(ADR-0001, ADR-0004).
 
-**Plate** = the raw background image the model returns, before any text. Each
-run saves them as `out/plate-N.png` so you can re-run the text layer against
-one you like without paying for generation again.
+The supported workflow is: **generate or adopt Assets → author a Scene →
+`scene validate` → `scene render` → iterate with Variants**. Every local edit
+— text, transforms, asset swaps, masked recolors — re-renders in about a
+second with no model call. The durable vocabulary (Scene, Layer, Asset,
+Plate, Creator Asset, Generation Job, Variant, Render, Reference Thumbnail)
+is defined in [CONTEXT.md](CONTEXT.md).
+
+> The old long-form `bun run thumb` command is **deprecated** — see
+> [Legacy command (deprecated)](#legacy-command-deprecated). It still runs,
+> but no flag-for-flag compatibility is promised anymore: every flag with a
+> documented Scene equivalent is superseded.
 
 ## Setup
 
@@ -35,43 +44,55 @@ model runs about **half a cent per plate**, so a nine-variant sweep costs
 under two cents. `bun run thumb --list` prints per-model cost, marking which
 figures are measured from real billing and which come from the price list.
 
-## Use
+## Use — the Scene workflow
+
+Generate source Assets through Generation Jobs (the only online step):
 
 ```bash
-bun run thumb \
-  --prompt "a burnt-out developer at a glowing terminal, neon rim light" \
-  --eyebrow "Field Notes · No. 04" \
-  --headline "Stop *Overthinking* Your Stack" \
-  --sub "Three lessons from a rebuild" \
-  --style punch --zone left
+bun run jobs plates "a burnt-out developer at a glowing terminal, neon rim light"
+bun run jobs adopt <jobId> <hash> --id neon-terminal   # candidate → library Asset
 ```
 
-Three headline variants over one background — one generation, three renders:
+Author a Scene — from a bundled template or by hand:
 
 ```bash
-bun run thumb --prompt "..." \
-  --headline "This *Changed* Everything|Stop *Overthinking* It|I Was *Wrong*"
+bun run scene templates
+bun run scene init scene-template --out thumbnail.scene.json
+bun run scene validate thumbnail.scene.json   # field-specific errors before any render
+bun run scene render thumbnail.scene.json     # 1280×720 PNG + portable manifest, offline
 ```
 
-Iterate on copy against a plate you already like — free and instant, no API call:
+A Scene is a plain JSON file of ordered layers — array order is compositing
+order, later layers on top:
 
-```bash
-bun run thumb --bg out/plate-1.png --headline "A New *Angle* Entirely"
+```json
+{
+  "schemaVersion": 1,
+  "canvas": { "width": 1280, "height": 720 },
+  "layers": [
+    { "id": "background", "type": "image", "asset": "neon-terminal",
+      "position": { "x": 0, "y": 0 }, "size": { "width": 1280, "height": 720 } },
+    { "id": "headline", "type": "text", "text": "Stop\n*Overthinking* Your Stack",
+      "font": "Anton", "fontSize": 120,
+      "position": { "x": 90, "y": 500 }, "size": { "width": 900, "height": 180 } }
+  ]
+}
 ```
 
-Put your own face in it (`nano-pro` / `nano-2` only):
-
-```bash
-bun run thumb --prompt "me in a studio, dramatic side light" \
-  --ref ~/photos/kenny.jpg --headline "My *Actual* Setup"
-```
-
-`bun run thumb --list` prints every model with its per-image cost, plus every
-type pairing and style. `--help` covers the rest of the flags.
+Iteration is local and free: edit a layer property, add a named **Variant**
+(headline A/B, an asset swap, a masked recolor), or swap an Asset reference —
+no model call, a render in about a second. Review at thumbnail size with
+contact sheets (full-size and 168px) and against a Reference Thumbnail with
+`scene compare`. The full layer vocabulary — rich text, shapes, groups,
+connectors, effects, themes, templates — is documented in
+[Scenes](#scenes); the CLI contract (`scene`, `library`, `jobs`) is covered
+in each section below.
 
 ## Type
 
-Every pairing is a display face for the headline plus a humanist sans for the
+Pairings are the legacy command's named presets (`--type`); a Scene names the
+bundled faces directly (`font`) and themes carry the style defaults. Every
+pairing is a display face for the headline plus a humanist sans for the
 eyebrow and kicker. All faces are OFL-licensed TTFs bundled under
 `assets/fonts/` and loaded through `@font-face` from local bytes — no system
 fonts, no network fetch, identical rendering on any machine. If a requested
@@ -101,44 +122,59 @@ since serif brackets disappear under an outline that heavy.
 
 ## How it fits together
 
+**Supported workflow:**
+
 | File | Job |
 |---|---|
+| `src/scene.ts`, `src/scene-schema.ts` | Scene loading, validation, and the JSON Schema |
+| `src/scene-render.ts` | The local Scene renderer (Chromium, 1280×720) |
+| `src/scene-cli.ts` | The Scene CLI — schema, validate, inspect, render, guidelines, compare, rerender |
+| `src/jobs.ts`, `src/job-cli.ts` | Generation Jobs — plates, objects, creators; the only online path |
+| `src/assets.ts`, `src/library-cli.ts` | The asset library, content identities, adoption, approval |
+| `src/segment.ts`, `src/matte.ts` | The local matting pass (BiRefNet, ADR-0006) |
 | `src/models.ts` | Gateway model registry — id, call shape, cost, reference-image support |
-| `src/generate.ts` | Builds the plate prompt and calls the Gateway |
-| `src/fonts.ts` | The type pairings — bundled OFL faces, weights, tracking, font validation |
-| `src/styles.ts` | The four layout presets. **Edit this to make it look like you.** |
-| `src/compose.ts` | Renders text over the plate in Chromium, auto-fits, screenshots |
-| `src/cli.ts` | Flags, orchestration, contact sheet |
+| `src/generate.ts` | Builds prompts and calls the Gateway for Generation Jobs |
+| `src/manifest.ts`, `src/finalize.ts` | Portable Render manifests and the 2 MB finalization |
+| `src/fonts.ts` | Bundled OFL faces and validation — fails loudly on fallback |
+| `src/themes.ts`, `src/templates.ts`, `src/variants.ts` | Themes, templates, and sparse Variants |
+
+**Legacy (deprecated):**
+
+| File | Job |
+|---|---|
+| `src/cli.ts` | The long-form thumb command |
+| `src/compose.ts` | Its text-over-plate renderer |
+| `src/overlay.ts` | Overlay-card composition — superseded by generic Scene layers |
 
 Nano Banana models return bytes from `generateText().files`; Flux/Imagen/
 Recraft/GPT Image return base64 from `generateImage().images`. `generate.ts`
 hides that split behind one function.
 
-Compositing order (matters — it has already caused one bug):
-`plate → scrim → connectors → cards[behind] → cutout → cards → text`.
-
 ## Putting yourself in it
 
-Rather than asking a model to render your likeness — which drifts, and burns
-the expensive Gemini models — composite a real transparent PNG of yourself
-over the plate. The model only ever paints the background.
+A creator image is an **Asset**, generated from typed identity anchors through
+a Generation Job — never from text alone, and never as part of the composite:
 
 ```bash
-bun run thumb \
-  --prompt "near-black tech backdrop, out-of-focus code windows, floating \
-            glowing UI cards on the right, deep blacks, empty space left" \
-  --headline 'AI AGENTS\n*UNLOCKED*' \
-  --sub "One Setup. *Any Agent.*" \
-  --cutout ~/path/to/creator-cutout.png \
-  --cutout-side center --cutout-x 8 --cutout-glow "#FFB02055" \
-  --text-width "40%" --accent "#B8F02C" --style scrim --zone left
+bun run jobs creators "arms crossed, explaining to camera" \
+  --ref identity:assets/identity/kenny-headshots/k1.png \
+  --ref identity:assets/identity/kenny-headshots/k2.png --count 4
+bun run jobs review <jobId>              # contact sheet + face detail vs anchors
+bun run jobs adopt <jobId> <hash> --id kenny-crossed
+bun run library approve kenny-crossed     # the human likeness gate (DEC-004)
 ```
 
-The cutout sits above the background and below the text. `--cutout-side`
-defaults to the opposite of `--zone`; override it with `--cutout-x` to nudge
-sideways and `--text-width` to keep the headline clear of your face. `\n` in
-`--headline` forces a line break, which is how you get a two-line lockup with
-only the second line in the accent color.
+The approved Cutout enters a Scene as its own Image layer — movable,
+mirrored, recolorable through a named mask, and swappable without touching
+anything else. Isolation is a local matting pass (ADR-0006); the one-time
+weights fetch in Setup covers it. Full details: [The asset
+library](#the-asset-library) and [Scenes](#scenes).
+
+> **Outfit, garment type, or style changes are intrinsic edits** — they go
+> through Creator generation with typed `outfit`/`style` references plus the
+> local matte: a new candidate Asset, adopt, approve, swap the layer's
+> `asset` reference (ADR-0008). The named-mask `adjust` is a color tool, not
+> the outfit path.
 
 ## The asset library
 
@@ -250,7 +286,8 @@ Creator Asset fails validation with a layer-specific error, and
 clearly-marked non-final Render (a `.trial` output name, a NON-FINAL warning,
 and `experimental: true` on the manifest when trial assets were actually
 used). The gate is Scene-scoped: the legacy `thumb --cutout` command does not
-enforce it (tracked separately); use Scene rendering for anything gated on
+enforce it (tracked separately, #40 — the command itself is now deprecated);
+use Scene rendering for anything gated on
 approval. The adopted Asset records its
 `matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
 Asset's content identity is derived from its bytes, never stored (ADR-0002),
@@ -299,10 +336,13 @@ directory is relocated.
 
 ## Scenes
 
-A **Scene** is the declarative alternative to the long-form command: a versioned
-JSON document of ordered layers (image, text, shape, group, and connector), rendered locally to
-exactly 1280×720. Array order is compositing order — later layers on top.
-Scenes, layers, and assets are the vocabulary the design spec (#7) builds on.
+A **Scene** is the canonical editable recipe for one thumbnail: a versioned
+JSON document of ordered layers (image, text, shape, group, and connector),
+rendered locally to exactly 1280×720. Array order is compositing order —
+later layers on top. Scenes, layers, and assets are the vocabulary defined in
+[CONTEXT.md](CONTEXT.md); this is the supported workflow. The constellation
+fixture (`test/fixtures/constellation/constellation.json`) is the in-repo
+worked example; the migrated hook-recreation Scene lives in project `out/`.
 
 ```bash
 bun run scene schema                       # the Scene JSON Schema (machine-readable)
@@ -526,7 +566,17 @@ field, so Variants recolor the same untouched Creator Asset:
 
 An unknown mask name, a missing mask asset, a non-PNG mask, and a
 dimension mismatch all fail at `scene validate`/`render` with a
-`layers[i].adjust.mask` error before any render. The design decision and
+`layers[i].adjust.mask` error before any render.
+
+**What `adjust` is not: the outfit path.** A masked recolor repaints color
+inside a fixed region — it cannot change a garment's shape, type, or style.
+Outfit, garment-type, and style changes are intrinsic edits to the person:
+they go through Creator generation with typed `outfit`/`style` references
+plus the local matting pass, producing a new candidate Creator Asset to
+adopt, approve, and swap onto the layer (ADR-0008). The decision record for
+which edit path a creator change takes lives in `CONTEXT.md`.
+
+The design decision and
 rationale — colorization is a render-time blend, never a baked pixel edit or
 a model hop — live in `docs/adr/0007-masked-colorization-is-a-render-time-blend.md`.
 Rollback notes: `adjust` is
@@ -645,10 +695,11 @@ identity no longer matches and `scene rerender` refuses — re-render with
 
 ## Overlay cards
 
-> **Superseded for new work:** the constellation is now representable as a
-> plain Scene — card Groups, a creator Image layer, and Connectors at explicit
-> array positions (see [Scenes](#scenes)). The overlay path below remains for
-> the legacy command until visual parity is inspected (#12, #22).
+> **Deprecated:** the constellation is representable as a plain Scene — card
+> Groups, a creator Image layer, and Connectors at explicit array positions
+> (see [Scenes](#scenes)) — and that parity is approved (#21, REQ-008). The
+> overlay path below survives only inside the deprecated legacy command and
+> receives no further work; flag-for-flag compatibility is not promised.
 
 `--overlay <spec.json>` draws floating glass tiles joined by dashed connectors
 — the logo-constellation look. Positions are percentages of the frame measured
@@ -678,15 +729,87 @@ curve. See `overlays/agent-constellation.json`.
 Layer order is: plate → scrim → connectors → cards marked `behind` → cutout →
 remaining cards → text.
 
+## Legacy command (deprecated)
+
+`bun run thumb` — the original long-form thumbnail command — is
+**deprecated**. It still runs (historical `rerun.sh` scripts keep working),
+and it prints a deprecation notice on every invocation, but the Scene
+workflow above is the supported default and **no flag-for-flag compatibility
+is promised**: every flag with a documented Scene equivalent is superseded by
+it —
+
+| legacy flag | Scene workflow equivalent |
+|---|---|
+| `--prompt` / `--bg` | `jobs plates` + `jobs adopt`; an Image layer referencing the Asset |
+| `--headline` / `--eyebrow` / `--sub` | Text layers (rich text, spans, auto-fit) |
+| `--cutout*` | An Image layer referencing an approved Cutout Asset |
+| `--overlay` | Shape, Group, and Connector layers — the constellation fixture |
+| `--style` / `--zone` / colors | Themes, templates, and explicit layer values |
+| `--ref` (likeness) | `jobs creators` with typed references |
+| headline variants (`\|`) | Named Variants over stable layer IDs |
+
+It remains the only writer of the `run.json`/`history.jsonl` provenance
+records described under [Provenance](#provenance); new work starts from a
+Scene. Known gap, kept as-is on this deprecated path: `thumb --cutout` does
+not enforce the Creator approval gate (#40).
+
+The old quick-start, for reference:
+
+```bash
+bun run thumb \
+  --prompt "a burnt-out developer at a glowing terminal, neon rim light" \
+  --eyebrow "Field Notes · No. 04" \
+  --headline "Stop *Overthinking* Your Stack" \
+  --sub "Three lessons from a rebuild" \
+  --style punch --zone left
+```
+
+Three headline variants over one background — one generation, three renders:
+
+```bash
+bun run thumb --prompt "..." \
+  --headline "This *Changed* Everything|Stop *Overthinking* It|I Was *Wrong*"
+```
+
+Iterate on copy against a plate you already like — free and instant, no API call:
+
+```bash
+bun run thumb --bg out/plate-1.png --headline "A New *Angle* Entirely"
+```
+
+Put your own face in it (`nano-pro` / `nano-2` only):
+
+```bash
+bun run thumb --prompt "me in a studio, dramatic side light" \
+  --ref ~/photos/kenny.jpg --headline "My *Actual* Setup"
+```
+
+`bun run thumb --list` prints every model with its per-image cost, plus every
+type pairing and style. `--help` covers the rest of the flags.
+
 ## Provenance
 
-Every run writes three things next to its output:
+Generation Jobs record their own provenance (`jobs show <jobId>` — model,
+full effective prompt, typed references with content identities, cost,
+warnings, every candidate and its lineage), and adopted Assets carry their
+adoption provenance. The legacy thumb command additionally wrote the records
+below; they all remain readable evidence.
+
+Every legacy run wrote three things next to its output:
 
 | file | |
 |---|---|
 | `run.json` | The full recipe — prompt actually sent, model, every style and cutout setting, outputs, cost |
 | `rerun.sh` | The same run as a paste-ready script. Reproduces byte-identically; drop `--bg` to repaint the plate |
 | `out/history.jsonl` | One line per run, project-wide, so old prompts stay searchable across sessions |
+
+**Historical evidence, not editable Scenes.** Run records (`run.json`,
+`rerun.sh`, `history.jsonl`) and every generated output under `out/` stay
+readable evidence of what was made and how — they are **never** automatically
+converted into Scenes. Assets already adopted into the library (plates via
+`library adopt` or `jobs adopt`, objects and creators via `jobs adopt`) are
+first-class and usable in any Scene today; everything else remains as
+provenance you can read, grep, and cite.
 
 **A reused plate keeps its prompt.** When `--bg` points at a plate, the run
 reads the `run.json` sitting beside it and carries that prompt, model, and
@@ -713,7 +836,8 @@ jq -r '.ranAt + "  " + .outDir + "  " + (.subject // "-")' out/history.jsonl
 `gpt-image` (GPT Image 2) is the default: it is both the cheapest option and
 the best at honoring the `--zone` brief. It is slower, around 15s a plate.
 
-Reach for the Gemini models only when you need `--ref` for likeness, which
+Reach for the Gemini models when a Generation Job needs a likeness: creator
+jobs take typed references (`jobs creators … --ref identity:…`), which
 gpt-image cannot take — they cost 8–30x more per plate. `nano-lite` is the
 cheap fast one at ~3s; `nano-pro` has the strongest likeness.
 
@@ -732,14 +856,17 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
 
 ## Notes
 
-- `--zone` does double duty: it places the text *and* tells the model which
-  half of the plate to leave calm. Keep them in agreement.
+- `--zone` does double duty in plate generation: it describes the reserved
+  text region *and* tells the model which half of the plate to leave calm.
+  Keep them in agreement.
 - The plate prompt hard-bans text in the image, since the headline is ours.
 - Headlines auto-fit by binary search on font size, so a 4-word and a 12-word
   variant both land without hand-tuning. Words never break mid-syllable.
 - Wrap a word in `*asterisks*` to paint it the accent color.
-- Every run writes `out/index.html` — a contact sheet showing each variant
-  full size and at 168px, which is the width that actually decides clicks.
+- Every legacy run writes `out/index.html` — a contact sheet showing each
+  variant full size and at 168px, which is the width that actually decides
+  clicks; Scene variants batch through `scene render` with contact sheets
+  (REQ-027).
 - Models differ in how they take dimensions: most accept `aspectRatio: "16:9"`,
   but OpenAI's image models reject it and need an explicit `size`. `sizing` in
   `src/models.ts` records which, and OpenAI gets `1536x864` — exact 16:9, and

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.23.0]
+
+### Added
+
+- `CONTEXT.md` (REQ-025, #22): the canonical glossary for the durable domain terms — Scene, Layer, Asset, Plate, Cutout/Object Asset, Creator Asset, Generation Job, Variant, Render, Reference Thumbnail, typed references, named masks — plus the cross-cutting invariants (local text/composite, immutable content-addressed assets, the human approval gate, offline renders) and the creator-edit decision table: which path a creator change takes (layer facts → Scene edit; simple masked recolor → `adjust`; outfit/garment-type/style/pose → Creator generation + local matte)
+- ADR-0008 (#22): outfit, garment-type, and style changes are Creator generation (`jobs creators` with typed `outfit`/`style` references) plus the local matting pass — never a masked recolor. Product call after #21 human qualification rejected the masked shirt recolor at production quality; `adjust: { mask, color }` is a limited local color tool, not the outfit path
+
+### Changed
+
+- **The Scene workflow is the documented supported default** (REQ-023/REQ-025, #22): the README now leads with generate/adopt Assets → author a Scene → `scene validate` → `scene render` → iterate with Variants, and documents the final CLI contract (`scene`, `library`, `jobs`); the long-form `bun run thumb` command is **deprecated** — it still runs (historical `rerun.sh` scripts keep working) and now prints a stderr deprecation notice on every invocation, but flag-for-flag compatibility is no longer promised: every flag with a documented Scene equivalent is superseded (README's legacy section carries the mapping)
+- The overlay-card composition path is explicitly deprecated (REQ-023, #22): generic Scene layers reached approved parity (#21, REQ-008), so the overlay path — and the legacy `--cutout` composition — survive only inside the deprecated command and receive no further work
+- Historical evidence contract documented (#22): `run.json`/`rerun.sh`/`history.jsonl` records and generated outputs under `out/` remain readable evidence and are never auto-converted into Scenes; adopted Assets remain first-class and usable
+- `docs/asset-requirements.md`: creator candidates come through `jobs creators`/`jobs adopt`; the legacy thumb path is marked deprecated
+
 ## [0.22.0]
 
 ### Added
