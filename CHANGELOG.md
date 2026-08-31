@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.21.0]
+
+### Added
+
+- Reference Thumbnail association (REQ-020, #19): a Scene can pin `"reference": { "path": "<png>" }` — a project-relative PNG used by the agent as a structural and stylistic target (DEC-003). Review metadata, never Render input: the renderer and the manifest ignore the field entirely, so a missing or mismatched reference file never blocks a render; `scene validate` checks the file itself (existence, PNG format with a convert-locally hint, exact 1280×720 canvas alignment, project-root containment — resolved through symlinks) and reports `reference` in its result. Note: attaching `reference` to an already-rendered Scene changes the scene file's bytes, so that render's manifest scene identity no longer matches and `scene rerender` refuses — re-render with `scene render`
+- `scene compare <scene.json>` (#19): renders the Scene and writes three offline review artifacts into `out/` — `<scene>.compare.html` (reference and Render side by side at full size and 168px, a CSS-only adjustable alpha overlay — discrete radio steps, no script, CSP stays `default-src 'none'` — and the difference view), `<scene>.diff.png` (per-channel |render − reference| of the aligned 1280×720 inputs), and `<scene>.compare.render.png`. Derived output like the guidelines view: no manifest, never a final Render, and a default path a manifest has recorded as a Render output is refused rather than overwritten. No OCR, segmentation, or pixel matching — the sheet is evidence for the external agent (OOS-004, OOS-005)
+
 ## [0.20.0]
 
 ### Added

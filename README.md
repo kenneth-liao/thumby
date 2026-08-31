@@ -313,6 +313,7 @@ bun run scene validate scene.json          # field-specific errors before any re
 bun run scene inspect scene.json           # layer summary + resolved asset hashes
 bun run scene render scene.json [--out p] [--experimental]  # render to PNG (1280×720, YouTube 2 MB-compliant)
 bun run scene guidelines scene.json [--out p] # the safe-area guideline view (review only)
+bun run scene compare scene.json            # compare the Render with its Reference Thumbnail (review only)
 bun run scene rerender out/scene.manifest.json  # re-render from its Render manifest
 ```
 
@@ -615,6 +616,32 @@ filesystem identity, so a symlink alias cannot reach a final Render's bytes
 either). The overlay lives only on the guideline code path, so it can never
 enter a final render's output, and the guideline view writes no manifest —
 it is a review artifact, not a reproducible Render.
+
+### Reference comparison
+
+A Scene may associate a **Reference Thumbnail** — review metadata, never a
+Render input: `"reference": { "path": "./reference.png" }`, a project-relative
+PNG at exactly 1280×720 (the Render canvas, so overlay and difference views
+align). `scene validate` checks the association and reports the path back in
+its result: the file must exist inside the scene's directory (containment is
+resolved through symlinks — an in-project alias to an out-of-tree file is
+refused), be a readable PNG (anything else gets a convert-locally hint), and
+be exactly 1280×720. `scene render` ignores the field entirely — a missing or
+mismatched reference never blocks a render.
+
+For review, `scene compare scene.json` renders the Scene and writes three
+derived artifacts into `out/`: `<scene>.compare.html` — reference and Render
+side by side at full size and 168px, an adjustable alpha overlay (CSS radio
+steps, no script), and the per-channel difference view — plus
+`<scene>.diff.png` and `<scene>.compare.render.png`. Like the guideline view,
+they are review artifacts: no manifest, and a path any Render manifest in the
+directory records is refused rather than overwritten. The reference is a
+structural and stylistic target (DEC-003), not a pixel goal — no OCR,
+segmentation, or pixel matching; the agent reads the sheet and writes the next
+Scene edit. One consequence to expect: attaching `reference` to an
+already-rendered Scene changes the scene file's bytes, so its manifest's scene
+identity no longer matches and `scene rerender` refuses — re-render with
+`scene render` instead.
 
 ## Overlay cards
 

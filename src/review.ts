@@ -22,8 +22,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { loadJob } from "./jobs.js";
+import { escapeHtml, fileUrl } from "./html.js";
 
 export interface ReviewCandidate {
   contentHash: string;
@@ -59,11 +59,6 @@ export interface CreatorReview {
  * every image on the sheet — that is what makes the views comparable.
  */
 const FACE_CROP = { width: 200, left: -50, top: -32 } as const;
-
-/** Context-escape for every text and attribute interpolation on the sheet. */
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-}
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
@@ -149,10 +144,6 @@ async function verifyRecorded(
     throw new Error(
       `${what} file "${file}" changed content identity — recorded sha-256 ${contentHash}, actual ${actual}. It cannot be rendered as review evidence.`,
     );
-}
-
-function fileUrl(p: string): string {
-  return pathToFileURL(p).href;
 }
 
 function renderReviewSheet(

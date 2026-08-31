@@ -183,6 +183,12 @@ export interface Scene {
   canvas: { width: number; height: number };
   /** Named theme defaults, pinned to an exact revision. */
   theme?: { name: string; revision: string };
+  /**
+   * Review metadata (REQ-020): the associated Reference Thumbnail's
+   * project-relative path. Never a layer — the renderer and the manifest
+   * ignore it; `scene validate`/`scene compare` check the file itself.
+   */
+  reference?: { path: string };
   /** Named sparse changes over this base Scene (src/variants.ts). */
   variants?: Record<string, SceneVariant>;
   layers: SceneLayer[];
