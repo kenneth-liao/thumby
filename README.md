@@ -72,12 +72,21 @@ order, later layers on top:
   "layers": [
     { "id": "background", "type": "image", "asset": "neon-terminal",
       "position": { "x": 0, "y": 0 }, "size": { "width": 1280, "height": 720 } },
-    { "id": "headline", "type": "text", "text": "Stop\n*Overthinking* Your Stack",
+    { "id": "headline", "type": "text",
+      "spans": [
+        { "text": "Stop\n" },
+        { "text": "Overthinking", "color": "#FFD400" },
+        { "text": " Your Stack" }
+      ],
       "font": "Anton", "fontSize": 120,
       "position": { "x": 90, "y": 500 }, "size": { "width": 900, "height": 180 } }
   ]
 }
 ```
+
+Accent color is a span property — Scene text is plain content, there is no
+inline markup (the legacy `*asterisks*` convention below is thumb-only).
+Full rich-text rules are in [Scenes](#scenes).
 
 Iteration is local and free: edit a layer property, add a named **Variant**
 (headline A/B, an asset swap, a masked recolor), or swap an Asset reference —
@@ -862,7 +871,8 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
 - The plate prompt hard-bans text in the image, since the headline is ours.
 - Headlines auto-fit by binary search on font size, so a 4-word and a 12-word
   variant both land without hand-tuning. Words never break mid-syllable.
-- Wrap a word in `*asterisks*` to paint it the accent color.
+- Wrap a word in `*asterisks*` to paint it the accent color. (Legacy `thumb`
+  markup only — Scene text is plain content; accents are `spans`.)
 - Every legacy run writes `out/index.html` — a contact sheet showing each
   variant full size and at 168px, which is the width that actually decides
   clicks; Scene variants batch through `scene render` with contact sheets
