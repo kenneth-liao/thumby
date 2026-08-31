@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // The asset library CLI: search and maintain the reusable plates and logos.
 import { parseArgs } from "node:util";
+import { execSync } from "node:child_process";
 import { mkdir, writeFile, readFile, copyFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -9,6 +10,7 @@ import {
   searchLibrary,
   resolveAsset,
   writePlateAsset,
+  approveCutout,
   type Library,
   type CutoutMeta,
 } from "./assets.js";
@@ -22,6 +24,8 @@ library — the reusable asset library (plates + logos + cutouts + objects + ide
   bun run library add-logo <file> --id <id>   Add a logo image to the library.
   bun run library adopt <plate.png> --id <id> Adopt a generated plate (with its provenance).
   bun run library add-cutout <file> --id <id> Add a transparent-PNG cutout.
+  bun run library approve <id> [options]      Promote a trial Creator Asset to approved —
+                                              the only promotion path (REQ-018).
 
 Object Assets (REQ-015) enter the library only through Generation Job
 adoption — "bun run jobs adopt <jobId> <hash> --id <id>" — which verifies
@@ -49,7 +53,12 @@ Options
   --color <hex>    Logo: default mark colour when recolourable
   --alias <csv>    Logo: extra ids it answers to, e.g. "chatgpt,gpt"
   --source <url>   Logo/cutout: where it came from (URL + date)
-  --approval <s>   Cutout: trial | approved  (default: trial)
+  --approval <s>   Cutout: trial | approved  (default: trial). "approved"
+                   here is the sourced identity-kit import path (--source
+                   required) — promoting an existing trial Creator Asset
+                   is "library approve <id>", never this flag.
+  --approver <s>   approve: who approved (default: git config user.name)
+  --note <str>     approve: optional approval rationale
   --derived-from <path>  Cutout: the approved original this was edited from
   --edit-prompt <str>    Cutout: the edit instruction that produced it
   --sheet          list only: also write assets/index.html contact sheet
@@ -80,6 +89,8 @@ const parse = () =>
       approval: { type: "string" },
       "derived-from": { type: "string" },
       "edit-prompt": { type: "string" },
+      approver: { type: "string" },
+      note: { type: "string" },
       project: { type: "string" },
       facets: { type: "string", multiple: true },
       sheet: { type: "boolean", default: false },
@@ -94,8 +105,8 @@ if (values.help || positionals.length === 0) {
 }
 
 const command = positionals[0]!;
-if (!["list", "resolve", "add-logo", "adopt", "add-cutout"].includes(command)) {
-  fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout`);
+if (!["list", "resolve", "add-logo", "adopt", "add-cutout", "approve"].includes(command)) {
+  fail(`Unknown command "${command}". Options: list | resolve | add-logo | adopt | add-cutout | approve`);
 }
 if (command !== "list" && values.facets?.length)
   fail(`--facets applies to "list" only`);
@@ -288,6 +299,46 @@ if (command === "resolve") {
         `\n  media      ${asset.mediaType}` +
         `\n  bytes      ${asset.bytes.byteLength}` +
         `\n  hash       sha-256:${asset.hash}\n`,
+    );
+  } catch (err) {
+    fail((err as Error).message);
+  }
+  process.exit(0);
+}
+
+if (command === "approve") {
+  // The one promotion path trial → approved (REQ-018). `add-cutout --approval
+  // approved --source` is the sourced identity-kit import, not a promotion —
+  // this command is where an existing trial Creator Asset becomes approved.
+  const id = positionals[1];
+  if (!id) fail(`approve needs the Creator Asset id — "bun run library approve <id>"`);
+  const approver =
+    values.approver ??
+    (() => {
+      try {
+        return execSync("git config user.name", { encoding: "utf8" }).trim();
+      } catch {
+        return "";
+      }
+    })();
+  if (!approver) fail(`--approver is required (or set git config user.name)`);
+  try {
+    const meta = await approveCutout(LIBRARY_ROOT, id, {
+      approvedBy: approver,
+      approvedAt: new Date().toISOString(),
+      ...(values.note ? { approvalNote: values.note } : {}),
+    });
+    const lib = await scanOrDie();
+    const entry = lib.cutouts.find((c) => c.meta.id === id);
+    console.log(
+      `  approve  ${id} → approved` +
+        `
+  by       ${meta.approvedBy} at ${meta.approvedAt}` +
+        (meta.approvalNote ? `
+  note     ${meta.approvalNote}` : "") +
+        (entry ? `
+  identity ${id}@${entry.hash}` : "") +
+        "\n",
     );
   } catch (err) {
     fail((err as Error).message);

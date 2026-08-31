@@ -22,17 +22,19 @@ import type { ResolvedAsset } from "./assets.js";
 import type { ResolvedScene, SceneError } from "./scene.js";
 import type { Optimization } from "./finalize.js";
 
-export const MANIFEST_VERSION = 2;
+export const MANIFEST_VERSION = 3;
 
 /**
- * Versions this reader accepts. v2 added `outputs[].optimization` (the 2 MB
- * finalization record); v1 manifests predate it and are read unchanged — the
- * field is optional and self-validating, so one strict gate covers both.
- * Downgrade limitation, documented in the README: a v1 reader (thumby ≤ 0.14)
- * rejects v2 manifests naming the version — rerender with the tool version
- * that wrote the manifest.
+ * Versions this reader accepts. v3 added `experimental` (the non-final marker
+ * for renders made under the trial-Creator override, REQ-018); v2 added
+ * `outputs[].optimization` (the 2 MB finalization record); v1 predates both —
+ * the fields are optional and self-validating, so one strict gate covers all
+ * three. Downgrade limitation, documented in the README: an older reader
+ * rejects a newer manifest naming the version (a 0.18 reader reports v3 as an
+ * unknown `experimental` field) — rerender with the tool version that wrote
+ * the manifest.
  */
-const SUPPORTED_MANIFEST_VERSIONS = [1, 2] as const;
+const SUPPORTED_MANIFEST_VERSIONS = [1, 2, 3] as const;
 /** The manifest schema versions this tool reads — derived from the tuple above. */
 export type ManifestVersion = (typeof SUPPORTED_MANIFEST_VERSIONS)[number];
 
@@ -198,6 +200,12 @@ export interface RenderManifest {
   scene: { path: string; sha256: string };
   /** The selected Variants — `[]` renders the base Scene. */
   variant: string[];
+  /**
+   * Present (`true`) when the render used the explicit experimental override
+   * to render trial Creator Asset(s) — the output is non-final (REQ-018).
+   * Rerender honors it: the recorded render was legitimately experimental.
+   */
+  experimental?: true;
   outputs: ManifestOutput[];
   contact?: ManifestContact;
 }
@@ -225,6 +233,8 @@ export function buildManifest(opts: {
   sceneFile: string;
   sceneSha256: string;
   variant: string[];
+  /** True when this render used the experimental trial-Creator override. */
+  experimental?: boolean;
   outputs: ManifestRenderInput[];
   contact?: { output: string; width: number; height: number; png: Buffer };
 }): RenderManifest {
@@ -237,6 +247,7 @@ export function buildManifest(opts: {
       sha256: opts.sceneSha256,
     },
     variant: opts.variant,
+    ...(opts.experimental ? { experimental: true as const } : {}),
     outputs: opts.outputs.map((o) => ({
       output: relPath(opts.manifestDir, o.output),
       width: o.width,
@@ -363,9 +374,11 @@ export async function readManifest(
   if (!isObject(raw)) return { ok: false, errors: [{ path: "manifest", message: "the manifest must be a JSON object" }] };
   for (const k of Object.keys(raw))
     if (
-      !["manifestVersion", "tool", "schemaVersion", "scene", "variant", "outputs", "contact"].includes(k)
+      !["manifestVersion", "tool", "schemaVersion", "scene", "variant", "experimental", "outputs", "contact"].includes(k)
     )
       errs.at(k, `"${k}" is not a valid manifest field`);
+  if (raw.experimental !== undefined && raw.experimental !== true)
+    errs.at("experimental", `"experimental" must be true when present — it marks a non-final render`);
 
   if (!isManifestVersion(raw.manifestVersion))
     errs.at(

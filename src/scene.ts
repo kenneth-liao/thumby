@@ -584,11 +584,24 @@ function semanticErrors(scene: Scene): SceneError[] {
 
 // --- resolution pass -------------------------------------------------------------
 
+/**
+ * The layer-specific failure for a trial Creator Asset reference (REQ-018):
+ * names the asset, the approval state, and both remedies — the explicit
+ * approval operation, or the render-time experimental override.
+ */
+function trialCreatorError(id: string | undefined): string {
+  return (
+    `library cutout "${id ?? "?"}" is a trial Creator Asset (approval: "trial") — normal and final rendering reject it.\n` +
+    `Approve it explicitly with "bun run library approve ${id ?? "<id>"}", or render with --experimental for a clearly-marked non-final render.`
+  );
+}
+
 async function resolutionErrors(
   projectRoot: string,
   library: () => Promise<Library>,
   scene: Scene,
   assets: Map<string, ResolvedAsset>,
+  opts?: { allowTrialCreator?: boolean },
 ): Promise<SceneError[]> {
   const errors: SceneError[] = [];
   // The library materializes at most once, and only when a scene actually
@@ -604,7 +617,16 @@ async function resolutionErrors(
           parseAssetRef(layer.asset).scope === "library"
             ? await getLibrary()
             : EMPTY_LIBRARY;
-        assets.set(layer.id, await resolveAsset(projectRoot, lib, layer.asset));
+        const resolved = await resolveAsset(projectRoot, lib, layer.asset);
+        // The Creator approval gate (REQ-018): a trial Creator Asset is
+        // disallowed scene state unless the caller explicitly relaxed the
+        // gate — render's --experimental — and every relaxion still marks
+        // the output non-final downstream.
+        if (resolved.approval === "trial" && !opts?.allowTrialCreator) {
+          errors.push({ path: `${at}.asset`, message: trialCreatorError(resolved.id) });
+          continue;
+        }
+        assets.set(layer.id, resolved);
       } catch (err) {
         errors.push({
           path: `${at}.asset`,
@@ -679,6 +701,7 @@ export async function loadScene(
   projectRoot: string,
   library: () => Promise<Library>,
   raw: unknown,
+  opts?: { allowTrialCreator?: boolean },
 ): Promise<LoadResult> {
   if (!validateSchema(raw)) {
     return { ok: false, errors: expandLayerErrors(validateSchema.errors!) };
@@ -692,7 +715,9 @@ export async function loadScene(
   if (errors.length === 0) errors.push(...themeErrorsAndApply(scene));
   const assets = new Map<string, ResolvedAsset>();
   if (errors.length === 0)
-    errors.push(...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets)));
+    errors.push(
+      ...(await resolutionErrors(path.resolve(projectRoot), library, scene, assets, opts)),
+    );
   if (errors.length) return { ok: false, errors };
   return { ok: true, resolved: { scene, assets } };
 }
