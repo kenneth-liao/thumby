@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   SUBJECT_SEGMENTER,
+  ensureSegmenterReady,
   localSegmentationMatteEngine,
   maskPngFrom,
   missingWeightsMessage,
@@ -103,6 +104,18 @@ describe("weights are pinned and failures are loud", () => {
       (e) => e as Error,
     );
     expect((err as Error).message).toMatch(/sha-256 is [0-9a-f]{64}/);
+  });
+
+  test("preflight refuses before any candidate is generated, with the same message", async () => {
+    // This is what stops a creator job while it is still free (RE-3): the
+    // lifecycle calls it ahead of the paid generation call.
+    process.env.THUMBY_MODEL_DIR = root;
+    const engine = localSegmentationMatteEngine();
+    expect(engine.preflight).toBe(ensureSegmenterReady);
+    const err = await engine.preflight!().catch((e) => e as Error);
+    expect((err as Error).message).toContain(path.join(root, SUBJECT_SEGMENTER.file));
+    expect((err as Error).message).toContain(SUBJECT_SEGMENTER.sha256);
+    expect((err as Error).message).toContain(SUBJECT_SEGMENTER.source);
   });
 
   test("the fix-it message is one text, whatever raised it", () => {

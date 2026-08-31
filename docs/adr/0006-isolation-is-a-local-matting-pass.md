@@ -33,6 +33,12 @@ verified once per process. A missing or wrong-bytes model **fails loudly**
 with the path, the pin, and the fetch command; the pass never silently skips
 isolation.
 
+That check runs **before anything is paid for**. The seam carries an optional
+`preflight`, and the lifecycle calls it ahead of the generation call on both a
+new run and a rerun: an engine that cannot run stops the job while it is still
+free. Detecting it after generation would leave billed candidates that can
+never be isolated, recoverable only by paying again.
+
 ## Rationale
 
 Measured through the recorded creator-job workflow (2026-08-29, `nano-2`,
@@ -81,7 +87,9 @@ known defect.
 - Run cost is **generation only**: nothing about matting is billed, so there
   is no matting spend to record, to lose on failure, or to mis-measure.
 - First use on a machine needs the pinned weights cached (~490 MB, fetched
-  once). Missing weights stop the job with the exact command to fix it.
+  once). Missing weights stop the job **before the generation call**, with the
+  exact command to fix it — no candidate is ever paid for that the pass cannot
+  isolate.
 - A matting failure does not discard a paid run: the candidate is recorded
   without a matte, the run's warnings say why, and adoption refuses it by name.
 - `onnxruntime-node` is a dependency with a native postinstall

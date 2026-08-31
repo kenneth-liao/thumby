@@ -279,6 +279,74 @@ describe("the matting pass (REQ-017)", () => {
   });
 });
 
+describe("the matting pass runs its preflight before anything is paid for (RE-3)", () => {
+  /** An engine whose prerequisite is missing — the shipped one's weights. */
+  const notReady = (): MatteEngine =>
+    Object.assign(
+      // A fresh function per call: attaching the hook to the shared fake
+      // would leak the failure into every other test in this file.
+      (input: { bytes: Uint8Array; label: string }) => fakeMatte(input),
+      {
+        preflight: async () => {
+          throw new Error(
+            "The local matting model is unusable: the weights file is not there\n\nExpected: models/birefnet-fp16.onnx",
+          );
+        },
+      },
+    );
+
+  test("a new creator job never calls the generator when the pass cannot run", async () => {
+    let generated = 0;
+    const spy: CreatorGenerator = async (req) => {
+      generated++;
+      return fakeGen(req);
+    };
+    await expect(
+      runCreatorJob(jobRoot, "creator-preflight", baseRequest(), spy, notReady()),
+    ).rejects.toThrow(/weights file is not there/i);
+    // The paid call never happened, and no job record was left behind.
+    expect(generated).toBe(0);
+    await expect(loadJob(jobRoot, "creator-preflight")).rejects.toThrow(/No generation job/i);
+  });
+
+  test("a rerun is held to the same rule — it pays for candidates too", async () => {
+    const anchor = path.join(root, "anchor-a.png");
+    await writeFile(anchor, "anchor-a-bytes");
+    const req: CreatorJobRequest = {
+      ...baseRequest(),
+      count: 1,
+      refs: [
+        {
+          role: "identity",
+          path: anchor,
+          contentHash: createHash("sha256").update("anchor-a-bytes").digest("hex"),
+        },
+      ],
+    };
+    const job = await runCreatorJob(jobRoot, "creator-preflight-rerun", req, fakeGen, fakeMatte);
+    expect(job.runs).toHaveLength(1);
+
+    let generated = 0;
+    const spy: CreatorGenerator = async (r) => {
+      generated++;
+      return fakeGen(r);
+    };
+    await expect(
+      rerunCreatorJob(jobRoot, "creator-preflight-rerun", spy, notReady()),
+    ).rejects.toThrow(/weights file is not there/i);
+    expect(generated).toBe(0);
+    // The lineage is untouched: no half-run appended.
+    expect((await loadJob(jobRoot, "creator-preflight-rerun")).runs).toHaveLength(1);
+  });
+
+  test("an engine with nothing to check needs no preflight", async () => {
+    // fakeMatte is a plain function — the seam must not require the hook.
+    expect((fakeMatte as MatteEngine).preflight).toBeUndefined();
+    const job = await runCreatorJob(jobRoot, "creator-no-preflight", { ...baseRequest(), count: 1 }, fakeGen, fakeMatte);
+    expect(job.runs[0]!.candidates[0]!.matte).toBeDefined();
+  });
+});
+
 describe("adoptCandidate for creator jobs", () => {
   test("adopts the candidate's matte as a trial Cutout Asset with job and matte provenance", async () => {
     const job = await runCreatorJob(jobRoot, "creator-adopt", baseRequest(), fakeGen, fakeMatte);
@@ -483,6 +551,36 @@ describe("jobs creators (CLI)", () => {
     const out = res.output as Record<string, any>;
     expect(out.ok).toBe(false);
     expect(JSON.stringify(out.errors)).toMatch(/identity|text alone/i);
+  });
+
+  test("reports missing matting weights as a structured failure, before any generation", async () => {
+    const anchor = path.join(cliRoot, "anchor.png");
+    await writeFile(anchor, "anchor-bytes");
+    let generated = 0;
+    const spy: CreatorGenerator = async (req) => {
+      generated++;
+      return fakeGen(req);
+    };
+    const res = await cliRun(
+      ["creators", "arms crossed", "--ref", `identity:${anchor}`, "--job", "cli-no-weights"],
+      {
+        generate: fakeGen,
+        generateObject: fakeGen,
+        generateCreator: spy,
+        matte: Object.assign((input: { bytes: Uint8Array; label: string }) => fakeMatte(input), {
+          preflight: async () => {
+            throw new Error("The local matting model is unusable: the weights file is not there");
+          },
+        }),
+        jobsRoot: cliJobsRoot,
+        libraryRoot: cliLibraryRoot,
+      },
+    );
+    expect(res.exitCode).toBe(1);
+    const out = res.output as Record<string, any>;
+    expect(out.ok).toBe(false);
+    expect(JSON.stringify(out.errors)).toMatch(/weights file is not there/i);
+    expect(generated).toBe(0);
   });
 
   test("adopt routes a creator job to the trial-cutout path", async () => {

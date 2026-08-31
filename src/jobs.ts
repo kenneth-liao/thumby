@@ -282,6 +282,10 @@ async function runJob(
   if (existsSync(path.join(jobRoot, jobId, "job.json")))
     throw new Error(`Job "${jobId}" already exists — use "jobs rerun ${jobId}" to add candidates under its lineage`);
 
+  // Nothing is paid for until the pass that has to isolate the result says it
+  // can run: a job whose matting prerequisites are missing must fail while it
+  // is still free, not leave billed candidates that can never be adopted.
+  await matte?.preflight?.();
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
@@ -366,6 +370,8 @@ export async function rerunJob(
       );
   }
 
+  // A rerun pays for candidates too — same rule as the first run.
+  await matte?.preflight?.();
   const batch = await generate(job.request);
   const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString(), matte);
   job.runs.push(run);

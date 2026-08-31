@@ -99,8 +99,9 @@ creators options
   "jobs adopt" writes that matte, always as a trial Cutout Asset; approval is
   Kenneth's alone (DEC-004). The pass is local and unbilled: run cost is
   generation only. First use needs the pinned weights cached under models/ —
-  a missing file fails loudly with the exact fetch command. A candidate the
-  pass could not isolate is refused at adoption and the run's warnings say why.
+  a missing file fails loudly with the exact fetch command, before any
+  generation is paid for. A candidate the pass could not isolate is refused
+  at adoption and the run's warnings say why.
 
 A plate job is a bare backdrop by definition (REQ-014): no person, product,
 device, or independently editable foreground object is baked in — subjects

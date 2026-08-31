@@ -226,12 +226,25 @@ export async function predictSubjectMask(
 }
 
 /**
+ * Verify the pin and build the session before any of it is needed.
+ *
+ * This is the engine's `preflight`: the lifecycle calls it ahead of the
+ * generation call, so weights that are missing or off-pin stop a creator job
+ * while it is still free. Without it the first sign of trouble would be N
+ * paid candidates that can never be isolated, and the only recovery would be
+ * a rerun that pays again.
+ */
+export async function ensureSegmenterReady(): Promise<void> {
+  await getSession();
+}
+
+/**
  * The shipped matting engine: predict the subject mask locally, then apply it
  * as the candidate's alpha channel. Segmentation, never colour distance; no
  * network call at matting time once the weights are cached.
  */
 export function localSegmentationMatteEngine(): MatteEngine {
-  return async ({ bytes, label }) => {
+  const engine = async ({ bytes, label }: { bytes: Uint8Array; label: string }) => {
     const { mask, warnings } = await predictSubjectMask(bytes);
     return {
       bytes: composeMatte(bytes, mask, label),
@@ -239,4 +252,5 @@ export function localSegmentationMatteEngine(): MatteEngine {
       warnings,
     };
   };
+  return Object.assign(engine, { preflight: ensureSegmenterReady });
 }

@@ -37,11 +37,20 @@ export interface MatteEngineResult {
   warnings?: string[];
 }
 
-/** The matting seam. Input is one candidate; output is its true-alpha matte. */
-export type MatteEngine = (input: {
-  bytes: Uint8Array;
-  label: string;
-}) => Promise<MatteEngineResult>;
+/**
+ * The matting seam. Input is one candidate; output is its true-alpha matte.
+ *
+ * `preflight` is how an engine says "I cannot run" *before* anything is paid
+ * for. The lifecycle calls it once, ahead of the generation call, so an
+ * engine with a missing prerequisite (the local segmenter's weights) stops
+ * the job while it is still free — rather than after N billed candidates
+ * exist with no way to isolate them. An engine with nothing to check omits
+ * it; a fake engine in a test is just a function.
+ */
+export interface MatteEngine {
+  (input: { bytes: Uint8Array; label: string }): Promise<MatteEngineResult>;
+  readonly preflight?: () => Promise<void>;
+}
 
 export interface MatteOutcome {
   bytes: Uint8Array;

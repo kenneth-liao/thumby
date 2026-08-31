@@ -222,8 +222,9 @@ matte is kept as-is (`native-alpha`), with no inference at all.
 
 The weights are not in the repo. First use fetches them once into the
 gitignored `models/` cache (~490 MB), pinned by filename and sha-256; a
-missing or mismatched file stops the job with the exact command to fix it —
-the pass never silently skips isolation:
+missing or mismatched file stops the job **before the first billed
+generation call** (and before a rerun's) with the exact command to fix it, so
+no candidate is ever paid for that the pass cannot isolate:
 
 ```bash
 mkdir -p models

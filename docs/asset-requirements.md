@@ -154,8 +154,10 @@ Nothing about matting is billed, so a run's recorded cost is generation only.
 
 **Weights.** Not in the repo: the pinned file is cached under `models/`
 (gitignored; `THUMBY_MODEL_DIR` overrides it) and verified by sha-256 once per
-process. Missing or mismatched weights stop the job with the path, the pin,
-and the fetch command — the pass never silently skips isolation.
+process. Missing or mismatched weights stop the job **before the first
+generation call** — on a rerun too — with the path, the pin, and the fetch
+command. Nothing is paid for that the pass could not isolate, and the pass
+never silently skips isolation.
 
 | what | value |
 |---|---|
