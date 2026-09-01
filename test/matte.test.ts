@@ -69,6 +69,24 @@ describe("composeMatte", () => {
     expect(png.px(0, 0)[3]).toBe(0);
   });
 
+  test("interpolates when downscaling the mask — detail between mask pixels survives", () => {
+    // The HR segmenter predicts a mask larger than the candidate, so every
+    // candidate pixel lands *between* mask pixels. Nearest-neighbour would
+    // alias fine structure (hair strands flicker subject/background); bilinear
+    // reads the surrounding mask values. A mask whose coverage steps down
+    // across two columns must produce the blended alpha, not a hard pick.
+    const gradient = encodePng(
+      8,
+      8,
+      (x) => (x <= 3 ? [255, 255, 255, 255] : [0, 0, 0, 255]),
+      { colorType: 2 },
+    );
+    const png = decodePng(Buffer.from(composeMatte(OPAQUE_SUBJECT, gradient, "cand.png")));
+    // Candidate x=7 maps to mask x=3.25 — three quarters of column 3 (255),
+    // one quarter of column 4 (0).
+    expect(png.px(7, 8)[3]).toBe(191);
+  });
+
   test("refuses bytes it cannot parse rather than guessing a matte", () => {
     expect(() => composeMatte(Buffer.from("not a png"), MASK, "junk.png")).toThrow(/PNG|signature/i);
     expect(() => composeMatte(OPAQUE_SUBJECT, Buffer.from("nope"), "cand.png")).toThrow(

@@ -157,12 +157,14 @@ Adoption's true-alpha gate refuses both by design — RGB chroma-key distance
 cannot qualify an output, and a painted checkerboard is not a matte.
 
 So isolation is a **stage of the job**, and it runs **on this machine**
-(ADR-0006). Every creator candidate — and every **object** candidate, which
-ticket #20 measured to fail the same way — goes through the **matting pass**: a
-BiRefNet ONNX segmenter (MIT, fp16) predicts the subject mask through
-`onnxruntime-node` — CoreML on Apple silicon, CPU fallback with a recorded
-warning — and the mask becomes the candidate's alpha channel locally. The
-matte is recorded beside the candidate under its own content identity.
+(ADR-0006, ADR-0009). Every creator candidate — and every **object** candidate,
+which ticket #20 measured to fail the same way — goes through the **matting
+pass**: a BiRefNet HR ONNX segmenter (MIT, fp16) predicts the subject mask
+through `onnxruntime-node` — CoreML (MLProgram on the GPU) on Apple silicon,
+CPU fallback with a recorded warning — and the mask becomes the candidate's
+alpha channel locally. The mask is resampled onto the candidate bilinearly, so
+the 2048×2048 prediction's hair-level detail survives the downscale. The matte
+is recorded beside the candidate under its own content identity.
 `bun run jobs review` shows each matte on a checkerboard next to the candidate
 it came from, and `bun run jobs adopt` writes the **matte** — never the opaque
 candidate — as a trial Cutout Asset. A candidate the pass could not isolate is
@@ -173,17 +175,30 @@ Nothing about matting is billed, so a run's recorded cost is generation only.
 
 **Weights.** Not in the repo: the pinned file is cached under `models/`
 (gitignored; `THUMBY_MODEL_DIR` overrides it) and verified by sha-256 once per
-process. Missing or mismatched weights stop the job **before the first
-generation call** — on a rerun too — with the path, the pin, and the fetch
-command. Nothing is paid for that the pass could not isolate, and the pass
-never silently skips isolation.
+process. No upstream ONNX export of BiRefNet HR exists, so the file is
+produced by `uv run --locked --script scripts/export-birefnet-hr.py` from a
+pinned Hugging Face revision of the official checkpoint (never `main`), with
+the checkpoint sha-256 verified before any remote code runs, and the ONNX
+graph verified numerically against the PyTorch reference before its hash is
+pinned. Missing or mismatched weights stop the job **before the first generation
+call** — on a rerun too — with the path, the pin, and the locked export command.
+Nothing is paid for that the pass could not isolate, and the pass never
+silently skips isolation.
 
 | what | value |
 |---|---|
-| file | `models/birefnet-fp16.onnx` (~490 MB) |
-| sha-256 | `3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09` |
-| source | `onnx-community/BiRefNet-ONNX`, `onnx/model_fp16.onnx` (MIT) |
-| input | 1024×1024, ImageNet mean/std, per the repo's `preprocessor_config.json` |
+| file | `models/birefnet-hr-fp16.onnx` (~560 MB) |
+| sha-256 | `b8cfcf2152fd26d3f2f75b502e0b8903c59e9913815dc77299c1278c32137f69` |
+| source | `ZhengPeng7/BiRefNet_HR@a7a562f6fd16021180f2f4348f4de003a2d3d1e1` (MIT) via locked `scripts/export-birefnet-hr.py` |
+| checkpoint sha-256 | `9d678bafec0b0019fbb073b7fd02f05ede25dc4b15254f23b2fb0be333200c0d` |
+| input | 2048×2048, ImageNet mean/std, per the checkpoint's preprocessing |
+
+**Measured (2026-08-31, M4 Pro, CoreML MLProgram/GPU):** a recorded opaque
+candidate matted in **~17 s** through the new checkpoint (the previous general
+model measured ~6 s; the #44 benchmark's 3.6 s was PyTorch MPS, which is not
+the `onnxruntime-node` stack ADR-0006 pins). The mask shows the expected
+hair-level improvement over the general model; the timing is the accepted
+cost of the quality upgrade on this stack.
 
 **Measured on the recorded candidates (2026-08-30, M4 Pro, CoreML):** both
 `int1-alpha-demo` candidates (1195×896 opaque RGB) matted in **7–10 s** each
