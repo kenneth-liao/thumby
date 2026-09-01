@@ -103,6 +103,8 @@ describe("compose with bundled fonts", () => {
     };
   }
 
+  // Inherently ~4.8s: the garbage @font-face holds setContent until
+  // Chromium's own resource fetch times out. The 5s default was razor-thin.
   it("rejects a render whose face registers but never resolves (the Linux failure mode)", async () => {
     // Garbage bytes: the @font-face rule is emitted but the face never loads,
     // so only the compose-level probe can catch the silent fallback.
@@ -124,7 +126,7 @@ describe("compose with bundled fonts", () => {
       delete PAIRINGS[".test-garbage"];
       if (existsSync(garbageFile)) unlinkSync(garbageFile);
     }
-  });
+  }, 30_000);
 
   it("renders a thumbnail with the bundled faces", async () => {
     const png = await compose(spec());

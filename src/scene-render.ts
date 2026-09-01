@@ -9,8 +9,8 @@
  * resolved Asset bytes, both as data: URIs — the page never fetches. Text is
  * local CSS only (ADR-0001); the renderer adds no text or watermark of its own.
  */
-import type { Page, BrowserContext } from "playwright";
-import { getBrowser } from "./browser.js";
+import type { Page } from "playwright";
+import { withRenderPage } from "./browser.js";
 import {
   fontFaceCss,
   familyResolved,
@@ -676,20 +676,7 @@ async function renderResolvedToPng(
   buildHtml: (natural: Map<string, ImageSize>) => string,
   opts?: { page?: Page },
 ): Promise<SceneRenderResult> {
-  let ctx: BrowserContext | undefined;
-  const page =
-    opts?.page ??
-    (await (async () => {
-      ctx = await (await getBrowser()).newContext({
-        viewport: {
-          width: resolved.scene.canvas.width,
-          height: resolved.scene.canvas.height,
-        },
-        deviceScaleFactor: 1,
-      });
-      return ctx.newPage();
-    })());
-  try {
+  const render = async (page: Page): Promise<SceneRenderResult> => {
     const natural = await measureCroppedImages(page, resolved);
     await page.setContent(buildHtml(natural), { waitUntil: "load" });
 
@@ -730,9 +717,18 @@ async function renderResolvedToPng(
       height: resolved.scene.canvas.height,
       warnings,
     };
-  } finally {
-    await ctx?.close();
-  }
+  };
+  // An injected page is caller-owned: used as-is, never closed or replaced,
+  // and not subject to the shared page's serialization. Otherwise the render
+  // runs on the one shared page — a viewport resize, not a context cycle.
+  if (opts?.page) return render(opts.page);
+  return withRenderPage(async (page) => {
+    await page.setViewportSize({
+      width: resolved.scene.canvas.width,
+      height: resolved.scene.canvas.height,
+    });
+    return render(page);
+  });
 }
 
 /**
@@ -806,9 +802,11 @@ export async function renderContactSheet(entries: ContactSheetEntry[]): Promise<
     )
     .join("\n")}
   </body></html>`;
-  const ctx = await (await getBrowser()).newContext({ deviceScaleFactor: 1 });
-  try {
-    const page = await ctx.newPage();
+  // The shared render page: a viewport resize, not a context cycle (issue #27).
+  // Playwright's default viewport is 1280×720 — restated so the sheet's cell
+  // layout is identical however a previous render left the shared page.
+  return withRenderPage(async (page) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
     await page.setContent(html, { waitUntil: "load" });
     const png = await page.locator("body").screenshot({ type: "png" });
     const box = await page.locator("body").boundingBox();
@@ -818,7 +816,5 @@ export async function renderContactSheet(entries: ContactSheetEntry[]): Promise<
       width: CONTACT_PAD + entries.length * CONTACT_CELL + (entries.length - 1) * CONTACT_GAP + CONTACT_PAD,
       height: Math.round(box.height),
     };
-  } finally {
-    await ctx.close();
-  }
+  });
 }

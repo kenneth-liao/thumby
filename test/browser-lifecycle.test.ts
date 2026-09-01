@@ -1,0 +1,130 @@
+import { describe, it, expect } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { chromium } from "playwright";
+import { closeBrowser, getBrowser } from "../src/browser.js";
+import { renderScene } from "../src/scene-render.js";
+import { type Scene, type SceneLayer, type ResolvedScene } from "../src/scene.js";
+import { decodePng } from "./png.js";
+
+// --- issue #27 regression: browser lifecycle under repetition --------------
+//
+// Rendering used to create and close a BrowserContext (+page) per render on
+// the shared browser. In one Bun process, that churn deadlocked or lost the
+// browser after enough cycles — the failure tracked the cumulative number of
+// contexts, not scheduling. The fix is one shared context+page per process,
+// serialized, self-healing. These tests pin that contract.
+
+/** A shape-only scene loads nothing: no assets, no fonts, pure pixels. */
+const shape = (over: Record<string, unknown> = {}): SceneLayer => ({
+  id: "box",
+  type: "shape",
+  shape: "rect",
+  color: "#ff0000",
+  position: { x: 100, y: 100 },
+  size: { width: 200, height: 100 },
+  ...over,
+});
+
+const scene = (layers: SceneLayer[]): Scene => ({
+  schemaVersion: 1,
+  canvas: { width: 1280, height: 720 },
+  layers,
+});
+
+const resolved = (layers: SceneLayer[]): ResolvedScene => ({
+  scene: scene(layers),
+  assets: new Map(),
+  masks: new Map(),
+});
+
+/** A text layer whose family ships nowhere — the deterministic render failure
+ * (rejected at resolveFace, before the browser runs). */
+const badFont = (): SceneLayer => ({
+  id: "t",
+  type: "text",
+  text: "boom",
+  font: "NoSuchFamily Anywhere",
+  fontSize: 40,
+  color: "#000000",
+  position: { x: 100, y: 100 },
+  size: { width: 400, height: 100 },
+});
+
+function chromiumProcessAlive(): boolean {
+  const execPath = chromium.executablePath();
+  const ps = execFileSync("ps", ["-A", "-o", "command="], { encoding: "utf8" });
+  // Headless launches are chrome-headless-shell, not executablePath()'s
+  // Chromium app — match either, scoped to the playwright cache so we never
+  // see the user's real browser.
+  return ps
+    .split("\n")
+    .some((l) => l.includes(execPath) || (l.includes("chrome-headless-shell") && l.includes("ms-playwright")));
+}
+
+describe("browser lifecycle (issue #27)", () => {
+  it("completes 50 browser-backed renders in one process, every PNG a valid 1280×720", async () => {
+    for (let i = 0; i < 50; i++) {
+      const { png, width, height } = await renderScene(
+        resolved([shape({ color: i % 2 ? "#ff0000" : "#00ff00" })]),
+      );
+      expect(width).toBe(1280);
+      expect(height).toBe(720);
+      const img = decodePng(png);
+      expect(img.width).toBe(1280);
+      expect(img.height).toBe(720);
+    }
+  }, 300_000);
+
+  it("keeps an injected page caller-owned and usable across repeated renders", async () => {
+    const browser = await getBrowser();
+    const ctx = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+    });
+    await ctx.route("**/*", (route) => route.abort());
+    const page = await ctx.newPage();
+    for (let i = 0; i < 3; i++) {
+      await renderScene(resolved([shape()]), { page });
+    }
+    // The render functions neither closed nor replaced the caller's page.
+    expect(await page.evaluate(() => 1 + 1)).toBe(2);
+    await ctx.close();
+  }, 120_000);
+
+  it("renders with all network routes blocked", async () => {
+    const browser = await getBrowser();
+    const ctx = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      deviceScaleFactor: 1,
+    });
+    await ctx.route("**/*", (route) => route.abort());
+    const page = await ctx.newPage();
+    const { png, width, height } = await renderScene(resolved([shape()]), { page });
+    expect(width).toBe(1280);
+    expect(height).toBe(720);
+    const img = decodePng(png);
+    expect(img.width).toBe(1280);
+    await ctx.close();
+  }, 120_000);
+
+  it("survives a failed render, then renders again on the same shared lifecycle", async () => {
+    await expect(renderScene(resolved([badFont()]))).rejects.toThrow(/unknown font family/);
+    const { png, width, height } = await renderScene(resolved([shape()]));
+    expect(width).toBe(1280);
+    expect(height).toBe(720);
+    expect(decodePng(png).width).toBe(1280);
+  }, 120_000);
+
+  it("leaves no Chromium process behind after the caller closes the shared browser", async () => {
+    await renderScene(resolved([shape()]));
+    expect(chromiumProcessAlive()).toBe(true);
+    await closeBrowser();
+    expect(chromiumProcessAlive()).toBe(false);
+    // The lifecycle relaunches cleanly afterwards — close is not terminal.
+    const { png, width, height } = await renderScene(resolved([shape()]));
+    expect(width).toBe(1280);
+    expect(height).toBe(720);
+    expect(decodePng(png).width).toBe(1280);
+    await closeBrowser();
+  }, 120_000);
+});

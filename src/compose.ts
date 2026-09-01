@@ -6,7 +6,7 @@ import {
   type Pairing,
 } from "./fonts.js";
 import { renderOverlay, type OverlaySpec } from "./overlay.js";
-import { getBrowser } from "./browser.js";
+import { withRenderPage } from "./browser.js";
 import type { TextZone } from "./generate.js";
 
 export const WIDTH = 1280;
@@ -153,13 +153,11 @@ export async function compose(spec: ComposeSpec): Promise<Buffer> {
   const cutoutUri = spec.cutout
     ? `data:${spec.cutout.mediaType};base64,${Buffer.from(spec.cutout.bytes).toString("base64")}`
     : null;
-  const ctx = await (await getBrowser()).newContext({
-    viewport: { width: WIDTH, height: HEIGHT },
-    deviceScaleFactor: 1,
-  });
-  const p = await ctx.newPage();
-
-  try {
+  // The shared render page: a viewport resize, not a context cycle (issue #27).
+  // Everything below assumes the page is exclusively ours — withRenderPage
+  // serializes renders across the process.
+  return withRenderPage(async (p) => {
+    await p.setViewportSize({ width: WIDTH, height: HEIGHT });
     await p.setContent(page(spec, preset, font, uri, cutoutUri, overlay), { waitUntil: "load" });
 
     // Reject silent fallback before accepting output: if the requested family
@@ -212,7 +210,5 @@ export async function compose(spec: ComposeSpec): Promise<Buffer> {
     );
 
     return await p.screenshot({ type: "png" });
-  } finally {
-    await ctx.close();
-  }
+  });
 }

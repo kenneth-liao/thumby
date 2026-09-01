@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser-backed test suites no longer deadlock intermittently (#27, ADR-0010): all render paths (compose, scenes, contact sheet) now run on one shared, serialized, self-healing Chromium page per process (`withRenderPage` in `src/browser.ts`) instead of a context create/close cycle per render — a render costs a viewport resize, injected pages stay caller-owned, and `closeBrowser()` releases every resource with no Chromium process left behind. The underlying single-process deadlock was Bun's CDP-pipe defect (oven-sh/bun #15679, fixed in Bun 1.4.0): on Bun ≥1.4.0 a bare single-process `bun test` over the full suite is verified 10/10 (was ~60% hung on 1.3.14), and the supported `bun run test` loop is 10/10 on 1.4.0 and green on 1.3.14. Tests that genuinely take 4–8s (garbage-font fetch, quantization, CLI renders) got explicit 30s timeouts; `scene-mask.test.ts` closes its browser deterministically instead of on process exit
+
 ## [0.24.1]
 
 ### Fixed
