@@ -19,7 +19,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "playwright";
-import { LIBRARY_ROOT, scanLibrary, contentHash, type Library, type ResolvedAsset } from "./assets.js";
+import {
+  LIBRARY_ROOT,
+  scanLibrary,
+  contentHash,
+  trialOverrideWarning as trialOverrideWarningFor,
+  trialOutputName,
+  type Library,
+  type ResolvedAsset,
+} from "./assets.js";
 import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError, type ResolvedScene } from "./scene.js";
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
@@ -259,24 +267,16 @@ function resolvedAssetSummary(resolved: {
 }
 
 /**
- * The non-final marker (REQ-018): every output of an experimental render
- * carries this warning, naming the trial Creator Asset(s) it used. One home —
- * both render paths call it.
+ * The non-final marker for one resolved Scene (REQ-018): the shared marker,
+ * fed the trial Creator Asset ids the Scene actually uses.
  */
 function trialOverrideWarning(resolved: ResolvedScene): string | undefined {
-  const trials = [...resolved.assets.values()]
-    .filter((a) => a.approval === "trial")
-    .map((a) => a.id);
-  if (trials.length === 0) return undefined;
-  return (
-    `NON-FINAL render — produced under the experimental trial-Creator override; ` +
-    `not approved for publication. Trial Creator Asset(s) used: ${trials.join(", ")}.`
+  return trialOverrideWarningFor(
+    [...resolved.assets.values()]
+      .filter((a) => a.approval === "trial")
+      .map((a) => a.id ?? "?"),
   );
 }
-
-/** Default output name under the experimental override: a .trial suffix marks the file non-final. */
-const trialOutputName = (file: string): string =>
-  file.replace(/\.png$/, ".trial.png");
 
 /**
  * Render one or more named Variants of an already-gated Scene document.

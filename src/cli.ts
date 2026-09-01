@@ -13,7 +13,12 @@ import { MODELS, DEFAULT_MODEL, resolveModel } from "./models.js";
 import { STYLES, DEFAULT_STYLE } from "./styles.js";
 import { PAIRINGS, DEFAULT_PAIRING, assertFontAssets } from "./fonts.js";
 import { loadLibrary } from "./overlay.js";
-import { resolveAsset } from "./assets.js";
+import {
+  resolveAsset,
+  trialCreatorError,
+  trialOverrideWarning,
+  trialOutputName,
+} from "./assets.js";
 
 const HELP = `
 thumby — YouTube thumbnails: AI background + code-rendered text
@@ -35,6 +40,10 @@ Cutout
   --cutout-glow      Rim glow color behind the cutout, e.g. "#FFB020"
   --cutout-x         Nudge the cutout sideways, in % of frame width
   --cutout-flip      Mirror the cutout horizontally (e.g. reverse pointing)
+  --experimental     Permit a trial Creator Asset (--cutout <id>) under the
+                     explicit non-final override — outputs carry a .trial
+                     name and a NON-FINAL warning. The supported remedy is
+                     bun run library approve <id>.
    --overlay  <path>  JSON describing floating logo cards and dashed connectors
                       laid over the plate. See overlays/ for an example. A card
                       mark can be {type:"logo", id} (from the asset library,
@@ -137,6 +146,7 @@ function parse(args: string[]) {
     "cutout-glow": { type: "string" },
     "cutout-x": { type: "string", default: "0" },
     "cutout-flip": { type: "boolean", default: false },
+    experimental: { type: "boolean", default: false },
     "text-width": { type: "string" },
     overlay: { type: "string" },
     "fill-to": { type: "string" },
@@ -238,6 +248,50 @@ function slug(s: string): string {
   return s.replace(/[*]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "thumb";
 }
 
+// 0 — cutout, resolved and gated before anything is generated: the Creator
+// approval gate (REQ-018, #40) refuses a trial Creator Asset before any
+// generation spend, with the same refusal and remedies as the Scene gate.
+// A library id keeps compositions portable; a path still works for one-offs.
+// Everything resolves through the one asset-resolution contract — library
+// ids/refs (optionally pinned with <id>@<hash>) and one-off files alike — so
+// every cutout gets a content identity in run.json. The slot has a kind
+// invariant: a cutout is a transparent-PNG subject, so library resolution is
+// constrained to cutouts and a logo/plate id fails loudly.
+let cutoutLibraryId: string | undefined;
+let cutoutHash: string | undefined;
+/** The trial Creator Asset this run renders — set only under the override. */
+let trialCutoutId: string | undefined;
+const cutout = await (async () => {
+  if (!values.cutout) return undefined;
+  const asPath = path.resolve(values.cutout);
+  const lib = await loadLibrary();
+  // A file that exists beside the invocation is a one-off project asset;
+  // normalize it through the contract too (./ form forces project scope).
+  const isFile = await stat(asPath).then(
+    (s) => s.isFile(),
+    () => false,
+  );
+  const asset = await resolveAsset(
+    isFile ? path.dirname(asPath) : process.cwd(),
+    lib,
+    isFile ? `./${path.basename(asPath)}` : values.cutout,
+    isFile ? undefined : { kind: "cutout" },
+  );
+  // The approval gate keys on the library resolution's recorded approval
+  // state — one home, no re-scan. One-off files carry no approval state and
+  // never trip it.
+  if (asset.approval === "trial") {
+    if (!values.experimental) fail(trialCreatorError(asset.id));
+    trialCutoutId = asset.id;
+  }
+  cutoutLibraryId = asset.id;
+  cutoutHash = asset.hash;
+  return { bytes: asset.bytes, mediaType: asset.mediaType };
+})();
+const trialWarning = trialCutoutId !== undefined
+  ? trialOverrideWarning([trialCutoutId])
+  : undefined;
+
 const t0 = Date.now();
 await mkdir(outDir, { recursive: true });
 
@@ -302,36 +356,9 @@ if (values.bg) {
 }
 
 for (const w of genWarnings) console.log(`  warn     ${w}`);
+if (trialWarning) console.log(`  warn     ${trialWarning}`);
 
-// 2 — cutout, loaded once and reused across every variant.
-// A library id keeps compositions portable; a path still works for one-offs.
-// Everything resolves through the one asset-resolution contract — library
-// ids/refs (optionally pinned with <id>@<hash>) and one-off files alike — so
-// every cutout gets a content identity in run.json. The slot has a kind
-// invariant: a cutout is a transparent-PNG subject, so library resolution is
-// constrained to cutouts and a logo/plate id fails loudly.
-let cutoutLibraryId: string | undefined;
-let cutoutHash: string | undefined;
-const cutout = await (async () => {
-  if (!values.cutout) return undefined;
-  const asPath = path.resolve(values.cutout);
-  const lib = await loadLibrary();
-  // A file that exists beside the invocation is a one-off project asset;
-  // normalize it through the contract too (./ form forces project scope).
-  const isFile = await stat(asPath).then(
-    (s) => s.isFile(),
-    () => false,
-  );
-  const asset = await resolveAsset(
-    isFile ? path.dirname(asPath) : process.cwd(),
-    lib,
-    isFile ? `./${path.basename(asPath)}` : values.cutout,
-    isFile ? undefined : { kind: "cutout" },
-  );
-  cutoutLibraryId = asset.id;
-  cutoutHash = asset.hash;
-  return { bytes: asset.bytes, mediaType: asset.mediaType };
-})();
+// 2 — cutout resolved in step 0; the composition reuses it across variants.
 const cutoutSide = (values["cutout-side"] ??
   (zone === "left" ? "right" : zone === "right" ? "left" : "center")) as
   "left" | "center" | "right";
@@ -368,7 +395,12 @@ for (const [pi, plate] of plates.entries()) {
       fillTo: values["fill-to"],
       stroke: values.stroke!,
     });
-    const name = `${slug(headline)}${plates.length > 1 ? `-p${pi + 1}` : ""}${headlines.length > 1 ? `-v${hi + 1}` : ""}.png`;
+    // The non-final output-name hint (REQ-018): a run that rendered a trial
+    // Creator Asset under the override names every output *.trial.png — keyed
+    // on actual trial usage, so the override on an approved-only run mints
+    // no marker.
+    const base = `${slug(headline)}${plates.length > 1 ? `-p${pi + 1}` : ""}${headlines.length > 1 ? `-v${hi + 1}` : ""}.png`;
+    const name = trialCutoutId !== undefined ? trialOutputName(base) : base;
     await writeFile(path.join(outDir, name), png);
     written.push(name);
   }
@@ -425,7 +457,7 @@ const record = {
     : null,
   outputs: written,
   costUsd: values.bg ? 0 : resolveModel(values.model!).approxCost * plateCount,
-  warnings: genWarnings,
+  warnings: [...genWarnings, ...(trialWarning ? [trialWarning] : [])],
 };
 await writeFile(path.join(outDir, "run.json"), JSON.stringify(record, null, 2));
 await writeFile(

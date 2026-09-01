@@ -31,6 +31,7 @@ import {
   EMPTY_LIBRARY,
   parseAssetRef,
   resolveAsset,
+  trialCreatorError,
   type Library,
   type ResolvedAsset,
 } from "./assets.js";
@@ -597,18 +598,6 @@ function semanticErrors(scene: Scene): SceneError[] {
 }
 
 // --- resolution pass -------------------------------------------------------------
-
-/**
- * The layer-specific failure for a trial Creator Asset reference (REQ-018):
- * names the asset, the approval state, and both remedies — the explicit
- * approval operation, or the render-time experimental override.
- */
-function trialCreatorError(id: string | undefined): string {
-  return (
-    `library cutout "${id ?? "?"}" is a trial Creator Asset (approval: "trial") — normal and final rendering reject it.\n` +
-    `Approve it explicitly with "bun run library approve ${id ?? "<id>"}", or render with --experimental for a clearly-marked non-final render.`
-  );
-}
 
 /**
  * Pixel dimensions of a PNG from its IHDR header — null when the bytes are
