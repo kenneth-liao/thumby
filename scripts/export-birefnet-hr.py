@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11,<3.14"
 # dependencies = [
-#   "torch>=2.2",
-#   "torchvision",
-#   "timm",
-#   "transformers>=4.44",
-#   "safetensors",
-#   "einops",
-#   "kornia",
-#   "onnx>=1.15",
-#   "onnxruntime>=1.19",
-#   "onnxscript",
+#   "torch==2.13.0",
+#   "torchvision==0.28.0",
+#   "timm==1.0.29",
+#   "transformers==5.16.1",
+#   "safetensors==0.8.0",
+#   "einops==0.8.2",
+#   "kornia==0.8.3",
+#   "onnx==1.22.0",
+#   "onnxruntime==1.29.0",
+#   "onnxscript==0.7.1",
+#   "huggingface-hub==1.29.0",
 # ]
 # ///
 """Export the official ZhengPeng7/BiRefNet_HR checkpoint to the ONNX file thumby pins.
@@ -27,7 +28,7 @@ export exists anywhere (checked 2026-09), so this script produces it:
   4. convert to fp16 (keep_io_types) and verify again against the reference,
   5. print the sha-256 to pin in src/segment.ts.
 
-Run:  uv run scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
+Run:  uv run --locked --script scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
 
 If the fp16 conversion fails verification the script keeps the fp32 file and
 says so — the pin should then be updated to the fp32 file deliberately, never
@@ -42,6 +43,11 @@ from pathlib import Path
 import numpy as np
 
 MODEL_ID = "ZhengPeng7/BiRefNet_HR"
+# Immutable Hugging Face commit. Never follow `main` — a floating tip can
+# execute different remote code (trust_remote_code) and produce ONNX bytes
+# that fail the runtime pin in src/segment.ts.
+MODEL_REVISION = "a7a562f6fd16021180f2f4348f4de003a2d3d1e1"
+CHECKPOINT_SHA256 = "9d678bafec0b0019fbb073b7fd02f05ede25dc4b15254f23b2fb0be333200c0d"
 SIZE = 2048
 OPSET = 18
 
@@ -254,6 +260,32 @@ FP16_MAX_MEAN = 2e-3
 BINARIZE_AGREEMENT = 0.999
 
 
+def load_pinned_checkpoint():
+    """Download the immutable revision, verify the checkpoint bytes, then load.
+
+    trust_remote_code is required by this architecture (custom BiRefNet class),
+    but it only ever executes the code at MODEL_REVISION — never floating main.
+    """
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoModelForImageSegmentation
+
+    weights = Path(
+        hf_hub_download(MODEL_ID, "model.safetensors", revision=MODEL_REVISION),
+    )
+    actual = sha256_of(weights)
+    if actual != CHECKPOINT_SHA256:
+        raise SystemExit(
+            f"checkpoint sha-256 is {actual}, not the pinned {CHECKPOINT_SHA256} "
+            f"at {MODEL_ID}@{MODEL_REVISION} — refuse to execute remote code "
+            f"or trace a different model"
+        )
+    print(f"checkpoint {MODEL_ID}@{MODEL_REVISION} sha-256 {actual}", flush=True)
+    model = AutoModelForImageSegmentation.from_pretrained(
+        MODEL_ID, revision=MODEL_REVISION, trust_remote_code=True
+    )
+    return model
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -323,10 +355,8 @@ def main() -> None:
     out_fp16 = args.out
     out_fp32 = args.out.with_suffix(".fp32.onnx")
 
-    print(f"downloading/loading {MODEL_ID} (trust_remote_code)...", flush=True)
-    from transformers import AutoModelForImageSegmentation
-
-    model = AutoModelForImageSegmentation.from_pretrained(MODEL_ID, trust_remote_code=True)
+    print(f"downloading/loading {MODEL_ID}@{MODEL_REVISION}...", flush=True)
+    model = load_pinned_checkpoint()
     model.eval()
     # The checkpoint stores Half weights; the graph is traced and verified in
     # fp32, and the fp16 artefact is a deliberate conversion afterwards.
@@ -430,9 +460,7 @@ def main() -> None:
     # Recompute the reference fresh: the model was released before the
     # conversion to keep its peak memory survivable, so re-derive the
     # reference outputs from the official checkpoint here.
-    from transformers import AutoModelForImageSegmentation
-
-    model2 = AutoModelForImageSegmentation.from_pretrained(MODEL_ID, trust_remote_code=True)
+    model2 = load_pinned_checkpoint()
     model2.eval().float()
     torch.set_grad_enabled(False)
 

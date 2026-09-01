@@ -176,10 +176,12 @@ Nothing about matting is billed, so a run's recorded cost is generation only.
 **Weights.** Not in the repo: the pinned file is cached under `models/`
 (gitignored; `THUMBY_MODEL_DIR` overrides it) and verified by sha-256 once per
 process. No upstream ONNX export of BiRefNet HR exists, so the file is
-produced by `scripts/export-birefnet-hr.py` from the official checkpoint and
-verified numerically against the PyTorch reference before its hash is pinned.
-Missing or mismatched weights stop the job **before the first generation
-call** — on a rerun too — with the path, the pin, and the export command.
+produced by `uv run --locked --script scripts/export-birefnet-hr.py` from a
+pinned Hugging Face revision of the official checkpoint (never `main`), with
+the checkpoint sha-256 verified before any remote code runs, and the ONNX
+graph verified numerically against the PyTorch reference before its hash is
+pinned. Missing or mismatched weights stop the job **before the first generation
+call** — on a rerun too — with the path, the pin, and the locked export command.
 Nothing is paid for that the pass could not isolate, and the pass never
 silently skips isolation.
 
@@ -187,7 +189,8 @@ silently skips isolation.
 |---|---|
 | file | `models/birefnet-hr-fp16.onnx` (~560 MB) |
 | sha-256 | `b8cfcf2152fd26d3f2f75b502e0b8903c59e9913815dc77299c1278c32137f69` |
-| source | `ZhengPeng7/BiRefNet_HR` (MIT) via `scripts/export-birefnet-hr.py` |
+| source | `ZhengPeng7/BiRefNet_HR@a7a562f6fd16021180f2f4348f4de003a2d3d1e1` (MIT) via locked `scripts/export-birefnet-hr.py` |
+| checkpoint sha-256 | `9d678bafec0b0019fbb073b7fd02f05ede25dc4b15254f23b2fb0be333200c0d` |
 | input | 2048×2048, ImageNet mean/std, per the checkpoint's preprocessing |
 
 **Measured (2026-08-31, M4 Pro, CoreML MLProgram/GPU):** a recorded opaque

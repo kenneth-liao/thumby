@@ -21,12 +21,18 @@ benchmark evidence and visual comparisons live in ticket #44.
   transformer, and that gap is the real price of the upgrade on this stack.
 - **The checkpoint ships as PyTorch weights only.** No ONNX export of
   BiRefNet_HR exists upstream (checked 2026-08-31), so thumby produces its own
-  with `scripts/export-birefnet-hr.py`: download the official checkpoint,
-  trace at 2048², convert to fp16 with fp32 I/O, verify both graphs
-  numerically against the PyTorch reference (fp32 ≤ 1e-4 max abs diff; fp16
-  gated on max/mean abs diff and ≥ 99.9% binarised-mask agreement), and print
-  the sha-256 that becomes the pin. The pin is the provenance: a weights file
-  that does not hash to it is not this model.
+  with `uv run --locked --script scripts/export-birefnet-hr.py`. The script
+  downloads **one immutable Hugging Face revision**
+  (`a7a562f6fd16021180f2f4348f4de003a2d3d1e1` — never `main`), verifies the
+  checkpoint sha-256 before `trust_remote_code` loads the architecture, traces
+  at 2048², converts to fp16 with fp32 I/O, verifies both graphs numerically
+  against the PyTorch reference (fp32 ≤ 1e-4 max abs diff; fp16 gated on
+  max/mean abs diff and ≥ 99.9% binarised-mask agreement), and prints the
+  sha-256 that becomes the pin. Dependencies are exact (`==`) and hashed in
+  `scripts/export-birefnet-hr.py.lock`. The pin is the provenance: a weights
+  file that does not hash to it is not this model. The existing ONNX artefact
+  was produced from this revision and environment (fp32 max abs 1.44e-07,
+  fp16 max 1.14e-03 / mean 5.32e-06, 100% binarised agreement).
 - **The graph is tidied for CoreML before export.** Two traced artefacts of
   the Swin backbone break the CoreML execution provider: `torch.roll` (the
   cyclic shift) compiles to an op CoreML rejects, and each `BasicLayer`

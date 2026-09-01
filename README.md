@@ -29,7 +29,7 @@ cp .env.local.example .env.local      # then paste your key
 # once, only if you generate Creator Assets — the local matting model (~560 MB,
 # gitignored, pinned by sha-256 in src/segment.ts)
 mkdir -p models
-uv run scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
+uv run --locked --script scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
 ```
 
 Key comes from **vercel.com → AI Gateway → API Keys**. Bun loads `.env.local`
@@ -272,10 +272,11 @@ no candidate is ever paid for that the pass cannot isolate:
 
 ```bash
 mkdir -p models
-uv run scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
+uv run --locked --script scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
 ```
 
-The script downloads the official `ZhengPeng7/BiRefNet_HR` checkpoint (MIT),
+The locked script downloads a pinned revision of the official
+`ZhengPeng7/BiRefNet_HR` checkpoint (MIT), verifies the checkpoint hash,
 exports the ONNX graph (decomposing the deformable convolutions and the Swin
 cyclic shifts into standard ops so CoreML can compile them), verifies the
 result numerically against the PyTorch reference, and prints the sha-256 that

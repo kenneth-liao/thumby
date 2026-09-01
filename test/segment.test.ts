@@ -122,6 +122,27 @@ describe("weights are pinned and failures are loud", () => {
     process.env.THUMBY_MODEL_DIR = root;
     expect(missingWeightsMessage("because")).toContain(weightsPath());
   });
+
+  test("the recovery command is pinned to the same identity the runtime verifies", async () => {
+    // INT-1 / PROD-1: a floating /main URL or an unlocked uv run can produce
+    // a numerically valid ONNX file whose bytes are not SUBJECT_SEGMENTER.sha256,
+    // so the documented fix would still fail at load. The message and the pin
+    // share one revision; the export script names the same revision and the
+    // checkpoint hash; uv --locked is the only documented run.
+    expect(SUBJECT_SEGMENTER.source).not.toMatch(/\/main\//);
+    expect(SUBJECT_SEGMENTER.source).toContain(SUBJECT_SEGMENTER.revision);
+    const message = missingWeightsMessage("because");
+    expect(message).toContain(SUBJECT_SEGMENTER.sha256);
+    expect(message).toContain(SUBJECT_SEGMENTER.revision);
+    expect(message).toContain("uv run --locked --script");
+    expect(message).toContain("scripts/export-birefnet-hr.py");
+    const script = await readFile(path.resolve("scripts/export-birefnet-hr.py"), "utf8");
+    expect(script).toContain(SUBJECT_SEGMENTER.revision);
+    expect(script).toContain(SUBJECT_SEGMENTER.checkpointSha256);
+    const loads = script.match(/from_pretrained\([\s\S]*?\)/g) ?? [];
+    expect(loads.length).toBeGreaterThanOrEqual(1);
+    for (const call of loads) expect(call).toContain("revision=");
+  });
 });
 
 /**

@@ -38,8 +38,13 @@ import { composeMatte, type MatteEngine } from "./matte.js";
 export const SUBJECT_SEGMENTER = {
   file: "birefnet-hr-fp16.onnx",
   sha256: "b8cfcf2152fd26d3f2f75b502e0b8903c59e9913815dc77299c1278c32137f69",
-  /** The official checkpoint the ONNX export is built from (MIT). */
-  source: "https://huggingface.co/ZhengPeng7/BiRefNet_HR/resolve/main/model.safetensors",
+  /** Immutable Hugging Face commit the export is built from. Never `main`. */
+  revision: "a7a562f6fd16021180f2f4348f4de003a2d3d1e1",
+  /** sha-256 of `model.safetensors` at that revision — verified before tracing. */
+  checkpointSha256: "9d678bafec0b0019fbb073b7fd02f05ede25dc4b15254f23b2fb0be333200c0d",
+  /** The official checkpoint the ONNX export is built from (MIT), pinned. */
+  source:
+    "https://huggingface.co/ZhengPeng7/BiRefNet_HR/resolve/a7a562f6fd16021180f2f4348f4de003a2d3d1e1/model.safetensors",
   /** Square input the checkpoint's high-resolution setting expects. */
   size: 2048,
   /** ImageNet normalization, per the model family's preprocessing. */
@@ -65,12 +70,15 @@ export function missingWeightsMessage(why: string): string {
     `sha-256:  ${SUBJECT_SEGMENTER.sha256}`,
     ``,
     `Produce it once (about 560 MB, cached and gitignored) from the official`,
-    `checkpoint (${SUBJECT_SEGMENTER.source}):`,
+    `checkpoint at revision ${SUBJECT_SEGMENTER.revision}`,
+    `(sha-256 ${SUBJECT_SEGMENTER.checkpointSha256}):`,
+    `  ${SUBJECT_SEGMENTER.source}`,
     `  mkdir -p ${modelDir()}`,
-    `  uv run scripts/export-birefnet-hr.py --out ${weightsPath()}`,
+    `  uv run --locked --script scripts/export-birefnet-hr.py --out ${weightsPath()}`,
     ``,
-    `The script downloads the checkpoint, exports and verifies the ONNX graph,`,
-    `and prints the sha-256 — the pin above is the model's identity.`,
+    `The locked script downloads that revision, verifies the checkpoint hash,`,
+    `exports and verifies the ONNX graph, and prints the sha-256 — the pin`,
+    `above is the model's identity.`,
     ``,
     `Isolation is local by design (ADR-0006) — the pass never falls back to an`,
     `un-matted candidate, so a creator job stops here rather than recording`,
