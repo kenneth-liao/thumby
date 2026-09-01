@@ -2,15 +2,17 @@
 
 ## [Unreleased]
 
+## [0.24.1]
+
+### Fixed
+
+- Export recovery is revision-locked (#47): `scripts/export-birefnet-hr.py` follows a pinned Hugging Face commit and a hashed `uv` lockfile, verifies the checkpoint sha-256 before remote code runs, and the missing-weights message documents `uv run --locked --script` — a floating `main` tip can no longer produce bytes the runtime pin then rejects
+
 ## [0.24.0]
 
 ### Changed
 
 - The local matting pass runs **BiRefNet HR** (REQ-017, #44, ADR-0009): the benchmark in #44 selected BiRefNet HR over the general model for hair/profile/finger edge quality, and the pin behind the ADR-0006 seam swaps to it — 2048×2048 input, weights produced from the official checkpoint by the new `scripts/export-birefnet-hr.py` (download → trace → fp16 → numeric verification against the PyTorch reference → sha-256), because no upstream ONNX export exists. The export script also tidies the graph for the CoreML execution provider (decomposed `torch.roll`, frozen Swin attention masks, MLProgram+GPU provider flags); `composeMatte` now resamples the mask **bilinearly** instead of nearest-neighbour, so the 2048² prediction's hair-level detail survives the downscale to the candidate. Measured ~17 s per image on the M4 Pro (CoreML) versus ~6 s for the general model — the accepted cost of the quality upgrade; matte/adoption behaviour otherwise unchanged
-
-### Fixed
-
-- Export recovery is revision-locked (#47): `scripts/export-birefnet-hr.py` follows a pinned Hugging Face commit and a hashed `uv` lockfile, verifies the checkpoint sha-256 before remote code runs, and the missing-weights message documents `uv run --locked --script` — a floating `main` tip can no longer produce bytes the runtime pin then rejects
 
 ## [0.23.0]
 
