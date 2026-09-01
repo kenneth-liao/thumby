@@ -299,9 +299,10 @@ Creator Asset fails validation with a layer-specific error, and
 `scene render --experimental` is the one explicit override, producing a
 clearly-marked non-final Render (a `.trial` output name, a NON-FINAL warning,
 and `experimental: true` on the manifest when trial assets were actually
-used). The gate is Scene-scoped: the legacy `thumb --cutout` command does not
-enforce it (tracked separately, #40 — the command itself is now deprecated);
-use Scene rendering for anything gated on
+used). The deprecated legacy `thumb --cutout` command enforces the same gate
+(#40): it refuses a trial Creator Asset with the same error and remedies, and
+under `--experimental` marks its outputs non-final (a `.trial` output name and
+a NON-FINAL warning). Use Scene rendering for anything gated on
 approval. The adopted Asset records its
 `matteEngine`, and `adoptedFrom` names the candidate the matte came from; the
 Asset's content identity is derived from its bytes, never stored (ADR-0002),
@@ -765,8 +766,9 @@ it —
 
 It remains the only writer of the `run.json`/`history.jsonl` provenance
 records described under [Provenance](#provenance); new work starts from a
-Scene. Known gap, kept as-is on this deprecated path: `thumb --cutout` does
-not enforce the Creator approval gate (#40).
+Scene. It enforces the Creator approval gate on `--cutout` (#40): a trial
+Creator Asset is refused unless `--experimental` is passed, and the override
+marks the outputs non-final.
 
 The old quick-start, for reference:
 

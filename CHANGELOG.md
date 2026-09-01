@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Creator approval gate now covers the deprecated legacy path (REQ-018, #40): `thumb --cutout <id>` refuses a trial Creator Asset with the same error and remedies as the Scene gate (`library approve`, or the explicit `--experimental` override); under the override every output is named `*.trial.png` and a NON-FINAL warning naming the asset rides stdout and `run.json` — and the gate fires before any generation spend. The gate's language (refusal, non-final marker, `.trial` name hint) now has one home in `src/assets.ts`, shared by both render paths
+
 ### Fixed
 
 - Browser-backed render paths run on one shared, serialized, self-healing Chromium page per process instead of a context cycle per render — injected pages stay caller-owned and `closeBrowser()` leaves no Chromium process behind (#27, ADR-0010). Bare single-process `bun test` needs Bun ≥ 1.4.0 (upstream oven-sh/bun #15679)

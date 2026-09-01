@@ -264,10 +264,10 @@ Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
   `<id>@<sha256>` in a Scene to bind it to the exact approved likeness.
 - Scenes enforce the gate (REQ-018): a Scene referencing a trial Creator
   Asset fails validation; `scene render --experimental` is the explicit
-  non-final override. The legacy `thumb --cutout` command does not enforce
-  the gate (and the command itself is deprecated — #40 tracks whether the
-  gate is still worth adding there). Reuse-first: scan `bun run library
-  list` before generating.
+  non-final override. The deprecated legacy `thumb --cutout` command enforces
+  the same gate (#40): it refuses a trial Creator Asset unless `--experimental`
+  is passed, and the override marks the outputs non-final. Reuse-first: scan
+  `bun run library list` before generating.
 
 ## Naming and metadata
 

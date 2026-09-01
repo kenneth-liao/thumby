@@ -11,11 +11,15 @@ import {
   type IdentityMeta,
 } from "./identity.js";
 
-/** The single canonical location of the asset library: `<repo>/assets`. */
+/**
+ * The single canonical location of the asset library: `<repo>/assets`.
+ * THUMBY_LIBRARY_ROOT relocates it — test fixtures and portable checkouts
+ * point the one resolution contract at their own root.
+ */
 export const LIBRARY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
-  "assets",
+  process.env.THUMBY_LIBRARY_ROOT ?? "assets",
 );
 
 /**
@@ -476,6 +480,42 @@ export async function approveCutout(
   await writeFile(metaFile, JSON.stringify(updated, null, 2) + "\n");
   return updated;
 }
+
+// --- the Creator approval gate (REQ-018) -------------------------------------
+//
+// One home for the gate's language: every render path — Scene and the legacy
+// thumb command alike — states the same refusal and marks the same non-final
+// outputs, so the two paths cannot drift apart in wording or remedies.
+
+/**
+ * The refusal for a trial Creator Asset reference (REQ-018): names the asset,
+ * the approval state, and both remedies — the explicit approval operation, or
+ * the render-time experimental override.
+ */
+export function trialCreatorError(id: string | undefined): string {
+  return (
+    `library cutout "${id ?? "?"}" is a trial Creator Asset (approval: "trial") — normal and final rendering reject it.\n` +
+    `Approve it explicitly with "bun run library approve ${id ?? "<id>"}", or render with --experimental for a clearly-marked non-final render.`
+  );
+}
+
+/**
+ * The non-final marker (REQ-018): every output of an experimental render
+ * carries this warning, naming the trial Creator Asset(s) it used. Derived
+ * from actual trial usage — the override on an all-approved render must not
+ * mint a standing non-final marker.
+ */
+export function trialOverrideWarning(trialIds: string[]): string | undefined {
+  if (trialIds.length === 0) return undefined;
+  return (
+    `NON-FINAL render — produced under the experimental trial-Creator override; ` +
+    `not approved for publication. Trial Creator Asset(s) used: ${trialIds.join(", ")}.`
+  );
+}
+
+/** Default output name under the experimental override: a .trial suffix marks the file non-final. */
+export const trialOutputName = (file: string): string =>
+  file.replace(/\.png$/, ".trial.png");
 
 function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {
   const m = entry.meta;
