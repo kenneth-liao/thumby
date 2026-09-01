@@ -1,19 +1,33 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 let shared: Browser | null = null;
-let launching: Promise<Browser> | null = null;
 let renderCtx: BrowserContext | null = null;
 let renderPage: Page | null = null;
-
 // One mutex for every browser-backed render on the shared page. Production
 // callers render sequentially, but bun test interleaves async suites in one
 // process — serialization is what keeps two in-flight renders from racing
 // the same page (issue #27).
-let tail: Promise<unknown> = Promise.resolve();
+let renderTail: Promise<unknown> = Promise.resolve();
 
-function enqueue<T>(op: () => Promise<T>): Promise<T> {
-  const run = tail.then(op);
-  tail = run.then(
+function enqueueRender<T>(op: () => Promise<T>): Promise<T> {
+  const run = renderTail.then(op, op);
+  renderTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+// One lifecycle queue for shared browser launch, close, and recovery.
+// Serializing launch and shutdown as one lifecycle state guarantees that
+// concurrent getBrowser calls share one launch, racing close teardowns await
+// pending launches, and a close failure while connected restores the handle
+// without racing or overwriting a concurrent replacement (PROD-1 on #27).
+let lifecycleTail: Promise<unknown> = Promise.resolve();
+
+function enqueueLifecycle<T>(op: () => Promise<T>): Promise<T> {
+  const run = lifecycleTail.then(op, op);
+  lifecycleTail = run.then(
     () => undefined,
     () => undefined,
   );
@@ -26,27 +40,8 @@ function dropShared(): void {
   renderPage = null;
 }
 
-/** Launch exactly once, even under concurrent getBrowser calls: every caller
- *  awaits the same in-flight promise, and exactly one browser is tracked. */
-function launchShared(): Promise<Browser> {
-  if (!launching) {
-    launching = chromium.launch().then(
-      (b) => {
-        shared = b;
-        launching = null;
-        return b;
-      },
-      (err) => {
-        launching = null;
-        throw err;
-      },
-    );
-  }
-  return launching;
-}
-
 /** Tear the shared browser down: close it if it is still alive, drop the
- *  handles either way. Serialized callers only — never enqueue this.
+ *  handles either way. Serialized through the lifecycle queue.
  *
  *  The `close` parameter is a fault-injection seam for tests: production
  *  always calls the real `browser.close()`; injecting a failing close is the
@@ -59,36 +54,42 @@ function launchShared(): Promise<Browser> {
 export async function shutdownShared(
   close: (browser: Browser) => Promise<void> = (b) => b.close(),
 ): Promise<void> {
-  const browser = shared;
-  const ctx = renderCtx;
-  const page = renderPage;
-  dropShared();
-  try {
-    if (browser) await close(browser);
-  } catch (err) {
-    // Suppress only the already-dead case — a browser that died cannot be
-    // closed again, and that is the goal state. A close failure while the
-    // browser may still be alive must surface: cleanup cannot silently
-    // report success with a live Chromium left behind.
-    if (browser?.isConnected()) {
-      shared = browser;
-      renderCtx = ctx;
-      renderPage = page;
-      throw err;
+  return enqueueLifecycle(async () => {
+    const browser = shared;
+    const ctx = renderCtx;
+    const page = renderPage;
+    dropShared();
+    try {
+      if (browser) await close(browser);
+    } catch (err) {
+      // Suppress only the already-dead case — a browser that died cannot be
+      // closed again, and that is the goal state. A close failure while the
+      // browser may still be alive must surface: cleanup cannot silently
+      // report success with a live Chromium left behind.
+      if (browser?.isConnected()) {
+        shared = browser;
+        renderCtx = ctx;
+        renderPage = page;
+        throw err;
+      }
     }
-  }
+  });
 }
 
 /**
  * One shared headless Chromium for all local rendering (compose + scenes).
- * Launching is lazy and single-flight; a browser that died underneath us is
- * relaunched, never handed out stale. closeBrowser tears it down between CLI
- * invocations.
+ * Launching is lazy and serialized through the lifecycle state queue; a
+ * browser that died underneath us is relaunched, never handed out stale.
+ * closeBrowser tears it down between CLI invocations.
  */
 export async function getBrowser(): Promise<Browser> {
-  if (shared && !shared.isConnected()) dropShared();
-  if (!shared) return launchShared();
-  return shared;
+  return enqueueLifecycle(async () => {
+    if (shared && !shared.isConnected()) dropShared();
+    if (!shared) {
+      shared = await chromium.launch();
+    }
+    return shared;
+  });
 }
 
 /**
@@ -103,9 +104,9 @@ export async function getBrowser(): Promise<Browser> {
  * call; callers never see a stale handle.
  */
 async function acquireRenderPage(): Promise<Page> {
-  await getBrowser(); // relaunches if the browser itself died
+  const browser = await getBrowser(); // relaunches if the browser itself died
   if (!renderCtx || renderCtx.isClosed()) {
-    renderCtx = await shared!.newContext({ deviceScaleFactor: 1 });
+    renderCtx = await browser.newContext({ deviceScaleFactor: 1 });
     renderPage = await renderCtx.newPage();
   }
   // A lost page never costs the (healthy) browser or context: only the page
@@ -124,7 +125,7 @@ async function acquireRenderPage(): Promise<Page> {
  * preserved), never silently succeeding over a live Chromium.
  */
 export async function withRenderPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
-  return enqueue(async () => {
+  return enqueueRender(async () => {
     const page = await acquireRenderPage();
     try {
       return await fn(page);
@@ -149,16 +150,7 @@ export async function withRenderPage<T>(fn: (page: Page) => Promise<T>): Promise
 }
 
 export async function closeBrowser(): Promise<void> {
-  await enqueue(async () => {
-    // An in-flight launch must complete so the browser it creates is the one
-    // closed here — a close that finished first would orphan it.
-    if (launching) {
-      try {
-        await launching;
-      } catch {
-        // A failed launch has nothing to close.
-      }
-    }
+  await enqueueRender(async () => {
     await shutdownShared();
   });
 }

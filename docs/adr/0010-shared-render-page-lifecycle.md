@@ -26,14 +26,19 @@ All render paths run on **one shared context + one shared page per process**
   Production callers render sequentially; the mutex makes that invariant
   load-bearing (bun test interleaves async suites in one process, so two
   in-flight renders must never race the same page).
-- **The lifecycle self-heals.** A browser that died underneath us is
-  relaunched by `getBrowser()`; a lost page or context is recreated without
-  discarding a healthy browser; a wedged browser surface detected mid-render
-  (closed/crashed error, dead page/context) is shut down, never abandoned
-  while its process still runs, which would leak Chromium. If the close
-  itself fails while the process is still alive, the handles are restored so
-  a later `closeBrowser()` retry reclaims the live Chromium, and the failure
-  surfaces — cleanup never silently succeeds over a live child.
+- **The lifecycle self-heals and serializes state transitions.** A browser
+  that died underneath us is relaunched by `getBrowser()`; a lost page or
+  context is recreated without discarding a healthy browser; a wedged browser
+  surface detected mid-render (closed/crashed error, dead page/context) is shut
+  down, never abandoned while its process still runs, which would leak
+  Chromium. Launch, close, and recovery transitions are serialized as one
+  lifecycle state (`enqueueLifecycle`), so concurrent `getBrowser()` calls
+  share one launch, racing close teardowns await pending launches, and handle
+  restoration after a connected close failure cannot race or overwrite a
+  concurrent replacement browser. If close fails while the process is still
+  alive, the handles are restored so a later `closeBrowser()` retry reclaims
+  the live Chromium, and the failure surfaces — cleanup never silently
+  succeeds over a live child.
 - **Injected pages are caller-owned.** `renderScene(resolved, { page })` uses
   the caller's page as-is — never closed, replaced, or serialized — so route-
   blocked offline proofs and custom contexts remain possible.

@@ -188,6 +188,39 @@ describe("browser lifecycle (issue #27)", () => {
     expect(chromiumProcessAlive()).toBe(false);
   }, 120_000);
 
+  it("serializes concurrent getBrowser with a pending close failure, preventing replacement overwrite and leaks", async () => {
+    await renderScene(resolved([shape()]));
+    const browser = await getBrowser();
+    expect(await browser.isConnected()).toBe(true);
+
+    // Fault-injection seam (PROD-1 follow-up): a close stalls while connected.
+    // A concurrent getBrowser() while close is pending must wait for the close
+    // transition to settle instead of launching an untracked replacement that
+    // would be orphaned when the failed close restores the handle.
+    let releaseStall!: () => void;
+    const stall = new Promise<void>((_, reject) => {
+      releaseStall = () => reject(new Error("simulated close stall"));
+    });
+
+    const shutdown = shutdownShared(async () => stall);
+    const concurrentGet = getBrowser();
+
+    releaseStall();
+
+    await expect(shutdown).rejects.toThrow(/simulated close stall/);
+    const retrieved = await concurrentGet;
+
+    // The concurrent getBrowser did not launch a separate orphan: it received
+    // the restored live browser handle.
+    expect(retrieved).toBe(browser);
+    expect(await browser.isConnected()).toBe(true);
+
+    // Teardown reclaims the single tracked browser without leaving orphans.
+    await closeBrowser();
+    expect(await browser.isConnected()).toBe(false);
+    expect(chromiumProcessAlive()).toBe(false);
+  }, 120_000);
+
   it("leaves no Chromium process behind after the caller closes the shared browser", async () => {
     await renderScene(resolved([shape()]));
     expect(chromiumProcessAlive()).toBe(true);
