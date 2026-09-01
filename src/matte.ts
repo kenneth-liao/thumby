@@ -62,15 +62,41 @@ export interface MatteOutcome {
 const luminance = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
 /**
+ * Bilinear sample of a mask at source pixel coordinates, matching the
+ * candidate's geometry. The mask's luminance × its own alpha is interpolated
+ * as one quantity, so soft edges stay soft and detail that lives *between*
+ * mask pixels survives the rescale instead of aliasing.
+ */
+function sampleCoverage(
+  mask: { rgba: Buffer; width: number; height: number },
+  fx: number,
+  fy: number,
+): number {
+  const x0 = Math.min(mask.width - 1, Math.max(0, Math.floor(fx)));
+  const y0 = Math.min(mask.height - 1, Math.max(0, Math.floor(fy)));
+  const x1 = Math.min(mask.width - 1, x0 + 1);
+  const y1 = Math.min(mask.height - 1, y0 + 1);
+  const tx = Math.min(1, Math.max(0, fx - x0));
+  const ty = Math.min(1, Math.max(0, fy - y0));
+  const at = (x: number, y: number) => {
+    const m = (y * mask.width + x) * 4;
+    return luminance(mask.rgba[m]!, mask.rgba[m + 1]!, mask.rgba[m + 2]!) * (mask.rgba[m + 3]! / 255);
+  };
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  return lerp(lerp(at(x0, y0), at(x1, y0), tx), lerp(at(x0, y1), at(x1, y1), tx), ty);
+}
+
+/**
  * Apply a predicted segmentation mask to a candidate as its alpha channel.
  *
  * The mask is read as brightness (white = subject, black = background), so a
  * grayscale, RGB, or RGBA mask all work; a mask that carries its own alpha
  * has it multiplied in, so a model that returns the mask already cut out is
  * read correctly rather than as a black frame. A mask at different dimensions
- * is sampled nearest-neighbour across the candidate's geometry — models do
- * not reliably honour "same dimensions", and refusing the candidate over the
- * mask's resolution would throw away a paid generation for no gain.
+ * is sampled bilinearly across the candidate's geometry — models do not
+ * reliably honour "same dimensions" (BiRefNet HR predicts 2048×2048, the
+ * candidate is smaller), and bilinear interpolation is what keeps hair-level
+ * detail alive across that rescale instead of aliasing it away.
  *
  * The candidate's colour is never modified: only alpha is written. There is
  * no colour-distance step anywhere in this function — that is what makes it a
@@ -86,11 +112,10 @@ export function composeMatte(
 
   const rgba = Buffer.from(image.rgba);
   for (let y = 0; y < image.height; y++) {
-    const my = mask.height === image.height ? y : Math.min(mask.height - 1, Math.floor((y * mask.height) / image.height));
+    const fy = ((y + 0.5) * mask.height) / image.height - 0.5;
     for (let x = 0; x < image.width; x++) {
-      const mx = mask.width === image.width ? x : Math.min(mask.width - 1, Math.floor((x * mask.width) / image.width));
-      const m = (my * mask.width + mx) * 4;
-      const cover = luminance(mask.rgba[m]!, mask.rgba[m + 1]!, mask.rgba[m + 2]!) * (mask.rgba[m + 3]! / 255);
+      const fx = ((x + 0.5) * mask.width) / image.width - 0.5;
+      const cover = sampleCoverage(mask, fx, fy);
       rgba[(y * image.width + x) * 4 + 3] = Math.max(0, Math.min(255, Math.round(cover)));
     }
   }

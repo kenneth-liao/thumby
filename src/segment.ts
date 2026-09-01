@@ -1,7 +1,8 @@
 /**
- * Local subject segmentation — the shipped matting engine (REQ-017, ADR-0006).
+ * Local subject segmentation — the shipped matting engine (REQ-017, ADR-0006,
+ * ADR-0009).
  *
- * Isolation runs **on this machine**: a BiRefNet ONNX model predicts the
+ * Isolation runs **on this machine**: a BiRefNet HR ONNX model predicts the
  * subject mask through `onnxruntime-node` (CoreML on Apple silicon, CPU
  * otherwise), and `composeMatte` applies that mask as the candidate's alpha
  * channel. No image model, no second Gateway hop, nothing billed — which is
@@ -20,19 +21,28 @@ import { decodePng, encodePngRgba, PngParseError } from "./png.js";
 import { composeMatte, type MatteEngine } from "./matte.js";
 
 /**
- * The pinned segmenter. BiRefNet (MIT) exported to ONNX; the fp16 build is
- * half the bytes of fp32 and is what CoreML wants on Apple silicon.
- * `preprocessor_config.json` from the same repo is the source of the input
- * geometry and normalization below — they are not free parameters.
+ * The pinned segmenter. BiRefNet HR (MIT) — the benchmark-selected upgrade
+ * over BiRefNet general (ticket #44, ADR-0009): noticeably finer hair/edge
+ * mattes at the cost of a larger 2048×2048 input, which the occasional,
+ * low-volume matting pass can afford.
+ *
+ * No ONNX export of this checkpoint exists upstream, so thumby produces its
+ * own: `scripts/export-birefnet-hr.py` downloads the official
+ * `ZhengPeng7/BiRefNet_HR` weights, traces the graph at the checkpoint's
+ * high-resolution input size (decomposing deformable convolutions into
+ * standard ops), converts to fp16, and numerically verifies both graphs
+ * against the PyTorch reference before printing the sha-256 above the fold.
+ * That pin is the provenance: a weights file that doesn't hash to it is not
+ * this model.
  */
 export const SUBJECT_SEGMENTER = {
-  file: "birefnet-fp16.onnx",
-  sha256: "3654c741eb80bd926ada8fed1713b506ccf8d30eb1f6487e87eb9f234f33df09",
-  source:
-    "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx",
-  /** Square input the export expects. */
-  size: 1024,
-  /** ImageNet normalization, per the model's preprocessor config. */
+  file: "birefnet-hr-fp16.onnx",
+  sha256: "b8cfcf2152fd26d3f2f75b502e0b8903c59e9913815dc77299c1278c32137f69",
+  /** The official checkpoint the ONNX export is built from (MIT). */
+  source: "https://huggingface.co/ZhengPeng7/BiRefNet_HR/resolve/main/model.safetensors",
+  /** Square input the checkpoint's high-resolution setting expects. */
+  size: 2048,
+  /** ImageNet normalization, per the model family's preprocessing. */
   mean: [0.485, 0.456, 0.406],
   std: [0.229, 0.224, 0.225],
 } as const;
@@ -54,10 +64,13 @@ export function missingWeightsMessage(why: string): string {
     `Expected: ${weightsPath()}`,
     `sha-256:  ${SUBJECT_SEGMENTER.sha256}`,
     ``,
-    `Fetch it once (about 490 MB, cached and gitignored):`,
+    `Produce it once (about 560 MB, cached and gitignored) from the official`,
+    `checkpoint (${SUBJECT_SEGMENTER.source}):`,
     `  mkdir -p ${modelDir()}`,
-    `  curl -L -o ${weightsPath()} \\`,
-    `    ${SUBJECT_SEGMENTER.source}`,
+    `  uv run scripts/export-birefnet-hr.py --out ${weightsPath()}`,
+    ``,
+    `The script downloads the checkpoint, exports and verifies the ONNX graph,`,
+    `and prints the sha-256 — the pin above is the model's identity.`,
     ``,
     `Isolation is local by design (ADR-0006) — the pass never falls back to an`,
     `un-matted candidate, so a creator job stops here rather than recording`,
@@ -91,6 +104,15 @@ async function loadWeights(): Promise<Uint8Array> {
 /** One session per process: loading half a gigabyte per candidate is absurd. */
 let sessionPromise: Promise<{ session: InferenceSession; warnings: string[] }> | undefined;
 
+/**
+ * CoreML provider configuration for the HR segmenter. MLProgram + GPU
+ * (`COREML_FLAG_CREATE_MLPROGRAM | COREML_FLAG_USE_CPU_AND_GPU`): the ANE
+ * compile fails on a model this large and the default path lands on slow
+ * CPU-like kernels, while MLProgram on the GPU measures fastest for this
+ * checkpoint (see ADR-0009).
+ */
+const COREML_FLAGS = 0x010 | 0x020;
+
 async function getSession(): Promise<{ session: InferenceSession; warnings: string[] }> {
   sessionPromise ??= (async () => {
     const [ort, weights] = await Promise.all([import("onnxruntime-node"), loadWeights()]);
@@ -98,7 +120,7 @@ async function getSession(): Promise<{ session: InferenceSession; warnings: stri
     try {
       return {
         session: await ort.InferenceSession.create(weights, {
-          executionProviders: ["coreml"],
+          executionProviders: [{ name: "coreml", coreMlFlags: COREML_FLAGS }],
           graphOptimizationLevel: "all",
         }),
         warnings,

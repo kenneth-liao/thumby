@@ -26,11 +26,10 @@ bun install
 bunx playwright install chromium      # once
 cp .env.local.example .env.local      # then paste your key
 
-# once, only if you generate Creator Assets — the local matting model (~490 MB,
+# once, only if you generate Creator Assets — the local matting model (~560 MB,
 # gitignored, pinned by sha-256 in src/segment.ts)
 mkdir -p models
-curl -L -o models/birefnet-fp16.onnx \
-  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
+uv run scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
 ```
 
 Key comes from **vercel.com → AI Gateway → API Keys**. Bun loads `.env.local`
@@ -265,17 +264,22 @@ mask, and the mask becomes the candidate's alpha channel — segmentation, never
 colour distance, and nothing billed. A candidate that already carries a real
 matte is kept as-is (`native-alpha`), with no inference at all.
 
-The weights are not in the repo. First use fetches them once into the
-gitignored `models/` cache (~490 MB), pinned by filename and sha-256; a
+The weights are not in the repo. First use produces them once into the
+gitignored `models/` cache (~560 MB), pinned by filename and sha-256; a
 missing or mismatched file stops the job **before the first billed
 generation call** (and before a rerun's) with the exact command to fix it, so
 no candidate is ever paid for that the pass cannot isolate:
 
 ```bash
 mkdir -p models
-curl -L -o models/birefnet-fp16.onnx \
-  https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.onnx
+uv run scripts/export-birefnet-hr.py --out models/birefnet-hr-fp16.onnx
 ```
+
+The script downloads the official `ZhengPeng7/BiRefNet_HR` checkpoint (MIT),
+exports the ONNX graph (decomposing the deformable convolutions and the Swin
+cyclic shifts into standard ops so CoreML can compile them), verifies the
+result numerically against the PyTorch reference, and prints the sha-256 that
+`src/segment.ts` pins.
 
 `jobs review` shows each matte on a checkerboard beside the candidate it came
 from, and says plainly when a candidate has none. `jobs adopt` writes the

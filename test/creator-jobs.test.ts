@@ -289,7 +289,7 @@ describe("the matting pass runs its preflight before anything is paid for (RE-3)
       {
         preflight: async () => {
           throw new Error(
-            "The local matting model is unusable: the weights file is not there\n\nExpected: models/birefnet-fp16.onnx",
+            "The local matting model is unusable: the weights file is not there\n\nExpected: models/birefnet-hr-fp16.onnx",
           );
         },
       },
