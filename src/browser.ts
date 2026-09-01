@@ -46,18 +46,36 @@ function launchShared(): Promise<Browser> {
 }
 
 /** Tear the shared browser down: close it if it is still alive, drop the
- *  handles either way. Serialized callers only — never enqueue this. */
-async function shutdownShared(): Promise<void> {
+ *  handles either way. Serialized callers only — never enqueue this.
+ *
+ *  The `close` parameter is a fault-injection seam for tests: production
+ *  always calls the real `browser.close()`; injecting a failing close is the
+ *  only honest way to prove the close-failure branch without mocking
+ *  Playwright (PROD-1 follow-up on #27).
+ *
+ *  On a close failure while the browser may still be alive, the handles are
+ *  restored — never abandoned: the live Chromium stays reclaimable by a
+ *  later closeBrowser() retry, and the failure surfaces to the caller. */
+export async function shutdownShared(
+  close: (browser: Browser) => Promise<void> = (b) => b.close(),
+): Promise<void> {
   const browser = shared;
+  const ctx = renderCtx;
+  const page = renderPage;
   dropShared();
   try {
-    await browser?.close();
+    if (browser) await close(browser);
   } catch (err) {
     // Suppress only the already-dead case — a browser that died cannot be
     // closed again, and that is the goal state. A close failure while the
     // browser may still be alive must surface: cleanup cannot silently
     // report success with a live Chromium left behind.
-    if (browser?.isConnected()) throw err;
+    if (browser?.isConnected()) {
+      shared = browser;
+      renderCtx = ctx;
+      renderPage = page;
+      throw err;
+    }
   }
 }
 

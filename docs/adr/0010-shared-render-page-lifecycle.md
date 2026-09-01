@@ -29,8 +29,11 @@ All render paths run on **one shared context + one shared page per process**
 - **The lifecycle self-heals.** A browser that died underneath us is
   relaunched by `getBrowser()`; a lost page or context is recreated without
   discarding a healthy browser; a wedged browser surface detected mid-render
-  (closed/crashed error, dead page/context) is shut down and dropped — never
-  abandoned while its process still runs, which would leak Chromium.
+  (closed/crashed error, dead page/context) is shut down, never abandoned
+  while its process still runs, which would leak Chromium. If the close
+  itself fails while the process is still alive, the handles are restored so
+  a later `closeBrowser()` retry reclaims the live Chromium, and the failure
+  surfaces — cleanup never silently succeeds over a live child.
 - **Injected pages are caller-owned.** `renderScene(resolved, { page })` uses
   the caller's page as-is — never closed, replaced, or serialized — so route-
   blocked offline proofs and custom contexts remain possible.

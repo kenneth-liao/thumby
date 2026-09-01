@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chromium } from "playwright";
-import { closeBrowser, getBrowser, withRenderPage } from "../src/browser.js";
+import { closeBrowser, getBrowser, shutdownShared, withRenderPage } from "../src/browser.js";
 import { renderScene } from "../src/scene-render.js";
 import { type Scene, type SceneLayer, type ResolvedScene } from "../src/scene.js";
 import { decodePng } from "./png.js";
@@ -164,6 +164,27 @@ describe("browser lifecycle (issue #27)", () => {
     const launch = getBrowser();
     await closeBrowser();
     await launch;
+    expect(chromiumProcessAlive()).toBe(false);
+  }, 120_000);
+
+  it("restores the live browser handle when a close fails while connected, and surfaces the failure", async () => {
+    await renderScene(resolved([shape()]));
+    const browser = await getBrowser();
+    // Fault-injection seam (PROD-1): a close that rejects while the browser
+    // stays connected — the shape of a real bun-pipe-stall close (#15679
+    // family). The handle must be restored, not abandoned, and the failure
+    // must surface.
+    await expect(
+      shutdownShared(async () => {
+        throw new Error("simulated close stall");
+      }),
+    ).rejects.toThrow(/simulated close stall/);
+    // Restored: the live browser is still tracked and reclaimable.
+    expect(await browser.isConnected()).toBe(true);
+    expect(await getBrowser()).toBe(browser);
+    // A retry against the restored handle actually reclaims the live browser.
+    await closeBrowser();
+    expect(await browser.isConnected()).toBe(false);
     expect(chromiumProcessAlive()).toBe(false);
   }, 120_000);
 
