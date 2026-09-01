@@ -29,7 +29,9 @@ the design spec (#7). Workflow documentation lives in `README.md` (→ Scenes).
   real capture or generated from typed identity anchors. Enters the library
   as `trial`; becomes `approved` only through explicit human approval
   (`library approve`). Normal/final rendering rejects trial Creator Assets
-  unless `scene render --experimental` is given.
+  unless `--experimental` is explicitly given (`scene render --experimental`
+  or deprecated `thumb --experimental`), producing clearly-marked non-final
+  output.
 - **Generation Job** — an online operation that produces candidate Assets
   (`jobs plates`, `jobs objects`, `jobs creators`). Records model, full
   effective prompt, typed references with exact identities, cost, warnings,
