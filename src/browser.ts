@@ -1,6 +1,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 let shared: Browser | null = null;
+let launching: Promise<Browser> | null = null;
 let renderCtx: BrowserContext | null = null;
 let renderPage: Page | null = null;
 
@@ -25,6 +26,25 @@ function dropShared(): void {
   renderPage = null;
 }
 
+/** Launch exactly once, even under concurrent getBrowser calls: every caller
+ *  awaits the same in-flight promise, and exactly one browser is tracked. */
+function launchShared(): Promise<Browser> {
+  if (!launching) {
+    launching = chromium.launch().then(
+      (b) => {
+        shared = b;
+        launching = null;
+        return b;
+      },
+      (err) => {
+        launching = null;
+        throw err;
+      },
+    );
+  }
+  return launching;
+}
+
 /** Tear the shared browser down: close it if it is still alive, drop the
  *  handles either way. Serialized callers only — never enqueue this. */
 async function shutdownShared(): Promise<void> {
@@ -32,20 +52,24 @@ async function shutdownShared(): Promise<void> {
   dropShared();
   try {
     await browser?.close();
-  } catch {
-    // A browser that already died cannot be closed again — that is the
-    // goal state, not a failure.
+  } catch (err) {
+    // Suppress only the already-dead case — a browser that died cannot be
+    // closed again, and that is the goal state. A close failure while the
+    // browser may still be alive must surface: cleanup cannot silently
+    // report success with a live Chromium left behind.
+    if (browser?.isConnected()) throw err;
   }
 }
 
 /**
  * One shared headless Chromium for all local rendering (compose + scenes).
- * Launching is lazy; a browser that died underneath us is relaunched, never
- * handed out stale. closeBrowser tears it down between CLI invocations.
+ * Launching is lazy and single-flight; a browser that died underneath us is
+ * relaunched, never handed out stale. closeBrowser tears it down between CLI
+ * invocations.
  */
 export async function getBrowser(): Promise<Browser> {
   if (shared && !shared.isConnected()) dropShared();
-  if (!shared) shared = await chromium.launch();
+  if (!shared) return launchShared();
   return shared;
 }
 
@@ -77,7 +101,9 @@ async function acquireRenderPage(): Promise<Page> {
 /**
  * Run `fn` on the shared render page, serialized against every other
  * browser-backed render in the process. On a closed/crashed browser surface
- * the shared handles are dropped so the next call relaunches cleanly.
+ * the shared lifecycle is reclaimed so the next call relaunches cleanly; a
+ * close failure while the browser may still be alive surfaces (both errors
+ * preserved), never silently succeeding over a live Chromium.
  */
 export async function withRenderPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
   return enqueue(async () => {
@@ -90,7 +116,14 @@ export async function withRenderPage<T>(fn: (page: Page) => Promise<T>): Promise
         // A browser that is merely wedged (its page died but the process is
         // alive) must be closed, not abandoned — an abandoned live browser
         // leaks a Chromium process (issue #27 cleanup contract).
-        await shutdownShared();
+        try {
+          await shutdownShared();
+        } catch (closeErr) {
+          const cmsg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+          throw new Error(
+            `shared browser teardown failed while reclaiming a wedged render surface: ${cmsg} — original render error: ${msg}`,
+          );
+        }
       }
       throw err;
     }
@@ -98,5 +131,16 @@ export async function withRenderPage<T>(fn: (page: Page) => Promise<T>): Promise
 }
 
 export async function closeBrowser(): Promise<void> {
-  await enqueue(shutdownShared);
+  await enqueue(async () => {
+    // An in-flight launch must complete so the browser it creates is the one
+    // closed here — a close that finished first would orphan it.
+    if (launching) {
+      try {
+        await launching;
+      } catch {
+        // A failed launch has nothing to close.
+      }
+    }
+    await shutdownShared();
+  });
 }

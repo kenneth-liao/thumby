@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chromium } from "playwright";
-import { closeBrowser, getBrowser } from "../src/browser.js";
+import { closeBrowser, getBrowser, withRenderPage } from "../src/browser.js";
 import { renderScene } from "../src/scene-render.js";
 import { type Scene, type SceneLayer, type ResolvedScene } from "../src/scene.js";
 import { decodePng } from "./png.js";
@@ -113,6 +113,58 @@ describe("browser lifecycle (issue #27)", () => {
     expect(width).toBe(1280);
     expect(height).toBe(720);
     expect(decodePng(png).width).toBe(1280);
+  }, 120_000);
+
+  it("self-heals a lost shared page without discarding the healthy browser", async () => {
+    const browser = await getBrowser();
+    const first = await renderScene(resolved([shape()]));
+    expect(first.width).toBe(1280);
+    // Simulate the loss externally: close only the shared render page (the
+    // browser and its context stay healthy). The next render must recreate
+    // the page and succeed — never expose a stale handle.
+    const ctx = browser.contexts()[0]!;
+    for (const p of ctx.pages()) await p.close();
+    const again = await renderScene(resolved([shape({ color: "#0000ff" })]));
+    expect(again.width).toBe(1280);
+    expect(decodePng(again.png).width).toBe(1280);
+    expect(await browser.isConnected()).toBe(true);
+    await closeBrowser();
+    expect(chromiumProcessAlive()).toBe(false);
+  }, 120_000);
+
+  it("reclaims and relaunches the shared lifecycle when the render surface dies mid-render", async () => {
+    const browser = await getBrowser();
+    await renderScene(resolved([shape()]));
+    // withRenderPage is the public seam into the shared page: a render whose
+    // surface closes underneath it must trigger the wedge-reclaim branch.
+    await expect(
+      withRenderPage(async (page) => {
+        await page.close();
+        throw new Error("Target page, context or browser has been closed");
+      }),
+    ).rejects.toThrow(/Target page/);
+    // The wedged browser was shut down, not abandoned with a live process.
+    expect(await browser.isConnected()).toBe(false);
+    // The next render relaunches cleanly.
+    const again = await renderScene(resolved([shape({ color: "#00ff00" })]));
+    expect(again.width).toBe(1280);
+    expect(decodePng(again.png).width).toBe(1280);
+    await closeBrowser();
+    expect(chromiumProcessAlive()).toBe(false);
+  }, 120_000);
+
+  it("launches exactly once under concurrent getBrowser calls, and closes the launched browser under a racing close", async () => {
+    await closeBrowser();
+    const [a, b, c] = await Promise.all([getBrowser(), getBrowser(), getBrowser()]);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    // A close racing an in-flight launch: the launched browser must be the
+    // one closed, not orphaned.
+    await closeBrowser();
+    const launch = getBrowser();
+    await closeBrowser();
+    await launch;
+    expect(chromiumProcessAlive()).toBe(false);
   }, 120_000);
 
   it("leaves no Chromium process behind after the caller closes the shared browser", async () => {
