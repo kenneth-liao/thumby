@@ -1,5 +1,0 @@
-policy:
-  {
-    # Agent Profile Kit: prevent implicit Skill invocation.
-    allow_implicit_invocation: false
-  }
