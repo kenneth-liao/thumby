@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser-backed render paths run on one shared, serialized, self-healing Chromium page per process instead of a context cycle per render — injected pages stay caller-owned and `closeBrowser()` leaves no Chromium process behind (#27, ADR-0010). Bare single-process `bun test` needs Bun ≥ 1.4.0 (upstream oven-sh/bun #15679)
+
 ## [0.24.1]
 
 ### Fixed

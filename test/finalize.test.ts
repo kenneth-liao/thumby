@@ -256,7 +256,7 @@ describe("finalizeRender", () => {
     if (!a.ok || !b.ok) return;
     expect(b.png.equals(a.png)).toBe(true);
     expect(b.optimization).toEqual(a.optimization);
-  });
+  }, 30_000);
 
   it("preserves the picture through quantization — regions, contrast, and error bounds hold on decode", () => {
     const png = makePng({ width: 1280, height: 720, pixels: structuredPixel });
@@ -312,7 +312,7 @@ describe("finalizeRender", () => {
     expect(message).toMatch(/\d[\d,]* bytes/);
     expect(message).toContain("limit is 10 bytes");
     expect(message).toMatch(/reduce|simplif/i);
-  });
+  }, 30_000);
 
   it("fails loudly on semi-transparent input palette optimization cannot preserve", () => {
     const noise = noisePixel(0xa11ce);
@@ -365,6 +365,7 @@ describe("scene render finalization", () => {
     }
   };
 
+  // CLI renders + quantization: real work measured at 4–8s, under load more.
   it("a simple render passes through under the limit and a busy render is optimized, rerender included", async () => {
     await withProject(async (dir) => {
       // Simple: one flat shape layer — a representative light thumbnail.
@@ -440,7 +441,7 @@ describe("scene render finalization", () => {
       expect(rrOut.outputs[0]!.bytes).toBeLessThanOrEqual(OUTPUT_LIMIT);
       expect(rrOut.outputs[0]!.optimization?.stage).toBe("quantized");
     });
-  });
+  }, 30_000);
 
   it("a variant batch finalizes every output and publishes nothing on the way", async () => {
     await withProject(async (dir) => {
@@ -501,5 +502,5 @@ describe("scene render finalization", () => {
       expect(manifest.contact).toBeDefined();
       await readFile(path.resolve(manifestDir, manifest.contact!.output));
     });
-  });
+  }, 30_000);
 });

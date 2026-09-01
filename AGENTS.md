@@ -21,12 +21,16 @@ Single-context repo: `CONTEXT.md` and `docs/adr/` at the root. See `docs/agents/
 
 - `bun`, not npm. `uv`, not pip.
 - Tests: `bun run test` — every test file runs in its own `bun test --isolate`
-  invocation. Isolation is load-bearing — a bare `bun test` shares one module
-  registry across files and the render tests then hang (deadlock, not failure)
-  on nearly every run (#27), and two render suites running concurrently in one
-  process crash the browser intermittently. One browser-backed suite per
-  process is the stable shape; an isolated hang or browser crash is a known
-  flake to re-run, not a new bug (#27).
+  invocation. One browser-backed suite per process is the stable shape; the
+  per-file topology is green on both Bun 1.3.14 and ≥1.4.0. The underlying
+  single-process deadlock (#27) was Bun's CDP-pipe defect (oven-sh/bun #15679,
+  fixed in Bun 1.4.0): on Bun ≥1.4.0 a bare single-process `bun test` over the
+  whole suite is verified 10/10, so `--isolate` is defense-in-depth (module
+  isolation), not a flake mask. On Bun 1.3.14 the single-process topology
+  still hangs (~60% of runs) — upgrade with `bun upgrade` before trusting a
+  bare `bun test`. The shared render page (`src/browser.ts` withRenderPage)
+  serializes and self-heals; a hung or crashed run is worth reporting, not
+  silently re-running.
 - Model costs: measure from real Gateway billing (`✓` figures only) — never copy from price tables.
 - The tool must keep working offline for everything except generation itself.
   Creator isolation is local inference (BiRefNet via `onnxruntime-node`,

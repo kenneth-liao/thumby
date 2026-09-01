@@ -194,17 +194,23 @@ describe("schema — adjust on image layers", () => {
 describe("masked render — local colorization, not a flood fill", () => {
   // One browser + route-aborting page for the whole describe: every render
   // must be offline, and shared browser state avoids a launch per test.
+  let browser: import("playwright").Browser;
+  let ctx: import("playwright").BrowserContext;
   let page: import("playwright").Page;
 
   beforeAll(async () => {
     const { chromium } = await import("playwright");
-    const browser = await chromium.launch();
-    const ctx = await browser.newContext();
+    browser = await chromium.launch();
+    ctx = await browser.newContext();
     await ctx.route("**/*", (route) => route.abort());
     page = await ctx.newPage();
-    // The browser outlives the tests (bun's teardown, not a finally): a
-    // per-test close is what made a slow launch cascade into timeouts.
-    process.on("exit", () => void browser.close());
+  });
+  // Closed here, not on process exit: in a single-process suite run this
+  // file's browser would otherwise outlive the file and be seen by later
+  // suites (issue #27 cleanup contract).
+  afterAll(async () => {
+    await ctx.close();
+    await browser.close();
   });
 
   /** Pixels that must be byte-identical between two renders, checked without
