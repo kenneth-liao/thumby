@@ -4,7 +4,7 @@
 
 ### Added
 
-- The Scene author session moves a selected positioned Layer by dragging (#60): the session updates the Layer's authored position in memory (canvas px at top level, the inverse of the Group's measured render transform when nested), re-runs the complete canonical gate, and renders a fresh preview per accepted movement — revision-stamped responses apply atomically so an overlapping request can never display an older state, the listing distinguishes persisted Scene values from unsaved session values, rejected or unloadable movements report a field-specific error while retaining the last valid preview, a selected Layer's drag surface sits above every unselected hit, and the session never writes the Scene file.
+- The Scene author session moves a selected positioned Layer by dragging: each movement previews through the canonical renderer from unsaved session state while the Scene file stays untouched (#60).
 - The Scene author session lists every resolved Layer once with its rendered bounds and selects Layers from the listing or the canvas through one script-free radio group (#59).
 - Offline Scene author sessions show a validated Scene and Reference Thumbnail side by side and in an adjustable overlay through a capability-scoped loopback URL (#58).
 - Generation Job review for every kind (US-022, #57): `jobs review` shows Plate, Object, and Creator candidates at full size and 168px, with the isolation evidence adoption would use and, for creators, face detail against the identity anchors
@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Scene author session: a Connector's listing bounds now update when its target Layers move, and a delayed older movement error can no longer overwrite the status of a newer accepted preview (#60).
 - Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
 - Scene author Connector selection highlights the connector's exact painted extent — stroke, dash, curve, and arrowhead measured from the browser's own rasterization of the rendered connector — instead of a conservative stroke/arrow envelope, and a hidden Layer's inspection state can no longer carry bounds (#59).
 - The Scene CLI's generic missing/unknown-command recovery guidance now lists the `author` command among the expected commands (#58, #70)

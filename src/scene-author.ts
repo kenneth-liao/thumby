@@ -204,6 +204,7 @@ const CLIENT_SCRIPT = `(() => {
   const img = document.querySelector(".canvas img");
   if (!status || !img) return;
   let applied = Number(status.dataset.rev ?? "0");
+  let issued = 0;
   const pct = (v, b) => Number((v / b) * 100).toFixed(4) + "%";
 
   const changed = (p) =>
@@ -213,19 +214,24 @@ const CLIENT_SCRIPT = `(() => {
   const setRow = (i, l) => {
     const row = document.querySelector('.listing .row[data-sel="' + i + '"]');
     if (!row) return;
+    // Bounds update for every rendered Layer before the position guard: a
+    // Connector has no authored position, but its geometry still follows its
+    // targets.
+    if (l.bounds) {
+      const bounds = row.querySelector(".bounds");
+      if (bounds)
+        bounds.textContent =
+          l.bounds.x + "," + l.bounds.y + " · " + l.bounds.width + "×" + l.bounds.height;
+    }
+    if (!l.position) return;
     const pos = row.querySelector(".pos");
     const was = row.querySelector(".was");
-    const bounds = row.querySelector(".bounds");
-    if (!l.position) return;
     const moved = changed(l.position);
     if (pos) pos.textContent = l.position.current.x + "," + l.position.current.y;
     if (was)
       was.textContent = moved
         ? "was " + l.position.persisted.x + "," + l.position.persisted.y
         : "";
-    if (bounds && l.bounds)
-      bounds.textContent =
-        l.bounds.x + "," + l.bounds.y + " · " + l.bounds.width + "×" + l.bounds.height;
     row.classList.toggle("modified", moved);
   };
 
@@ -257,7 +263,10 @@ const CLIENT_SCRIPT = `(() => {
     if (warnings) warnings.textContent = body.warnings.join(" · ");
   };
 
-  const showError = (body) => {
+  const showError = (body, current) => {
+    // Only the client's current request may write the status line: a delayed
+    // older failure must never overwrite a newer outcome.
+    if (!current) return;
     const messages = (body && body.errors ? body.errors : []).map((e) => e.message);
     status.textContent = messages.length ? messages.join(" · ") : "movement rejected";
     // Revision, preview bytes, geometry, and rows stay untouched: the last
@@ -265,6 +274,9 @@ const CLIENT_SCRIPT = `(() => {
   };
 
   const move = async (id, dx, dy) => {
+    // Monotonic client order: each request knows whether a newer one has
+    // been issued by the time it resolves.
+    const seq = ++issued;
     let res;
     try {
       res = await fetch(base + "move", {
@@ -273,7 +285,8 @@ const CLIENT_SCRIPT = `(() => {
         body: JSON.stringify({ id: id, dx: dx, dy: dy }),
       });
     } catch {
-      status.textContent = "movement failed — the session is unreachable";
+      if (seq === issued)
+        status.textContent = "movement failed — the session is unreachable";
       return;
     }
     let body = null;
@@ -283,7 +296,7 @@ const CLIENT_SCRIPT = `(() => {
       body = null;
     }
     if (!res.ok) {
-      showError(body);
+      showError(body, seq === issued);
       return;
     }
     // Responses resolve in completion order; only a newer revision may ever
@@ -370,13 +383,17 @@ export function renderAuthorView(
   // Generated selection rules — indexed, never id-bearing. The selected
   // Layer's hit rises above every unselected hit (a Connector's painted-AABB
   // target included): once a Layer is selected, dragging it must land on it,
-  // wherever its box sits relative to later Layers (#60). Unselected hits
-  // keep the compositing-order z-index on their inline style.
+  // wherever its box sits relative to later Layers (#60). The priority is
+  // derived from this render's own layer count — strictly above the maximum
+  // compositing-order hit index (1 + count − 1) — never a fixed constant a
+  // large layer count could outrank. Unselected hits keep the compositing
+  // order on their inline style.
+  const selectedHitZ = layers.length + 1;
   const selectionRules = layers
     .map((l, i) =>
       l.visible
         ? `#layer-${i}:checked ~ .views .box[data-sel="${i}"]{display:block}\n` +
-          `#layer-${i}:checked ~ .views .hit[data-sel="${i}"]{outline:2px solid #ffd166;z-index:9999!important}\n` +
+          `#layer-${i}:checked ~ .views .hit[data-sel="${i}"]{outline:2px solid #ffd166;z-index:${selectedHitZ}!important}\n` +
           `#layer-${i}:checked ~ .listing .row[data-sel="${i}"]{background:#26282e;box-shadow:inset 2px 0 0 #ffd166}`
         : "",
     )
@@ -522,12 +539,65 @@ ${layerRadios}
 /** A movement body limit generous for {id,dx,dy} and bounded against abuse. */
 const MOVEMENT_BODY_LIMIT = 16 * 1024;
 
+type BodyRead = { ok: true; text: string } | { ok: false; status: 400 | 413; message: string };
+
+/**
+ * Read a movement body with the byte budget enforced while streaming. A
+ * trustworthy Content-Length over the limit refuses before any body byte is
+ * read; a missing, unparseable, or lying header cannot smuggle an oversized
+ * body past the streamed byte count either. The limit counts bytes, so a
+ * multibyte body is refused on its encoded size, not its character count.
+ */
+const readMovementBody = async (req: Request): Promise<BodyRead> => {
+  const declared = req.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (Number.isInteger(length) && length >= 0 && length > MOVEMENT_BODY_LIMIT)
+      return { ok: false, status: 413, message: `movement body exceeds ${MOVEMENT_BODY_LIMIT} bytes` };
+  }
+  if (!req.body) return { ok: true, text: "" };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    let value: Uint8Array;
+    try {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      value = chunk.value;
+    } catch {
+      return { ok: false, status: 400, message: "movement body could not be read" };
+    }
+    total += value.byteLength;
+    if (total > MOVEMENT_BODY_LIMIT) {
+      void reader.cancel().catch(() => {});
+      return { ok: false, status: 413, message: `movement body exceeds ${MOVEMENT_BODY_LIMIT} bytes` };
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(bytes) };
+};
+
 /** One completed drag: the addressed Layer's stable id and frame-px delta. */
 interface Movement {
   id: string;
   dx: number;
   dy: number;
 }
+
+/**
+ * The exact media type of a Content-Type header, case-insensitively:
+ * application/json with any parameters is accepted; a prefix or suffix match
+ * is not — application/jsonp and other -suffixed types are rejected.
+ */
+const isApplicationJson = (contentType: string | null): boolean =>
+  contentType !== null && contentType.split(";", 1)[0]!.trim().toLowerCase() === "application/json";
 
 /**
  * Parse a movement body at the boundary: a JSON object carrying the stable
@@ -573,22 +643,13 @@ function findLayer(
 }
 
 /**
- * The authored position of a Layer known to have one. Connectors have no
- * authored position — reaching one here is a contract bug, never a silent
- * default.
+ * The authored position of a positioned Layer. Connectors have no authored
+ * position — reaching one here is a contract bug, never a silent default.
+ * One helper for both the read side (persisted/current presentation facts)
+ * and the write side (the mutation target): a Connector can never reach
+ * either site, because the movement boundary rejects it first.
  */
-function positionOf(tree: SceneLayer, id: string): { x: number; y: number } {
-  if (tree.type === "connector")
-    throw new Error(`layer "${id}" is a Connector — it has no authored position`);
-  return tree.position;
-}
-
-/**
- * The mutable position target for a movement: the Layer inside a candidate
- * tree, narrowed to the positioned kinds. A Connector can never be the
- * target — the movement boundary rejects it before any candidate exists.
- */
-function positionTarget(tree: SceneLayer, id: string): { x: number; y: number } {
+function positionedPosition(tree: SceneLayer, id: string): { x: number; y: number } {
   if (tree.type === "connector")
     throw new Error(`layer "${id}" is a Connector — it has no authored position`);
   return tree.position;
@@ -611,8 +672,8 @@ function viewLayers(state: SessionState): ViewLayer[] {
     return {
       ...l,
       position: {
-        persisted: positionOf(persisted.layer, l.id),
-        current: positionOf(current.layer, l.id),
+        persisted: positionedPosition(persisted.layer, l.id),
+        current: positionedPosition(current.layer, l.id),
       },
     };
   });
@@ -699,7 +760,7 @@ async function applyMovement(
     };
   const local = applyBasis(inverse, req.dx, req.dy);
   const candidate = structuredClone(state.raw);
-  const target = positionTarget(findLayer(candidate.layers, req.id)!.layer, req.id);
+  const target = positionedPosition(findLayer(candidate.layers, req.id)!.layer, req.id);
   const nextX = target.x + local.x;
   const nextY = target.y + local.y;
   if (!Number.isFinite(nextX) || !Number.isFinite(nextY))
@@ -821,17 +882,14 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
             });
           case "/move": {
             if (req.method !== "POST") return empty(405);
-            const contentType = req.headers.get("content-type") ?? "";
-            if (!contentType.startsWith("application/json"))
+            if (!isApplicationJson(req.headers.get("content-type")))
               return json(400, {
                 errors: [{ path: "content-type", message: "movement requests must send application/json" }],
               });
-            const text = await req.text();
-            if (text.length > MOVEMENT_BODY_LIMIT)
-              return json(413, {
-                errors: [{ path: "body", message: `movement body exceeds ${MOVEMENT_BODY_LIMIT} bytes` }],
-              });
-            const parsed = parseMovement(text);
+            const body = await readMovementBody(req);
+            if (!body.ok)
+              return json(body.status, { errors: [{ path: "body", message: body.message }] });
+            const parsed = parseMovement(body.text);
             if (Array.isArray(parsed)) return json(400, { errors: parsed });
             try {
               const result = await serialize(() => applyMovement(state, parsed));

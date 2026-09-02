@@ -1053,16 +1053,29 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         expect(l.bounds).not.toBeNull();
         return { x: l.bounds!.x + l.bounds!.width / 2, y: l.bounds!.y + l.bounds!.height / 2 };
       };
-      /** Raw movement POST with exact body/content-type control. */
-      const postRaw = (body: string, contentType: string | null) =>
+      /** The listing's exact bounds text, parsed back to numbers. */
+      const parseBoundsText = (t: string) => {
+        const m = t.match(/^([\d.-]+),([\d.-]+) · ([\d.-]+)×([\d.-]+)$/);
+        expect(m).not.toBeNull();
+        return { x: Number(m![1]), y: Number(m![2]), width: Number(m![3]), height: Number(m![4]) };
+      };
+      /** Raw movement POST with exact body/content-type/length control. */
+      const postRaw = (
+        body: string,
+        contentType: string | null,
+        opts: { chunked?: boolean; contentLength?: string } = {},
+      ) =>
         new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+          const headers: Record<string, string> = { connection: "close" };
+          if (contentType !== null) headers["content-type"] = contentType;
+          if (opts.contentLength !== undefined) headers["content-length"] = opts.contentLength;
           const req = httpRequest(
             {
               host: "127.0.0.1",
               port,
               path: `/${token}/move`,
               method: "POST",
-              headers: contentType === null ? {} : { "content-type": contentType },
+              headers,
             },
             (res) => {
               const chunks: Buffer[] = [];
@@ -1073,7 +1086,16 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
             },
           );
           req.on("error", reject);
-          req.end(body);
+          if (opts.chunked) {
+            // No Content-Length: Node frames the body as chunked, so the
+            // server must enforce the limit on the streamed bytes.
+            const mid = Math.floor(body.length / 2);
+            req.write(body.slice(0, mid));
+            req.write(body.slice(mid));
+            req.end();
+          } else {
+            req.end(body);
+          }
         });
       const statusText = () => page.locator("#status").textContent();
       const appliedRev = async () =>
@@ -1150,6 +1172,17 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
 
         // The status line: exactly revision 1, exactly one unsaved Layer.
         expect(await statusText()).toBe("rev 1 · unsaved 1 · Scene file unchanged");
+
+        // The selected hit's priority is derived from this render's own layer
+        // count — strictly above every unselected hit (the last hit's
+        // compositing index) — never a fixed constant a large index outranks.
+        const zOf = (sel: string) =>
+          page
+            .locator(`.canvas .hit[data-sel="${sel}"]`)
+            .evaluate((el) => Number(getComputedStyle(el).zIndex));
+        expect(await zOf("1")).toBe(10); // nine layers: count + 1
+        expect(await zOf("8")).toBe(9); // the Connector hit: the max unselected
+        expect(await zOf("1")).toBeGreaterThan(await zOf("8"));
 
         // render.png now serves the latest preview, not the session-start one:
         // the Scene changed, so the canonical pixels changed with it.
@@ -1320,6 +1353,23 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         const nonNumeric = await postRaw(JSON.stringify({ id: "chip", dx: "fast", dy: 1 }), "application/json");
         expect(nonNumeric.status).toBe(400);
         expect(nonNumeric.body.toString("utf8")).toContain("finite");
+        // The media type is parsed exactly and case-insensitively: any
+        // application/json with parameters is accepted; prefixed/suffixed
+        // types are not. Both directions assert the outcome of the check they
+        // exercise — an accepted type reaches the unknown-id error, a
+        // rejected type stops at the content-type guidance.
+        const caseVariant = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "APPLICATION/JSON");
+        expect(caseVariant.status).toBe(400);
+        expect(caseVariant.body.toString("utf8")).toContain("nope");
+        const withParams = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/json; charset=utf-8");
+        expect(withParams.status).toBe(400);
+        expect(withParams.body.toString("utf8")).toContain("nope");
+        const jsonp = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/jsonp");
+        expect(jsonp.status).toBe(400);
+        expect(jsonp.body.toString("utf8")).toContain("application/json");
+        const jsonSuffix = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/json+xml");
+        expect(jsonSuffix.status).toBe(400);
+        expect(jsonSuffix.body.toString("utf8")).toContain("application/json");
         // Malformed JSON and a wrong content type are rejected with guidance.
         const malformed = await postRaw("not json{{{", "application/json");
         expect(malformed.status).toBe(400);
@@ -1333,6 +1383,23 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
           "application/json",
         );
         expect(oversized.status).toBe(413);
+        // The limit counts BYTES on the streamed body: a multibyte body can
+        // exceed the byte budget with far fewer characters than the limit.
+        const multibyteBody = JSON.stringify({ id: "chip", dx: 1, dy: 1, pad: "é".repeat(8200) });
+        expect(Buffer.byteLength(multibyteBody, "utf8")).toBeGreaterThan(16 * 1024);
+        expect(multibyteBody.length).toBeLessThan(16 * 1024);
+        const multibyte = await postRaw(multibyteBody, "application/json");
+        expect(multibyte.status).toBe(413);
+        const multibyteChunked = await postRaw(multibyteBody, "application/json", { chunked: true });
+        expect(multibyteChunked.status).toBe(413);
+        // Chunked framing carries no Content-Length at all — the streamed
+        // byte count is the only enforcement.
+        const chunked = await postRaw(
+          `{"id":"chip","dx":1,"dy":1,"pad":"${"x".repeat(17 * 1024)}"}`,
+          "application/json",
+          { chunked: true },
+        );
+        expect(chunked.status).toBe(413);
         // Every rejection left the latest preview exactly as it was.
         expect(
           Buffer.compare((await rawRequest(port, `/${token}/render.png`)).body, renderBeforeRejections),
@@ -1407,7 +1474,9 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
             first = false;
             void delayed
               .then((r) => r.clone().json())
-              .then((b: { rev: number; png: string }) => w.__moves.push(b));
+              .then(
+                (b: { rev: number; png: string; layers: ResponseLayer[] }) => w.__moves.push(b),
+              );
             return delayed;
           }) as unknown as typeof fetch;
         });
@@ -1420,7 +1489,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
           { timeout: 30_000 },
         );
         const moves = await page.evaluate(
-          () => (window as unknown as { __moves: { rev: number; png: string }[] }).__moves,
+          () => (window as unknown as { __moves: { rev: number; png: string; layers: ResponseLayer[] }[] }).__moves,
         );
         // The held-back response resolved last and was discarded: the display
         // shows exactly the newest revision.
@@ -1429,6 +1498,143 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         expect(await appliedRev()).toBe(moves[0]!.rev);
         expect(await previewSrc()).toBe(`data:image/png;base64,${moves[0]!.png}`);
         expect(await previewSrc()).not.toBe(imgBeforeStale);
+        // The Connector's listing bounds follow its targets: the positionless
+        // row still updates its geometry with every applied preview.
+        const connectorText = (await page.locator('.listing .row[data-sel="8"] .bounds').textContent())!;
+        const linkEntry = moves[0]!.layers.find((l) => l.id === "link");
+        expect(linkEntry).toBeDefined();
+        expect(linkEntry!.bounds).not.toBeNull();
+        expect(parseBoundsText(connectorText)).toEqual(linkEntry!.bounds!);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // An older movement's HTTP rejection resolving late must not
+        // overwrite the status of a newer accepted preview: error updates are
+        // allowed only while their request is the client's current one.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __hiddenRev?: number;
+            __late?: boolean;
+          };
+          w.__origFetch = window.fetch;
+          w.__hiddenRev = undefined;
+          w.__late = false;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p
+              .then((r) => r.clone().json())
+              .then((b: { rev: number }) => {
+                w.__hiddenRev = b.rev;
+              });
+            return new Promise((resolve) =>
+              setTimeout(() => {
+                w.__late = true;
+                resolve(
+                  new Response(JSON.stringify({ errors: [{ path: "body", message: "stale rejection" }] }), {
+                    status: 400,
+                    headers: { "content-type": "application/json" },
+                  }),
+                );
+              }, 2000),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await dragHit("1", 10, 0);
+        await dragHit("1", 10, 0);
+        await page.waitForFunction(
+          () => (window as unknown as { __hiddenRev?: number }).__hiddenRev !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const staleRejected = await page.evaluate(
+          () => (window as unknown as { __hiddenRev: number }).__hiddenRev,
+        );
+        expect(staleRejected).toBe(11);
+        await page.waitForFunction(
+          (h: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === h + 1,
+          staleRejected,
+          { timeout: 30_000 },
+        );
+        const statusAfterNewer = await statusText();
+        expect(statusAfterNewer).toBe(`rev ${staleRejected! + 1} · unsaved 5 · Scene file unchanged`);
+        // The stale rejection resolves now: the status must not move.
+        await page.waitForFunction(
+          () => (window as unknown as { __late?: boolean }).__late === true,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe(statusAfterNewer);
+        expect(await appliedRev()).toBe(staleRejected! + 1);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // The same guarantee for the unreachable-network branch: an older
+        // request failing late cannot overwrite a newer accepted preview.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __hiddenRev?: number;
+            __late?: boolean;
+          };
+          w.__origFetch = window.fetch;
+          w.__hiddenRev = undefined;
+          w.__late = false;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p
+              .then((r) => r.clone().json())
+              .then((b: { rev: number }) => {
+                w.__hiddenRev = b.rev;
+              });
+            return new Promise((_, reject) =>
+              setTimeout(() => {
+                w.__late = true;
+                reject(new TypeError("network down"));
+              }, 2000),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await dragHit("1", 10, 0);
+        await dragHit("1", 10, 0);
+        await page.waitForFunction(
+          () => (window as unknown as { __hiddenRev?: number }).__hiddenRev !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const staleUnreachable = await page.evaluate(
+          () => (window as unknown as { __hiddenRev: number }).__hiddenRev,
+        );
+        expect(staleUnreachable).toBe(13);
+        await page.waitForFunction(
+          (h: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === h + 1,
+          staleUnreachable,
+          { timeout: 30_000 },
+        );
+        const statusAfterNewest = await statusText();
+        expect(statusAfterNewest).toBe(`rev ${staleUnreachable! + 1} · unsaved 5 · Scene file unchanged`);
+        // The late network failure resolves now: the status must not move.
+        await page.waitForFunction(
+          () => (window as unknown as { __late?: boolean }).__late === true,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe(statusAfterNewest);
+        expect(await appliedRev()).toBe(staleUnreachable! + 1);
         await page.evaluate(() => {
           const w = window as unknown as { __origFetch?: typeof fetch };
           if (w.__origFetch) window.fetch = w.__origFetch;
@@ -1443,7 +1649,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         const deltas = [10, 20, 30, 40, 50, 60];
         const burst = await Promise.all(deltas.map((d) => postMove("chip", d, 0)));
         for (let i = 0; i < burst.length; i++) {
-          expect(burst[i]!.rev).toBe(moves[0]!.rev + 1 + i);
+          expect(burst[i]!.rev).toBe(15 + i);
           const chip = byId(burst[i]!, "chip").position!.current;
           expect(chip.x).toBeCloseTo(
             chipXBefore + deltas.slice(0, i + 1).reduce((a, b) => a + b, 0),
@@ -1463,9 +1669,10 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
           { id: "chip", dx: 5, dy: 0 },
           { id: "card-plate", dx: -6, dy: 4 },
         ];
-        for (const c of cycles) {
+        for (let ci = 0; ci < cycles.length; ci++) {
+          const c = cycles[ci]!;
           const next = await postMove(c.id, c.dx, c.dy);
-          expect(next.rev).toBe(last.rev + 1);
+          expect(next.rev).toBe(21 + ci);
           const center = centerOf(byId(next, c.id));
           const centerBefore = centerOf(byId(last, c.id));
           expect(center.x - centerBefore.x).toBeCloseTo(c.dx, 0);
