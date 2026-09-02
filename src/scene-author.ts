@@ -25,20 +25,43 @@
  * rejection answers with an actionable, field-specific error and changes
  * nothing. Changes serialize strictly FIFO — one candidate validates/renders
  * at a time, revisions are monotonic, and the view applies only a newer
- * revision, so an older result can never replace a newer display. No route
- * writes anything: exiting or losing the session without saving leaves the
- * Scene file byte-identical.
+ * revision, so an older result can never replace a newer display.
+ *
+ * Explicit save (#62): the view carries a Save control that POSTs /save, and
+ * a save joins the same handler-arrival FIFO queue as geometry — a save
+ * arriving after earlier edits persists exactly those committed edits, and
+ * later edits stay unsaved. The session holds the canonical Scene file path
+ * and the exact source bytes read when it opened. The save transaction
+ * (saveSessionScene) re-runs the ordinary loadScene gate on the raw authored
+ * candidate, serializes ONLY that raw document (pretty JSON + newline — never
+ * theme-resolved defaults, render measurements, handles/bases, or other
+ * derived Render state), then — under the per-Scene filesystem lock from
+ * reference-import.ts, taken on the Scene's REAL path so aliases contend and
+ * a symlink is replaced at its target rather than itself — re-reads the
+ * target and refuses unless the exact bytes still equal the session's
+ * expected source bytes (hashes appear only as message diagnostics; the
+ * comparison is byte equality). Publication goes through the existing
+ * atomicReplace helper. Every failure — gate, lock, read, comparison, write —
+ * answers with an actionable error, writes nothing, leaves the previous Scene
+ * usable, and never reports success. Only after a successful replacement does
+ * the session advance its expected source bytes, set persistedRaw to the
+ * saved raw document, bump the monotonic revision, and return view facts that
+ * reset the unsaved markers to zero: future edits become unsaved against the
+ * new baseline, and the next save compares against the just-written bytes.
+ * Exiting or losing the session without saving leaves the Scene file
+ * byte-identical.
  *
  * Security posture: the server binds 127.0.0.1:0 only (loopback, ephemeral
  * port); a 32-random-byte capability exists only inside session.url — no
  * separate token field, no query parameters. Every request must carry the
  * exact generated Host header and hit one exact token-scoped route
  * (/view, /render.png, /reference.png, /app.js as GET; /move, /resize,
- * /geometry as POST); anything else is an empty 403/404/405. There is no
- * path-based file serving: a wrong path can never reach the filesystem. The
+ * /geometry, /save as POST); anything else is an empty 403/404/405. There is
+ * no path-based file serving: a wrong path can never reach the filesystem. The
  * view's one script is this session's own static /app.js — no inline script,
- * no eval, no remote origin anywhere; geometry requests are same-origin
- * fetches with an application/json content-type and a bounded body. The
+ * no eval, no remote origin anywhere; geometry and save requests are
+ * same-origin fetches with an application/json content-type and a bounded
+ * body. The
  * session and its view make no remote requests: images are served from the
  * held preview bytes and the exact validated Reference bytes (checkReference
  * read the file once; the session never rereads it), and preview renders
@@ -52,8 +75,11 @@
  * stdout carries exactly two one-line JSON events: "started" and "closed".
  */
 import crypto, { timingSafeEqual } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import type { CheckedReference } from "./compare.js";
 import type { Library } from "./assets.js";
+import { contentHash } from "./assets.js";
+import { acquireSceneLock, atomicReplace } from "./reference-import.js";
 import type {
   Basis,
   LayerBox,
@@ -140,6 +166,17 @@ export interface AuthorSessionInput {
    * defaults are never persisted: movements edit and re-validate raw state.
    */
   raw: Scene;
+  /**
+   * The canonical Scene file path exactly as the session opened it — the
+   * save transaction's lock and replacement resolution starts here, on the
+   * file's REAL target.
+   */
+  sceneFile: string;
+  /**
+   * The exact source bytes read when the session opened — the save's
+   * stale-write comparison baseline, advanced only by a successful save.
+   */
+  sourceBytes: Buffer;
   /** Project root for the complete canonical gate each movement re-runs. */
   projectRoot: string;
   /** Library provider for the complete canonical gate each movement re-runs. */
@@ -217,6 +254,15 @@ interface SessionState {
   /** Project root + library provider for the complete canonical gate. */
   projectRoot: string;
   library: () => Promise<Library>;
+  /** The canonical Scene file path — the save transaction's target. */
+  sceneFile: string;
+  /**
+   * The exact bytes the session expects on disk — the source bytes it opened
+   * with, advanced to the just-written bytes by each successful save.
+   */
+  expectedSource: Buffer;
+  /** Whether a save has ever replaced the Scene file in this session. */
+  hasSaved: boolean;
 }
 
 /** A BodyInit-compatible view of exactly these bytes. Node Buffers are always
@@ -257,6 +303,9 @@ const CLIENT_SCRIPT = `(() => {
   if (!status || !img) return;
   let applied = Number(status.dataset.rev ?? "0");
   let issued = 0;
+  // The saved fact (#62) boots from the server-rendered status: whether a
+  // save has ever replaced the Scene file in this session.
+  let saved = status.dataset.saved === "1";
   const pct = (v, b) => Number((v / b) * 100).toFixed(4) + "%";
 
   const changed = (p) =>
@@ -370,11 +419,17 @@ const CLIENT_SCRIPT = `(() => {
     // The applied revision stays accurate even when a newer outcome owns the
     // status text.
     status.dataset.rev = String(body.rev);
+    // The saved fact is state, not status text: any applied save response
+    // makes the session saved, whatever newer request owns the status line
+    // right now (#62).
+    if (body.saved) saved = true;
+    status.dataset.saved = saved ? "1" : "0";
     // The status text belongs to the newest request's outcome only: a delayed
     // older success applies its state without hiding a newer error.
     if (current)
       status.textContent =
-        "rev " + body.rev + " · unsaved " + unsavedCount(body.layers) + " · Scene file unchanged";
+        "rev " + body.rev + " · unsaved " + unsavedCount(body.layers) + " · " +
+        (saved ? "Scene file saved" : "Scene file unchanged");
   };
 
   const showError = (body, current) => {
@@ -546,6 +601,49 @@ const CLIENT_SCRIPT = `(() => {
     );
   }
 
+  // One explicit save (#62): the Save control POSTs an empty JSON body to the
+  // token-scoped /save route through the same discipline as geometry — a
+  // monotonic client order, "saving…" while in flight, the status line owned
+  // by the newest request's outcome, and an applied save response resetting
+  // the unsaved markers against the new persisted baseline.
+  const saveUnreachable = "save request failed — the session is unreachable";
+  const save = async () => {
+    const seq = ++issued;
+    status.textContent = "saving…";
+    let res;
+    try {
+      res = await fetch(base + "save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+    } catch {
+      if (seq === issued) status.textContent = saveUnreachable;
+      return;
+    }
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      // Only the client's current request may write the status line: a
+      // delayed older failure must never overwrite a newer outcome.
+      if (seq === issued) {
+        const messages = (body && body.errors ? body.errors : []).map((e) => e.message);
+        status.textContent = messages.length ? messages.join(" · ") : "save rejected";
+      }
+      return;
+    }
+    if (body && body.rev > applied) {
+      apply(body, seq === issued);
+      applied = body.rev;
+    }
+  };
+  const saveButton = document.getElementById("save");
+  if (saveButton) saveButton.addEventListener("click", () => void save());
+
   // Numeric geometry edits (#61): a field's change event (Enter or blur)
   // commits exactly that field's value — one input, one exact authored
   // value. Other still-dirty fields are never swept into the request, and an
@@ -594,12 +692,14 @@ const CLIENT_SCRIPT = `(() => {
  * current authored position and, once it differs from the persisted Scene
  * values, a "was" marker and the modified class. The one script (app.js)
  * applies each geometry response atomically and never lets an older revision
- * win.
+ * win. The Save control (#62) sits in the status bar: clicking it POSTs /save
+ * and the status line reports saving/saved — the persisted-vs-unsaved
+ * presentation resets when a save replaces the Scene file.
  */
 export function renderAuthorView(
   scene: string,
   layers: ViewLayer[],
-  meta: { rev: number; warnings: string[] },
+  meta: { rev: number; warnings: string[]; saved: boolean },
 ): string {
   const steps = Array.from({ length: 11 }, (_, i) => i * 10);
   const radios = steps
@@ -806,6 +906,8 @@ ${selectionRules}
 body{background:#0b0b0d;color:#e7e7ea;font:14px/1.5 -apple-system,sans-serif;margin:0;padding:32px}
 h1{font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#8a8a94;font-size:15px;margin:0 0 16px}
 .statusbar{display:flex;align-items:baseline;gap:16px;margin:0 0 12px;font:12px/1.6 ui-monospace,monospace}
+.statusbar #save{border:1px solid #26282e;border-radius:4px;background:#101216;color:#e7e7ea;font:inherit;padding:2px 14px;cursor:pointer}
+.statusbar #save:hover{border-color:#ffd166;color:#ffd166}
 .statusbar #status{color:#ffd166}
 .statusbar #warnings{color:#8a8a94;overflow-wrap:anywhere}
 .controls{display:flex;align-items:center;gap:6px;margin:0 0 12px;font-size:11px;color:#8a8a94}
@@ -852,7 +954,7 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 <input type="radio" name="mode" id="mode-overlay">
 ${radios}
 ${layerRadios}
-<div class="statusbar"><span id="status" data-rev="${meta.rev}">rev ${meta.rev} · unsaved ${unsaved} · Scene file unchanged</span><span id="warnings">${escapeHtml(meta.warnings.join(" · "))}</span></div>
+<div class="statusbar"><button id="save" type="button">save</button><span id="status" data-rev="${meta.rev}" data-saved="${meta.saved ? "1" : "0"}">rev ${meta.rev} · unsaved ${unsaved} · ${meta.saved ? "Scene file saved" : "Scene file unchanged"}</span><span id="warnings">${escapeHtml(meta.warnings.join(" · "))}</span></div>
 <div class="controls">view <label for="mode-side">side by side</label><label for="mode-overlay">overlay</label><span>opacity</span>${labels}</div>
 <div class="listing">${rows}</div>
 <div class="geometry">${geomEntries}</div>
@@ -1525,6 +1627,213 @@ async function applyGeometrySet(
   return commitCandidate(state, candidate);
 }
 
+// --- explicit save (#62) -----------------------------------------------------
+
+/** The result of one save transaction: the written bytes on success — the
+ * session's new expected source — or a structured, actionable refusal. */
+export type SaveOutcome =
+  | { ok: true; bytes: Buffer }
+  | { ok: false; status: number; errors: SceneError[] };
+
+export interface SaveInput {
+  /** The Scene file path exactly as the session opened it. */
+  sceneFile: string;
+  /** The exact bytes the session believes are on disk — advanced by each save. */
+  expectedSource: Buffer;
+  /** The raw authored candidate to persist — never theme-resolved state. */
+  candidate: Scene;
+  /** Project root for the ordinary loadScene gate. */
+  projectRoot: string;
+  /** Library provider for the ordinary loadScene gate. */
+  library: () => Promise<Library>;
+  /**
+   * Fault-injection seam for the atomic replace (the writeScene precedent):
+   * production always publishes through the real atomicReplace. Injecting a
+   * failing write is the honest way to prove the failure branch — the
+   * previous Scene stays usable and success is never reported — without
+   * racing a real filesystem fault, which cannot be safely induced.
+   */
+  writeScene?: (file: string, bytes: Buffer) => Promise<void>;
+  /**
+   * How long the save waits for a contended Scene lock before refusing. Same
+   * bounded, no-stealing discipline as reference import. Default: 30s.
+   */
+  lockTimeoutMs?: number;
+}
+
+/**
+ * One save transaction (#62), in order:
+ *
+ *   1. the complete raw authored candidate passes the ordinary loadScene
+ *      gate (schema, semantics, theme, resolution — local asset/library
+ *      rereads accepted) — a field-specific failure refuses before anything
+ *      is touched,
+ *   2. serialize ONLY that raw document — pretty JSON + a trailing newline;
+ *      theme-resolved defaults, render measurements, handles/bases, and every
+ *      other derived Render state are never present, because the candidate is
+ *      the session's mutable raw home, not a resolved copy,
+ *   3. acquire the per-Scene filesystem lock on the Scene's REAL path — every
+ *      alias of one Scene file contends on one lock, and a symlink is
+ *      replaced at its target rather than accidentally rewritten as a plain
+ *      file — then re-read the target and refuse unless its exact bytes still
+ *      equal the session's expected source bytes (the comparison is byte
+ *      equality; hashes appear only as message diagnostics),
+ *   4. publish through the existing atomicReplace helper — an interrupted
+ *      write never leaves partial bytes at the target.
+ *
+ * Every refusal names the offending field, writes nothing, leaves the
+ * previous Scene usable, and never reports success.
+ */
+export async function saveSessionScene(input: SaveInput): Promise<SaveOutcome> {
+  const refuse = (status: number, path: string, message: string): SaveOutcome => ({
+    ok: false,
+    status,
+    errors: [{ path, message }],
+  });
+
+  // 1 — the ordinary gate on the complete candidate. loadScene clones the
+  // document before applying theme defaults, so the session's raw home is
+  // validated at save time and never mutated. A failure refuses the save
+  // with the gate's field-specific errors and changes nothing.
+  const gate = await loadScene(input.projectRoot, input.library, input.candidate);
+  if (!gate.ok) return { ok: false, status: 400, errors: gate.errors };
+
+  // 2 — exactly the raw authored document, pretty-printed with a trailing
+  // newline. Nothing derived ever enters the file.
+  const bytes = Buffer.from(JSON.stringify(input.candidate, null, 2) + "\n", "utf8");
+
+  // 3 — the lock and the replacement both target the Scene's REAL path.
+  let real: string;
+  try {
+    real = await realpath(input.sceneFile);
+  } catch (err) {
+    return refuse(
+      500,
+      "scene",
+      `cannot locate the Scene file "${input.sceneFile}": ${(err as Error).message} — ` +
+        `the save wrote nothing and the session continues`,
+    );
+  }
+  let releaseLock: () => Promise<void>;
+  try {
+    const lock = await acquireSceneLock(`${real}.lock`, { timeoutMs: input.lockTimeoutMs });
+    releaseLock = lock.release;
+  } catch (err) {
+    return refuse(
+      500,
+      "scene",
+      `the Scene could not be locked for this save: ${(err as Error).message} — ` +
+        `the save wrote nothing and the session continues`,
+    );
+  }
+  try {
+    // Under the lock, the target must still be the exact bytes the session
+    // opened with: an intervening edit fails closed instead of being
+    // overwritten. Byte equality is the fact; hashes are diagnostics only.
+    let current: Buffer;
+    try {
+      current = await readFile(real);
+    } catch (err) {
+      return refuse(
+        500,
+        "scene",
+        `the Scene file could not be re-read before commit: ${(err as Error).message} — ` +
+          `the save fails closed and wrote nothing`,
+      );
+    }
+    if (!current.equals(input.expectedSource))
+      return refuse(
+        409,
+        "scene",
+        `the Scene file changed after this session opened (${contentHash(input.expectedSource).slice(0, 12)}… → ` +
+          `${contentHash(current).slice(0, 12)}…) — the save refuses to overwrite an intervening edit. ` +
+          `Nothing was written and the on-disk Scene is unchanged and usable. ` +
+          `Close this session, review the current Scene, and open a new authoring session on it.`,
+      );
+
+    // 4 — publish atomically. A write failure is actionable: the previous
+    // Scene is byte-identical and usable, and success is never reported.
+    try {
+      if (input.writeScene) await input.writeScene(real, bytes);
+      else await atomicReplace(real, bytes);
+    } catch (err) {
+      return refuse(
+        500,
+        "scene",
+        `the saved Scene could not be written: ${(err as Error).message}. ` +
+          `The previous Scene is unchanged and usable — fix the problem and save again.`,
+      );
+    }
+    return { ok: true, bytes };
+  } finally {
+    await releaseLock();
+  }
+}
+
+/** A save body carries nothing: exactly an empty JSON object. */
+function parseSave(text: string): Record<string, unknown> | SceneError[] {
+  return parseJsonObject(text, []);
+}
+
+/**
+ * One explicit save (#62), candidate-first: the prospective success state and
+ * its full response are built and validated BEFORE any disk write —
+ * persistedRaw becomes the saved document, so viewLayers proves the post-save
+ * view (unsaved markers reset to zero) while nothing has been written. The
+ * transaction then runs through the one save path. Any failure returns an
+ * actionable error and changes nothing; only a successful replacement commits
+ * the new baseline — expected source bytes, persistedRaw, revision, and the
+ * saved fact — after which later edits are unsaved against it.
+ */
+async function applySave(state: SessionState): Promise<{ status: number; body: Record<string, unknown> }> {
+  const next: SessionState = {
+    ...state,
+    persistedRaw: structuredClone(state.raw),
+    rev: state.rev + 1,
+  };
+  let body: Record<string, unknown>;
+  try {
+    body = {
+      rev: next.rev,
+      png: next.png.toString("base64"),
+      warnings: next.warnings,
+      layers: viewLayers(next),
+      saved: true,
+    };
+  } catch (err) {
+    return {
+      status: 500,
+      body: { errors: [{ path: "save", message: (err as Error).message }] },
+    };
+  }
+  let result: SaveOutcome;
+  try {
+    result = await saveSessionScene({
+      sceneFile: state.sceneFile,
+      expectedSource: state.expectedSource,
+      candidate: state.raw,
+      projectRoot: state.projectRoot,
+      library: state.library,
+    });
+  } catch (err) {
+    // The transaction internalizes its failures; an unexpected throw is a
+    // safety net that still names the save, changes nothing, and never
+    // reports success.
+    return {
+      status: 500,
+      body: { errors: [{ path: "save", message: (err as Error).message }] },
+    };
+  }
+  if (!result.ok) return { status: result.status, body: { errors: result.errors } };
+  // Commit after successful publication only: four synchronous assignments,
+  // nothing awaited or thrown after.
+  state.persistedRaw = next.persistedRaw;
+  state.rev = next.rev;
+  state.expectedSource = result.bytes;
+  state.hasSaved = true;
+  return { status: 200, body };
+}
+
 /**
  * Hold the live author session. Never returns normally: the session lives
  * until SIGTERM/SIGINT drives the one shutdown path (which exits the
@@ -1548,6 +1857,9 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
     warnings: input.preview.warnings,
     projectRoot: input.projectRoot,
     library: input.library,
+    sceneFile: input.sceneFile,
+    expectedSource: input.sourceBytes,
+    hasSaved: false,
   };
 
   const empty = (status: number) => new Response(null, { status, headers: securityHeaders() });
@@ -1574,14 +1886,15 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
   };
 
   /**
-   * One POST pipeline shared by every geometry route (#61): the exact
+   * One POST pipeline shared by every mutating route (#61, #62): the exact
    * application/json media type, the streamed byte budget, strict boundary
    * parsing, and arrival-order serialization — then the route's own apply.
    * Arrival order is commit order: the pipeline enqueues at handler arrival —
    * before the first body read — so a slowly streamed earlier request can
-   * never commit after a later complete one.
+   * never commit after a later complete one, and a save arriving after
+   * earlier edits persists exactly those committed edits.
    */
-  const jsonGeometryPost = <P>(
+  const jsonMutatePost = <P>(
     req: Request,
     parse: (text: string) => P | SceneError[],
     apply: (parsed: P) => Promise<{ status: number; body: Record<string, unknown> }>,
@@ -1589,7 +1902,7 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
     if (!isApplicationJson(req.headers.get("content-type")))
       return Promise.resolve(
         json(400, {
-          errors: [{ path: "content-type", message: "geometry requests must send application/json" }],
+          errors: [{ path: "content-type", message: "POST requests must send application/json" }],
         }),
       );
     return serialize(async () => {
@@ -1632,7 +1945,11 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
           case "/view":
             if (req.method !== "GET") return empty(405);
             return new Response(
-              renderAuthorView(input.scene, viewLayers(state), { rev: state.rev, warnings: state.warnings }),
+              renderAuthorView(input.scene, viewLayers(state), {
+                rev: state.rev,
+                warnings: state.warnings,
+                saved: state.hasSaved,
+              }),
               { headers: securityHeaders({ "content-type": "text/html; charset=utf-8" }) },
             );
           case "/render.png":
@@ -1648,13 +1965,16 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
             });
           case "/move":
             if (req.method !== "POST") return empty(405);
-            return jsonGeometryPost(req, parseMovement, (parsed) => applyMovement(state, parsed));
+            return jsonMutatePost(req, parseMovement, (parsed) => applyMovement(state, parsed));
           case "/resize":
             if (req.method !== "POST") return empty(405);
-            return jsonGeometryPost(req, parseResize, (parsed) => applyResize(state, parsed));
+            return jsonMutatePost(req, parseResize, (parsed) => applyResize(state, parsed));
           case "/geometry":
             if (req.method !== "POST") return empty(405);
-            return jsonGeometryPost(req, parseGeometry, (parsed) => applyGeometrySet(state, parsed));
+            return jsonMutatePost(req, parseGeometry, (parsed) => applyGeometrySet(state, parsed));
+          case "/save":
+            if (req.method !== "POST") return empty(405);
+            return jsonMutatePost(req, parseSave, () => applySave(state));
           default:
             return empty(404);
         }

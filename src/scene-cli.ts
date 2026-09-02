@@ -69,7 +69,10 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         its Reference Thumbnail, renders once in memory, then
                                         serves the Render and Reference side by side plus an
                                         adjustable overlay on a capability-scoped loopback URL
-                                        (printed as one-line JSON). Ctrl-C or SIGTERM closes it.
+                                        (printed as one-line JSON). Geometry edits preview
+                                        from session state; the view's Save control persists
+                                        them through the ordinary gate atomically, or refuses
+                                        with the offending field. Ctrl-C or SIGTERM closes it.
   bun run scene reference import <scene.json> <file>
                                         Normalize a local raster image (PNG, JPEG, or
                                         WebP) to the canonical Reference Thumbnail profile
@@ -944,10 +947,14 @@ async function dispatch(
     const { png, layers, warnings } = await renderSceneInspection(result.resolved);
     // Holds the session until SIGTERM/SIGINT drives the one shutdown path.
     // The gate-validated raw document (authored values, pre-theme) seeds the
-    // session's mutable state and its frozen persisted home (#60).
+    // session's mutable state and its frozen persisted home (#60); the exact
+    // source bytes read here are the save's stale-write comparison baseline
+    // (#62), and the resolved file path is the save transaction's target.
     return startAuthorSession({
       scene: path.basename(path.resolve(file), ".json"),
       raw: read.raw as Scene,
+      sceneFile: path.resolve(file),
+      sourceBytes: read.bytes,
       projectRoot: sceneDir,
       library,
       preview: { png, layers, warnings },
