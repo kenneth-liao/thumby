@@ -261,11 +261,11 @@ policy, not a validation rule:
 **Simplified UI from typed References.** An authentic screenshot is a typed
 Reference, not raw output: attach it with `--ref edit:screenshot.png` and the
 run's guidance asks the model to keep the interface's macrostructure — major
-regions, proportions, visual language — while simplifying it into a few large,
-legible regions with no incidental controls, small labels, or dense text.
-Thumbnail scale is the target: prefer the fewest, largest regions the
-interface's identity allows, and review candidates at real thumbnail size
-before adopting. Choose the output kind by editability, the same
+panels, proportions, key colors, and visual language — while simplifying it
+into a few large, high-contrast regions with no incidental controls, small
+labels, or dense text. Thumbnail scale is the target: prefer the fewest,
+largest regions the interface's identity allows, and review candidates at
+real thumbnail size before adopting. Choose the output kind by editability, the same
 flatten-versus-decompose policy as above — a **Plate** when the simplified
 interface is environmental background content (intentionally flattened), an
 **Object Asset** when the panel should be moved, resized, reused, or replaced

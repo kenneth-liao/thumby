@@ -371,7 +371,8 @@ mock.module("ai", () => ({
 describe("production generator wiring", () => {  test("maps a job request onto generatePlates options — subject-authoritative contract included", () => {
     // The ADR-0011 load-bearing fact: a Plate Job's subject is authoritative —
     // no subjectless backdrop mode is forced, and the full request (zone,
-    // count, typed refs with their roles, temperature) maps through (#56).
+    // count, typed refs with role AND recorded identity, temperature) maps
+    // through (#56): generation hash-verifies and loads each Reference once.
     expect(
       generateOptionsFor({
         kind: "plate", subject: "neon room", zone: "right", model: "nano-2",
@@ -382,7 +383,7 @@ describe("production generator wiring", () => {  test("maps a job request onto g
       subject: "neon room",
       zone: "right",
       model: "nano-2",
-      refs: [{ role: "style", path: "refs/palette.png" }],
+      refs: [{ role: "style", path: "refs/palette.png", contentHash: "ab".repeat(32) }],
       count: 3,
       temperature: 0.4,
     });

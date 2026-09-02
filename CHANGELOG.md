@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Reference integrity and role-lookup hardening for typed-Reference generation (#56 review): every Plate/Object Reference is hash-verified and read exactly once per generation call — the same verified bytes go to every candidate, a drifted or stale identity refuses before any spend, and the pre-spend incompatible-model gate keeps its ordering; the shared role-manifest lookup is own-property-safe, so a `constructor` role renders label-only instead of injecting a prototype member; the `edit` role's simplification guidance now names major panels, proportions, key colors, and large high-contrast regions (US-020, DEC-016)
 - Tint composes with the masked `adjust` instead of being restricted as mutually exclusive (#67, SPEC-1): the named-mask contract is unchanged — tint paints the content, `adjust` blends over the tinted result inside its mask; the 0.29.1 schema restriction is removed
 - Reference Thumbnail import is race-safe and fail-closed: per-Scene locking with bounded contention (no automatic stale-lock stealing — operator cleanup), token-gated release that only ever removes its own lock, owned rollback covering everything after reservation including partial writes, shared by every replacing Scene writer (#54, #66)
 

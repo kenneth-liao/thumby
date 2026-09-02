@@ -145,7 +145,10 @@ function roleManifest(refs: TypedRefInput[], instructions: Record<string, string
   return [
     "Reference images are attached in this exact order — role-assign every one:",
     ...refs.map((r, i) => {
-      const what = instructions[r.role];
+      // Own-property lookup only: a role named like an inherited member
+      // ("constructor") must render label-only, never inject its value into
+      // model-facing prose (CRAFT-2).
+      const what = Object.hasOwn(instructions, r.role) ? instructions[r.role] : undefined;
       return `image ${i + 1} — ${r.role}${what ? ` (${what})` : ""}`;
     }),
   ];
@@ -154,13 +157,14 @@ function roleManifest(refs: TypedRefInput[], instructions: Record<string, string
 /**
  * Per-role instructions for Plate and Object references (US-020/021/024,
  * DEC-014, DEC-016). "edit" is the UI-abstraction contract: the reference is
- * an authentic interface whose macrostructure is kept — major regions,
- * proportions, visual language — simplified into a few large regions, with
- * everything that fails at thumbnail size dropped. "style" keeps its distinct
- * semantics; anything else is identified by label only.
+ * an authentic interface whose macrostructure is kept — major panels,
+ * proportions, key colors, visual language — simplified into a few large
+ * high-contrast regions, with everything that fails at thumbnail size
+ * dropped. "style" keeps its distinct semantics; anything else is identified
+ * by label only.
  */
 const PLATE_OBJECT_ROLE_INSTRUCTIONS: Record<string, string> = {
-  edit: "source-to-edit — keep this interface's macrostructure: its major regions, proportions, and visual language, simplified into a few large flat regions; omit incidental controls, small labels, dense text, and any detail that would be illegible at thumbnail size",
+  edit: "source-to-edit — keep this interface's macrostructure: its major panels, proportions, key colors, and visual language, simplified into a few large high-contrast regions; omit incidental controls, small labels, dense text, and any detail that would be illegible at thumbnail size",
   style: "style reference — palette, lighting, and visual style only; never take layout, structure, or content from it",
 };
 
@@ -197,32 +201,17 @@ function describeWarning(model: string, w: unknown): string {
   return `${model}: ${o?.details ?? o?.message ?? `unsupported ${what}`}`;
 }
 
-/** A generation reference: a path to read, or already-verified bytes. */
-type GenRef = string | { path: string } | { bytes: Uint8Array };
-
 /**
- * The bytes for one reference: already-verified bytes when the caller holds
- * them (creators — never re-read), otherwise the path's file (plates,
- * objects, and the legacy path — re-read at the call boundary).
+ * Provider message parts from already-loaded reference bytes — the loader
+ * resolved and verified them, so nothing here re-reads a path (CRAFT-1).
  */
-function genRefBytes(r: GenRef): Promise<Buffer> {
-  if (typeof r === "string") return readFile(path.resolve(r));
-  if ("bytes" in r) return Promise.resolve(Buffer.from(r.bytes));
-  return readFile(path.resolve(r.path));
-}
-
-async function refParts(refs: GenRef[]) {
-  return Promise.all(
-    refs.map(async (r) => ({
-      type: "image" as const,
-      image: await genRefBytes(r),
-    })),
-  );
+function refParts(refs: LoadedRef[]) {
+  return refs.map((r) => ({ type: "image" as const, image: r.bytes }));
 }
 
 /** Image models take raw bytes in GenerateImagePrompt.images, not file parts. */
-function refBytes(refs: GenRef[]) {
-  return Promise.all(refs.map((r) => genRefBytes(r)));
+function refBytes(refs: LoadedRef[]) {
+  return refs.map((r) => r.bytes);
 }
 
 export interface GenerateOptions {
@@ -323,11 +312,14 @@ export interface GeneratedPlate {
  * The one AI-SDK call core, shared by every generation workflow: call the
  * resolved model `count` times with the given prompt, collect the images and
  * warnings. Workflow differences live entirely in the caller's prompt.
+ * References are hash-verified and loaded exactly once here — after the
+ * capability gate, before any candidate — and the same verified bytes go to
+ * every candidate (CRAFT-1).
  */
 async function runGeneration(
   spec: ModelSpec,
   prompt: string,
-  refs: GenRef[],
+  refs: TypedRefInput[],
   count: number,
   temperature?: number,
 ): Promise<{ plates: GeneratedPlate[]; warnings: string[] }> {
@@ -337,7 +329,8 @@ async function runGeneration(
     // Last gate before the provider call — defense in depth behind the job
     // request boundary, which normally refuses first. The message is the
     // canonical builder's, so no second compatibility list can drift here
-    // (DEC-018).
+    // (DEC-018). It stays ahead of reference loading: an incompatible model
+    // is refused before any reference byte is read.
     throw new Error(referenceIncompatibilityError(spec));
   }
 
@@ -347,6 +340,8 @@ async function runGeneration(
     );
   }
 
+  const loaded = await loadVerifiedRefs(refs);
+
   const runs = Array.from({ length: count }, (_, i) => i);
 
   const plates = await Promise.all(
@@ -355,14 +350,14 @@ async function runGeneration(
         const result = await generateText({
           model: spec.id,
           ...(temperature != null ? { temperature } : {}),
-          ...(refs.length
+          ...(loaded.length
             ? {
                 messages: [
                   {
                     role: "user" as const,
                     content: [
                       { type: "text" as const, text: prompt },
-                      ...(await refParts(refs)),
+                      ...refParts(loaded),
                     ],
                   },
                 ],
@@ -387,7 +382,7 @@ async function runGeneration(
       }
 
       const result = await generateImage(
-        buildImageRequestArgs(spec, prompt, await refBytes(refs)),
+        buildImageRequestArgs(spec, prompt, refBytes(loaded)),
       );
       warnings.push(...result.warnings.map((w) => describeWarning(spec.id, w)));
       const image = result.images[0];
@@ -454,31 +449,37 @@ export interface LoadedRef {
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
 /**
- * Load creator references and verify each file's bytes against the identity
- * recorded at request time. The returned bytes are exactly what the model is
- * sent — generation never re-reads a mutable path, so the provider cannot
+ * Load references and verify each file's bytes against the identity recorded
+ * at request time — the one read every workflow's generation gets (CRAFT-1):
+ * the path is resolved exactly once here, and the returned bytes are exactly
+ * what the model is sent for every candidate, so the provider can never
  * receive different content than the Job records (INT: request-to-generation
- * drift is refused, not sent).
+ * drift is refused, not sent). A reference without a recorded identity (the
+ * legacy thumb path) is loaded without verification — nothing was recorded
+ * to verify against.
  */
-export async function loadCreatorRefs(ordered: TypedRefInput[]): Promise<LoadedRef[]> {
+export async function loadVerifiedRefs(refs: TypedRefInput[]): Promise<LoadedRef[]> {
   return Promise.all(
-    ordered.map(async (r): Promise<LoadedRef> => {
+    refs.map(async (r): Promise<LoadedRef> => {
+      // Resolve the path once, at this boundary — every use below (read,
+      // error, drift message) names the same resolved location.
+      const resolved = path.resolve(r.path);
       let bytes: Buffer;
       try {
-        bytes = await readFile(path.resolve(r.path));
+        bytes = await readFile(resolved);
       } catch {
         throw new Error(
-          `Creator reference "${r.path}" (role ${r.role}) is missing — cannot start the generation`,
+          `Reference "${resolved}" (role ${r.role}) is missing — cannot start the generation`,
         );
       }
       if (r.contentHash !== undefined) {
         const actual = sha256(bytes);
         if (actual !== r.contentHash)
           throw new Error(
-            `Creator reference "${r.path}" (role ${r.role}) changed content identity after the request was recorded — sha-256 ${r.contentHash}, actual ${actual}. Record a new job for different references.`,
+            `Reference "${resolved}" (role ${r.role}) changed content identity after the request was recorded — sha-256 ${r.contentHash}, actual ${actual}. Record a new job for different references.`,
           );
       }
-      return { path: r.path, bytes };
+      return { path: resolved, bytes };
     }),
   );
 }
@@ -491,21 +492,21 @@ export async function loadCreatorRefs(ordered: TypedRefInput[]): Promise<LoadedR
  * The prompt asks for a clean, evenly lit figure on a flat background — the
  * best input for the matting pass — and never for transparency: asking for it
  * produced a painted checkerboard (ADR-0006).
- * Reference bytes are verified against the recorded identities and those exact
- * bytes are what the model receives. Isolation is requested in-prompt;
- * adoption verifies true alpha — nothing hinges on the model's compliance.
+ * Reference bytes are hash-verified and loaded once at the shared generation
+ * boundary, and those exact bytes are what every candidate receives.
+ * Isolation is requested in-prompt; adoption verifies true alpha — nothing
+ * hinges on the model's compliance.
  */
 export async function generateCreators(
   opts: GenerateCreatorOptions,
 ): Promise<GenerateResult> {
   const spec = resolveModel(opts.model);
   const ordered = creatorRefOrder(opts.refs);
-  const verified = await loadCreatorRefs(ordered);
   const prompt = buildCreatorPrompt(opts.subject, ordered);
   const { plates, warnings } = await runGeneration(
     spec,
     prompt,
-    verified,
+    ordered,
     opts.count,
     opts.temperature,
   );

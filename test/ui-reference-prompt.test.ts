@@ -38,7 +38,7 @@ mock.module("ai", () => ({
 }));
 
 import { run } from "../src/job-cli.js";
-import { generatePlates } from "../src/generate.js";
+import { generatePlates, generateObjects } from "../src/generate.js";
 import type { MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
@@ -104,9 +104,14 @@ describe("plate jobs role-assign typed references (#56)", () => {
     expect(fp).toContain(subject);
     // AC1: the reference is identified by recorded role — and AC2: the edit
     // role is the source whose macrostructure is kept while thumbnail-scale
-    // detail is dropped (DEC-014, DEC-016).
+    // detail is dropped (DEC-014, DEC-016). US-020's semantics are pinned:
+    // major panels, proportions, key colors, and visual language survive as
+    // a few large high-contrast regions.
     expect(fp).toMatch(/image 1 — edit/);
     expect(fp).toMatch(/macrostructure/i);
+    expect(fp).toMatch(/major panels/i);
+    expect(fp).toMatch(/key colors/i);
+    expect(fp).toMatch(/high-contrast/i);
     expect(fp).toMatch(/simplif/i);
     expect(fp).toMatch(/large/i);
     expect(fp).toMatch(/incidental|small labels|dense text/i);
@@ -191,6 +196,8 @@ describe("object jobs permit one isolated non-text UI panel (#56)", () => {
     expect(fp).toContain(subject);
     expect(fp).toMatch(/image 1 — edit/);
     expect(fp).toMatch(/macrostructure/i);
+    expect(fp).toMatch(/key colors/i);
+    expect(fp).toMatch(/high-contrast/i);
     expect(fp).not.toContain(editPath);
     expect(fp).not.toContain(path.basename(editPath));
     // AC4: one isolated non-text UI panel is permitted object content.
@@ -241,5 +248,44 @@ describe("typed reference semantics below the job boundary", () => {
     // The legacy backdrop/content contract is otherwise unchanged.
     expect(result.fullPrompt).toMatch(/backdrop only/i);
     expect(result.fullPrompt).toMatch(/no ui elements/i);
+  });
+});
+
+describe("reference integrity at the generation boundary (#56 review)", () => {
+  test("a stale content identity is refused before any provider call", async () => {
+    // The request recorded one identity; the bytes on disk answer to another.
+    // Generation must refuse — before any spend — instead of sending drifted
+    // bytes under the recorded identity.
+    const stale = { role: "edit", path: editPath, contentHash: "f".repeat(64) };
+    const before = imageCalls.length;
+    await expect(
+      generatePlates({
+        subject: "simplified ui", model: "gpt-image", zone: "left", refs: [stale], count: 2,
+      }),
+    ).rejects.toThrow(/changed content identity/);
+    await expect(
+      generateObjects({ subject: "simplified ui", model: "gpt-image", refs: [stale], count: 2 }),
+    ).rejects.toThrow(/changed content identity/);
+    expect(imageCalls.length).toBe(before);
+  });
+
+  test("role lookup is own-property-safe: constructor and unknown roles render label-only", async () => {
+    const result = await generatePlates({
+      subject: "a plate",
+      model: "gpt-image",
+      zone: "left",
+      refs: [
+        { role: "constructor", path: editPath, contentHash: sha256(editBytes) },
+        { role: "vibe", path: stylePath, contentHash: sha256(styleBytes) },
+      ],
+      count: 1,
+    });
+    // Label-only fallback: no instruction is claimed for unlisted roles, and
+    // a role named like an inherited property cannot inject its value into
+    // model-facing prose.
+    expect(result.fullPrompt).toMatch(/image 1 — constructor$/m);
+    expect(result.fullPrompt).toMatch(/image 2 — vibe$/m);
+    expect(result.fullPrompt).not.toMatch(/native code/i);
+    expect(result.fullPrompt).not.toMatch(/function Object/i);
   });
 });
