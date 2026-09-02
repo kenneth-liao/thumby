@@ -63,7 +63,7 @@ const esc = (s: string) =>
 // The re-export keeps the renderer the one import surface for existing callers.
 export { connectorGeometry } from "./scene-geometry.js";
 export type { Box } from "./scene-geometry.js";
-import { connectorGeometry, n, ARROW_MARKER, arrowPad } from "./scene-geometry.js";
+import { connectorGeometry, n, ARROW_MARKER } from "./scene-geometry.js";
 import type { Box } from "./scene-geometry.js";
 
 /** Every layer in the scene tree, depth-first — groups yield their children. */
@@ -760,12 +760,12 @@ async function renderResolvedToPng(
     if (opts?.inspect) {
       const spec = [...inspectionLayers(resolved.scene.layers)];
       const measured = await page.evaluate(collectLayerBounds, spec);
-      layers = spec.map((s, i) => ({
-        id: s.id,
-        type: s.type as SceneLayer["type"],
-        visible: s.visible,
-        bounds: measured[i]!,
-      }));
+      layers = spec.map((s, i): RenderedLayer => {
+        const bounds = measured[i]!;
+        return bounds === null
+          ? { id: s.id, type: s.type as SceneLayer["type"], visible: false, bounds: null }
+          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds };
+      });
     }
 
     const png = await page.screenshot({ type: "png" });
@@ -790,19 +790,42 @@ async function renderResolvedToPng(
   });
 }
 
+/** The exact frame-px box of rendered paint. */
+export interface LayerBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /**
- * One resolved Layer as the render pass actually drew it (#59): its stable id
- * and type from the resolved tree, its effective visibility (own or
- * inherited `visible: false`), and the bounds of the exact rendered element
- * in frame px — browser-measured, post-transform. A hidden layer renders
- * nothing, so its bounds are null.
+ * One resolved Layer as the render pass actually drew it (#59) — a
+ * discriminated union, so a hidden Layer carrying bounds (or a visible one
+ * without them) is unrepresentable:
+ *
+ * - `visible: true` carries the exact bounds of the rendered paint in frame
+ *   px, browser-measured: the wrapper element for non-connectors
+ *   (post-transform — nested, scaled, rotated, and mirrored geometry is
+ *   Chromium's own measurement, never a second transform model) and the
+ *   connector's exact painted extent (see `collectLayerBounds`).
+ * - `visible: false` (own or inherited `visible: false`) renders nothing, so
+ *   bounds are absent — null, never a zero-size box.
  */
-export interface RenderedLayer {
+export interface VisibleRenderedLayer {
   id: string;
   type: SceneLayer["type"];
-  visible: boolean;
-  bounds: { x: number; y: number; width: number; height: number } | null;
+  visible: true;
+  bounds: LayerBox;
 }
+
+export interface HiddenRenderedLayer {
+  id: string;
+  type: SceneLayer["type"];
+  visible: false;
+  bounds: null;
+}
+
+export type RenderedLayer = VisibleRenderedLayer | HiddenRenderedLayer;
 
 export interface SceneInspectionResult extends SceneRenderResult {
   /** Every layer in the scene tree, depth-first — the render's own order. */
@@ -812,93 +835,125 @@ export interface SceneInspectionResult extends SceneRenderResult {
 /**
  * The inspection spec: every layer in tree order with its effective
  * visibility. Ids are unique (the load gate rejects duplicates), so the
- * browser can address each element by its stable `data-layer-id`. Connectors
- * with an arrow carry the shared arrow-pad bound (scene-geometry) for the
- * browser-side painted-extent correction.
+ * browser can address each element by its stable `data-layer-id`.
  */
 function* inspectionLayers(
   layers: SceneLayer[],
   visible = true,
-): Generator<{ id: string; type: string; visible: boolean; pad: number }> {
+): Generator<{ id: string; type: string; visible: boolean }> {
   for (const layer of layers) {
     const own = layer.visible ?? LAYER_DEFAULTS.visible;
-    yield {
-      id: layer.id,
-      type: layer.type,
-      visible: visible && own,
-      pad:
-        layer.type === "connector" && layer.arrow
-          ? arrowPad(layer.width ?? LAYER_DEFAULTS.connectorWidth)
-          : 0,
-    };
+    yield { id: layer.id, type: layer.type, visible: visible && own };
     if (layer.type === "group") yield* inspectionLayers(layer.layers, visible && own);
   }
 }
 
-/**
+/*
  * Browser-side bounds probe for the inspection pass (#59). Non-connectors
  * measure their wrapper element — post-transform, so nested, scaled,
  * rotated, and mirrored geometry is Chromium's own measurement, never a
- * second transform model. A connector's wrapper is the full canvas; its
- * painted extent is the rendered SVG path — the svg's direct-child path,
- * never a bare "path" selector, which hits the arrow marker's defs geometry
- * (unrendered → a 0×0 rect at the origin, the dashed-arrowhead trap).
+ * second transform model.
  *
- * Chromium measures that path as its fill-geometry object bbox — observed to
- * omit the stroke and the arrow marker entirely (the right edge lands
- * exactly on the path's end anchor; the height equals the pure fill rise).
- * The painted extent is therefore computed conservatively, with no second
- * transform model: the path's own computed stroke widens the box by ±sw/2,
- * and when an arrow is rendered the shared arrow-pad bound (scene-geometry's
- * arrowPad, the same conservative bound safe-area uses) unions a box around
- * the browser-derived end anchor, so the arrowhead's paint is represented
- * in every orientation.
- * Must stay self-contained — Playwright serializes it into the page.
+ * A connector's wrapper is the full canvas; its bounds are its exact painted
+ * AABB: the connector's own rendered SVG — the same svg/path/marker markup
+ * the browser painted — is cloned (the live DOM is never touched), given
+ * explicit pixel dimensions, and rasterized through an unattached canvas
+ * from a data URI; scanning nonzero alpha yields the pixel AABB of what
+ * actually painted, covering stroke, dash, curve bow, and the auto-oriented
+ * arrow marker with no transform model and no conservative envelope. Only
+ * when nothing painted (degenerate geometry) does it fall back to the path's
+ * geometry box widened by its own computed stroke. The rasterization is
+ * inlined because Playwright serializes only this function into the page —
+ * it must stay self-contained.
  */
-const collectLayerBounds = (
-  spec: { id: string; type: string; visible: boolean; pad: number }[],
-): ({ x: number; y: number; width: number; height: number } | null)[] => {
+const collectLayerBounds = async (
+  spec: { id: string; type: string; visible: boolean }[],
+): Promise<(LayerBox | null)[]> => {
   const els = [...document.querySelectorAll<HTMLElement>(".scene-layer")];
   const round = (v: number) => Number(v.toFixed(4));
-  return spec.map((s) => {
-    const el = els.find((e) => e.dataset.layerId === s.id);
-    if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
-    if (!s.visible) return null;
-    let x: number, y: number, width: number, height: number;
-    if (s.type === "connector") {
-      const path = el.querySelector<SVGGeometryElement>("svg > path");
-      if (!path) throw new Error(`connector "${s.id}" has no rendered path`);
-      const raw = path.getBoundingClientRect();
-      x = raw.x;
-      y = raw.y;
-      width = raw.width;
-      height = raw.height;
-      // Conservative painted extent (no second transform model): widen by
-      // the path's own computed stroke, then — for an arrow — union the
-      // shared arrow-pad bound around the browser-derived end anchor.
-      const sw = parseFloat(getComputedStyle(path).strokeWidth) || 0;
-      x -= sw / 2;
-      y -= sw / 2;
-      width += sw;
-      height += sw;
-      if (s.pad > 0) {
-        const end = path.getPointAtLength(path.getTotalLength());
-        const x2 = Math.max(x + width, end.x + s.pad);
-        const y2 = Math.max(y + height, end.y + s.pad);
-        x = Math.min(x, end.x - s.pad);
-        y = Math.min(y, end.y - s.pad);
-        width = x2 - x;
-        height = y2 - y;
+  const rasterizePaintedAabb = (
+    svg: Element,
+    frame: { x: number; y: number; width: number; height: number },
+  ): Promise<LayerBox | null> =>
+    new Promise((resolve, reject) => {
+      const w = Math.max(1, Math.round(frame.width));
+      const h = Math.max(1, Math.round(frame.height));
+      const clone = svg.cloneNode(true) as SVGSVGElement;
+      clone.setAttribute("width", String(w));
+      clone.setAttribute("height", String(h));
+      clone.removeAttribute("style");
+      const uri =
+        "data:image/svg+xml;charset=utf-8," +
+        encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      const img = new Image();
+      img.onload = () => {
+        const cnv = document.createElement("canvas");
+        cnv.width = w;
+        cnv.height = h;
+        const ctx = cnv.getContext("2d");
+        if (!ctx) return reject(new Error("no 2d context for connector rasterization"));
+        ctx.drawImage(img, 0, 0, w, h);
+        let data: Uint8ClampedArray;
+        try {
+          data = ctx.getImageData(0, 0, w, h).data;
+        } catch (err) {
+          return reject(err as Error);
+        }
+        let minX = w;
+        let minY = h;
+        let maxX = -1;
+        let maxY = -1;
+        for (let y = 0; y < h; y++) {
+          const row = y * w * 4;
+          for (let x = 0; x < w; x++) {
+            if (data[row + x * 4 + 3] > 0) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX < 0) return resolve(null);
+        resolve({ x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 });
+      };
+      img.onerror = () => reject(new Error("connector rasterization failed to decode"));
+      img.src = uri;
+    });
+  return Promise.all(
+    spec.map(async (s) => {
+      const el = els.find((e) => e.dataset.layerId === s.id);
+      if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
+      if (!s.visible) return null;
+      if (s.type === "connector") {
+        const svg = el.querySelector("svg");
+        if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
+        const frame = svg.getBoundingClientRect();
+        const painted = await rasterizePaintedAabb(svg, frame);
+        if (painted)
+          return {
+            x: round(frame.x + painted.x),
+            y: round(frame.y + painted.y),
+            width: round(painted.width),
+            height: round(painted.height),
+          };
+        // Nothing painted (degenerate geometry) — the path's own geometry,
+        // widened by its computed stroke so the extent stays nonzero.
+        const path = el.querySelector<SVGGeometryElement>("svg > path");
+        if (!path) throw new Error(`connector "${s.id}" has no rendered path`);
+        const r = path.getBoundingClientRect();
+        const sw = parseFloat(getComputedStyle(path).strokeWidth) || 0;
+        return {
+          x: round(r.x - sw / 2),
+          y: round(r.y - sw / 2),
+          width: round(r.width + sw),
+          height: round(r.height + sw),
+        };
       }
-    } else {
       const r = el.getBoundingClientRect();
-      x = r.x;
-      y = r.y;
-      width = r.width;
-      height = r.height;
-    }
-    return { x: round(x), y: round(y), width: round(width), height: round(height) };
-  });
+      return { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) };
+    }),
+  );
 };
 
 /**

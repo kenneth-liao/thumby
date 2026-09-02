@@ -166,15 +166,16 @@ export function renderAuthorView(scene: string, layers: RenderedLayer[]): string
     .filter(Boolean)
     .join("\n");
   // Canvas hit targets, one per visible layer, stacked in compositing order —
-  // later layers sit above earlier ones. Positioned at the bounds' center
-  // with a symmetric 14px minimum, so small layers stay clickable; the
-  // displayed highlight stays exact (the separate .box below).
+  // later layers sit above earlier ones. Each carries its stable Layer id
+  // (escaped — text only, never a selector). Positioned at the bounds'
+  // center with a symmetric 14px minimum, so small layers stay clickable;
+  // the displayed highlight stays exact (the separate .box below).
   const hits = layers
     .map((l, i) => {
-      if (!l.bounds) return "";
+      if (!l.visible) return "";
       const b = l.bounds;
       return (
-        `<label class="hit" for="layer-${i}" data-sel="${i}" style="` +
+        `<label class="hit" for="layer-${i}" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}" style="` +
         `left:${pctOf(b.x + b.width / 2, 1280)};top:${pctOf(b.y + b.height / 2, 720)};` +
         `width:max(${pctOf(b.width, 1280)},14px);height:max(${pctOf(b.height, 720)},14px);` +
         `transform:translate(-50%,-50%);z-index:${1 + i}"></label>`
@@ -186,29 +187,31 @@ export function renderAuthorView(scene: string, layers: RenderedLayer[]): string
   // click flowing to the hit targets beneath.
   const boxes = layers
     .map((l, i) => {
-      if (!l.bounds) return "";
+      if (!l.visible) return "";
       const b = l.bounds;
       return (
-        `<div class="box" data-sel="${i}" style="left:${pctOf(b.x, 1280)};top:${pctOf(b.y, 720)};` +
+        `<div class="box" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}" style="left:${pctOf(b.x, 1280)};top:${pctOf(b.y, 720)};` +
         `width:${pctOf(b.width, 1280)};height:${pctOf(b.height, 720)};z-index:${200 + i}"></div>`
       );
     })
     .join("");
   // The listing: every layer exactly once, in render order. Visible rows are
   // labels for the same radios; hidden rows are disabled divs with bounds
-  // absent — visibly hidden, never selectable.
+  // absent — visibly hidden, never selectable. The visible/hidden branch is
+  // the RenderedLayer union's discriminant: a visible row always has bounds,
+  // a hidden row never does.
   const boundsText = (b: { x: number; y: number; width: number; height: number }) =>
     `${b.x},${b.y} · ${b.width}×${b.height}`;
   const rows = layers
-    .map((l, i) =>
-      l.visible
-        ? `<label class="row" for="layer-${i}" data-sel="${i}"><span class="idx">${i}</span>` +
-          `<span class="type">${l.type}</span><span class="name">${escapeHtml(l.id)}</span>` +
-          `<span class="bounds">${l.bounds ? boundsText(l.bounds) : ""}</span></label>`
-        : `<div class="row hidden" data-sel="${i}" aria-disabled="true"><span class="idx">${i}</span>` +
-          `<span class="type">${l.type}</span><span class="name">${escapeHtml(l.id)}</span>` +
-          `<span class="state">hidden</span></div>`,
-    )
+    .map((l, i) => {
+      const head = `<span class="idx">${i}</span><span class="type">${l.type}</span>` +
+        `<span class="name">${escapeHtml(l.id)}</span>`;
+      if (!l.visible)
+        return `<div class="row hidden" data-sel="${i}" aria-disabled="true">${head}` +
+          `<span class="state">hidden</span></div>`;
+      return `<label class="row" for="layer-${i}" data-sel="${i}">${head}` +
+        `<span class="bounds">${boundsText(l.bounds)}</span></label>`;
+    })
     .join("\n");
 
   return `<!doctype html>

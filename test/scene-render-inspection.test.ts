@@ -48,6 +48,7 @@ const layers: SceneLayer[] = [
     crop: { left: 10, top: 20, right: 10, bottom: 20 },
     fit: "cover",
   },
+  { id: "htarget", type: "shape", shape: "rect", color: "#cc8800", position: { x: 620, y: 300 }, size: { width: 180, height: 140 } },
   {
     id: "cluster",
     type: "group",
@@ -59,7 +60,9 @@ const layers: SceneLayer[] = [
       { id: "cluster-label", type: "text", text: "nested", font: "Source Sans 3", position: { x: 20, y: 110 }, size: { width: 260, height: 50 }, fontSize: 28 },
     ],
   },
+  { id: "hline", type: "connector", from: "badge", to: "htarget", arrow: true, width: 4 },
   { id: "line", type: "connector", from: "badge", to: "flip", arrow: true, width: 4 },
+  { id: "cline", type: "connector", from: "flip", to: "cluster", bow: 60, dash: [6, 4], arrow: true, width: 4, color: "#9a34c9" },
   { id: "ghost", type: "shape", shape: "rect", color: "#333333", position: { x: 600, y: 500 }, size: { width: 120, height: 80 }, visible: false },
   {
     id: "veil",
@@ -113,6 +116,56 @@ const nearBox = (
   near(got.x, want.x, tol) && near(got.y, want.y, tol) &&
   near(got.width, want.width, tol) && near(got.height, want.height, tol);
 
+/**
+ * Independent painted-geometry ground truth: rasterize a rendered connector's
+ * own SVG (the exact element in the live inspection page) in this test and
+ * scan nonzero alpha — the browser painter's truth, computed without going
+ * through the implementation under test.
+ */
+const paintedAabb = (id: string) =>
+  page.evaluate(async (id) => {
+    const el = document.querySelector(`.scene-layer[data-layer-id="${id}"]`);
+    if (!el) throw new Error(`no rendered element for ${id}`);
+    const svg = el.querySelector("svg");
+    if (!svg) throw new Error(`no rendered svg for ${id}`);
+    const frame = svg.getBoundingClientRect();
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("width", String(Math.round(frame.width)));
+    clone.setAttribute("height", String(Math.round(frame.height)));
+    clone.removeAttribute("style");
+    const uri =
+      "data:image/svg+xml;charset=utf-8," +
+      encodeURIComponent(new XMLSerializer().serializeToString(clone));
+    const img = new Image();
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = () => rej(new Error("ground-truth rasterization failed to decode"));
+      img.src = uri;
+    });
+    const cnv = document.createElement("canvas");
+    cnv.width = Math.round(frame.width);
+    cnv.height = Math.round(frame.height);
+    const ctx = cnv.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, cnv.width, cnv.height);
+    const d = ctx.getImageData(0, 0, cnv.width, cnv.height).data;
+    let minX = cnv.width, minY = cnv.height, maxX = -1, maxY = -1;
+    for (let y = 0; y < cnv.height; y++)
+      for (let x = 0; x < cnv.width; x++)
+        if (d[(y * cnv.width + x) * 4 + 3] > 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+    if (maxX < 0) return null;
+    return {
+      x: frame.x + minX,
+      y: frame.y + minY,
+      width: maxX - minX + 1,
+      height: maxY - minY + 1,
+    };
+  }, id);
+
 // --- the canonical inspection result ----------------------------------------
 
 describe("renderSceneInspection — canonical renderer inspection (#59)", () => {
@@ -127,8 +180,9 @@ describe("renderSceneInspection — canonical renderer inspection (#59)", () => 
     // Spot-check the interesting order facts: group children stay in place,
     // the connector follows its tree position, hidden layers stay listed.
     expect(got.map((l) => l.id)).toEqual([
-      "plate", "headline", "badge", "tilt", "flip", "portrait",
-      "cluster", "cluster-dot", "cluster-label", "line", "ghost", "veil", "veil-inner",
+      "plate", "headline", "badge", "tilt", "flip", "portrait", "htarget",
+      "cluster", "cluster-dot", "cluster-label", "hline", "line", "cline",
+      "ghost", "veil", "veil-inner",
     ]);
   });
 
@@ -175,24 +229,39 @@ describe("renderSceneInspection — canonical renderer inspection (#59)", () => 
     expect(nearBox(byId.get("cluster-label")!.bounds!, { x: 255, y: 590, width: 390, height: 75 })).toBe(true);
   });
 
-  it("measures a connector by its rendered path, with the arrow's paint represented", async () => {
+  it("measures connectors by their exact painted AABB — stroke, dash, curve, and arrow", async () => {
     const { layers: got } = await inspect();
     const byId = new Map(got.map((l) => [l.id, l]));
-    const b = byId.get("line")!.bounds!;
-    // The path runs from badge's right edge (~340,368) to flip's left edge
-    // (~700,361.6) — never the full-canvas wrapper (0,0,1280,720).
-    expect(near(b.x, 340, 10)).toBe(true);
-    expect(near(b.width, 360, 20)).toBe(true);
-    expect(b.width).toBeLessThan(1280);
-    expect(b.y).toBeGreaterThanOrEqual(300);
-    expect(b.y).toBeLessThanOrEqual(375);
-    // Arrow paint is represented: the bounds reach past the path's known end
-    // anchor (x = 700) and past the stroke's own perpendicular extent (the
-    // 6.43px fill rise + 4px stroke ≈ 10.4) — the arrowhead's ≈±6.7px
-    // perpendicular extent must show up in the measured box.
-    expect(b.x + b.width).toBeGreaterThan(700.5);
-    expect(b.height).toBeGreaterThanOrEqual(13);
-    expect(b.height).toBeLessThanOrEqual(40);
+
+    // Hand-derived painted geometry for the horizontal arrow: the path runs
+    // (340,370)→(620,370) with a 4px butt-capped stroke; the auto-oriented
+    // arrowhead scales by markerWidth·sw/viewBox = 4·4/12 = 4/3, reaching
+    // (11−10)·4/3 ≈ 1.33px past the end anchor and ±(6−1)·4/3 ≈ ±6.67px
+    // perpendicular — about 281×13px of actual paint. The conservative
+    // stroke/arrowPad envelope reported 294×24 — visibly more than paints.
+    const h = byId.get("hline")!.bounds!;
+    expect(near(h.x, 340, 1.2)).toBe(true);
+    expect(near(h.y, 363.33, 1.5)).toBe(true);
+    expect(near(h.width, 281.33, 1.5)).toBe(true);
+    expect(near(h.height, 13.33, 1.5)).toBe(true);
+
+    // Every connector's reported bounds equal the nonzero-alpha pixel AABB
+    // of its own rendered SVG — rasterized here, independently of the
+    // implementation — for the straight diagonal (line), the horizontal
+    // arrow (hline), and the curved, dashed connector (cline).
+    for (const id of ["hline", "line", "cline"]) {
+      const reported = byId.get(id)!.bounds!;
+      const painted = await paintedAabb(id);
+      expect(painted).not.toBeNull();
+      expect(nearBox(reported, painted!, 1)).toBe(true);
+    }
+
+    // Never the canvas-sized wrapper (0,0,1280,720), and the curved
+    // connector's bounds include the bow's bulge beyond its chord's own
+    // stroke extent (|Δy| = 58.8 + 4px stroke).
+    const c = byId.get("cline")!.bounds!;
+    expect(c.width).toBeLessThan(1280);
+    expect(c.height).toBeGreaterThan(62.8);
   });
 
   it("is the same render pass as the PNG: byte-equal to an ordinary renderScene", async () => {
