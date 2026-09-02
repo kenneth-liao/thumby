@@ -46,7 +46,12 @@ function buildPrompt(subject: string, zone: TextZone, subjectless = false): stri
         ]
       : []),
     "Style: high contrast, saturated, punchy lighting, strong focal subject, clean readable silhouette at small sizes.",
-    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks anywhere in the image.",
+    // The UI ban belongs to the legacy cutout backdrop contract (INT-1): a UI
+    // element in the backdrop fights the local cutout like any other subject
+    // would. Flexible Plate Jobs (ADR-0011) may request UI freely.
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks" +
+      (subjectless ? ", and no UI elements" : "") +
+      " anywhere in the image.",
   ].join("\n");
 }
 
