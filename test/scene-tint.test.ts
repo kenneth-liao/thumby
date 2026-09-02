@@ -3,15 +3,15 @@
  * painted through the resolved Asset's alpha — tint × alpha over the
  * backdrop, transparent pixels preserved, source bytes untouched. The tint
  * is a render-time Image-layer property with the same authored semantics for
- * raster and vector Assets, patchable as a whole field by Variants, and
- * mutually exclusive with the masked `adjust` (one content-color treatment
- * per layer — rejected at the schema boundary, never silently composed).
+ * raster and vector Assets, patchable as a whole field by Variants; the
+ * masked `adjust` composes over the tinted result (the named-mask contract
+ * is untouched).
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { contentHash, EMPTY_LIBRARY } from "../src/assets.js";
+import { contentHash, EMPTY_LIBRARY, scanLibrary, type Library } from "../src/assets.js";
 import { loadScene, SCENE_SCHEMA, type Scene, type SceneLayer, type LoadResult } from "../src/scene.js";
 import { resolveVariant } from "../src/variants.js";
 import { renderScene } from "../src/scene-render.js";
@@ -50,6 +50,9 @@ interface Fix {
   root: string;
   projectRoot: string;
   rasterBytes: Buffer;
+  libRoot: string;
+  lib: Library;
+  maskHash: string;
 }
 
 let fix: Fix;
@@ -60,7 +63,41 @@ beforeAll(async () => {
   await mkdir(projectRoot, { recursive: true });
   await writeFile(path.join(projectRoot, "tint-fixture.png"), rasterPng);
   await writeFile(path.join(projectRoot, "tint-fixture.svg"), vectorSvg);
-  fix = { root, projectRoot, rasterBytes: rasterPng };
+  // A library Creator Asset carrying one named mask (the named-mask contract
+  // is untouched by tint): the cutout shares the raster fixture's bytes, the
+  // mask selects source 2..5 × 2..5.
+  const isShirt = (x: number, y: number) => x >= 2 && x <= 5 && y >= 2 && y <= 5;
+  const shirtMaskPng = encodePng(W, H, (x, y) =>
+    isShirt(x, y) ? [255, 255, 255, 255] : [0, 0, 0, 0],
+  );
+  const libRoot = path.join(root, "library");
+  await mkdir(path.join(libRoot, "cutouts", "ken"), { recursive: true });
+  await mkdir(path.join(libRoot, "masks", "ken-shirt"), { recursive: true });
+  await writeFile(path.join(libRoot, "cutouts", "ken", "cutout.png"), rasterPng);
+  await writeFile(
+    path.join(libRoot, "cutouts", "ken", "meta.json"),
+    JSON.stringify({
+      kind: "cutout",
+      id: "ken",
+      name: "Ken",
+      tags: [],
+      approval: "approved",
+      masks: { shirt: "ken-shirt" },
+    }),
+  );
+  await writeFile(path.join(libRoot, "masks", "ken-shirt", "mask.png"), shirtMaskPng);
+  await writeFile(
+    path.join(libRoot, "masks", "ken-shirt", "meta.json"),
+    JSON.stringify({ kind: "mask", id: "ken-shirt", name: "Ken shirt", tags: [] }),
+  );
+  fix = {
+    root,
+    projectRoot,
+    rasterBytes: rasterPng,
+    libRoot,
+    lib: await scanLibrary(libRoot),
+    maskHash: contentHash(new Uint8Array(shirtMaskPng)),
+  };
 });
 
 afterAll(async () => {
@@ -82,14 +119,20 @@ const imageLayer = (over: Record<string, unknown> = {}): SceneLayer =>
 const sceneOf = (layers: SceneLayer[]): Scene =>
   ({ schemaVersion: 1, canvas: { width: 1280, height: 720 }, layers }) as Scene;
 
-async function load(raw: unknown, projectRoot = fix.projectRoot): Promise<Extract<LoadResult, { ok: true }>> {
-  const result = await loadScene(projectRoot, async () => EMPTY_LIBRARY, raw);
+async function load(
+  raw: unknown,
+  library: () => Promise<Library> = async () => EMPTY_LIBRARY,
+): Promise<Extract<LoadResult, { ok: true }>> {
+  const result = await loadScene(fix.projectRoot, library, raw);
   expect(result.ok).toBe(true);
   return result as Extract<LoadResult, { ok: true }>;
 }
 
-async function loadErrors(raw: unknown): Promise<{ path: string; message: string }[]> {
-  const result = await loadScene(fix.projectRoot, async () => EMPTY_LIBRARY, raw);
+async function loadErrors(
+  raw: unknown,
+  library: () => Promise<Library> = async () => EMPTY_LIBRARY,
+): Promise<{ path: string; message: string }[]> {
+  const result = await loadScene(fix.projectRoot, library, raw);
   expect(result.ok).toBe(false);
   return (result as { ok: false; errors: { path: string; message: string }[] }).errors;
 }
@@ -152,26 +195,27 @@ describe("schema — tint on image layers", () => {
     expect(errors.some((e) => e.path === "layers[0].tint" && /not a valid .* property/.test(e.message))).toBe(true);
   });
 
-  it("rejects tint together with adjust — one content-color treatment per layer", async () => {
-    const errors = await loadErrors(
-      sceneOf([imageLayer({ tint: TINT, adjust: { mask: "shirt", color: "#ff0000" } })]),
+  it("accepts tint together with adjust — tint paints, adjust blends over it", async () => {
+    // DEC-021 leaves the named-mask contract untouched: a Creator Asset with
+    // named masks can carry a tint, and the adjust composes over it.
+    await load(
+      sceneOf([imageLayer({ asset: "ken", tint: TINT, adjust: { mask: "shirt", color: "#ff0000" } })]),
+      async () => fix.lib,
     );
-    expect(errors.some((e) => e.path === "layers[0].tint" && /mutually exclusive/.test(e.message))).toBe(true);
+  });
+
+  it("accepts a Variant patching adjust onto a tinted layer", async () => {
+    const raw = sceneOf([imageLayer({ asset: "ken", tint: TINT })]);
+    raw.variants = { masked: { changes: [{ layer: "logo", set: { adjust: { mask: "shirt", color: "#ff0000" } } }] } };
+    const applied = resolveVariant(raw, "masked");
+    expect(applied.ok).toBe(true);
+    await load((applied as { ok: true; raw: unknown }).raw, async () => fix.lib);
   });
 
   it("accepts tint as a variant patch value (whole-field set)", async () => {
     const raw = sceneOf([imageLayer()]);
     raw.variants = { red: { changes: [{ layer: "logo", set: { tint: "#ff0000" } }] } };
     await load(raw);
-  });
-
-  it("rejects a variant that patches adjust onto a tinted layer (merged-gate contract)", async () => {
-    const raw = sceneOf([imageLayer({ tint: TINT })]);
-    raw.variants = { masked: { changes: [{ layer: "logo", set: { adjust: { mask: "shirt", color: "#ff0000" } } }] } };
-    const applied = resolveVariant(raw, "masked");
-    expect(applied.ok).toBe(true);
-    const errors = await loadErrors((applied as { ok: true; raw: unknown }).raw);
-    expect(errors.some((e) => e.path === "layers[0].tint" && /mutually exclusive/.test(e.message))).toBe(true);
   });
 });
 
@@ -367,6 +411,36 @@ describe("tinted render — the authored color through the Asset's alpha", () =>
       for (let x = 0; x < 4; x++) {
         expect(r.px(x + 100, y + 100).slice(0, 3)).toEqual([255, 0, 0]);
         expect(bl.px(x + 100, y + 100).slice(0, 3)).toEqual([...tintRgb]);
+      }
+  }, 30000);
+
+  it("composes with the masked adjust: tint paints, adjust recolors its mask", async () => {
+    // DEC-021 leaves the named-mask contract untouched: the tint repaints the
+    // whole silhouette, then the adjust blends over the tinted result inside
+    // its mask (hue/saturation from the adjust color, luminance from the
+    // tint); outside the mask the tinted pixels are byte-identical.
+    const tintOnly = (await load(sceneOf([imageLayer({ asset: "ken", tint: TINT })]), async () => fix.lib)).resolved;
+    const both = (
+      await load(
+        sceneOf([imageLayer({ asset: "ken", tint: TINT, adjust: { mask: "shirt", color: "#ff0000" } })]),
+        async () => fix.lib,
+      )
+    ).resolved;
+    const a = decodePng((await renderScene(tintOnly, { page })).png);
+    const b = decodePng((await renderScene(both, { page })).png);
+    // Exactly the 16 masked pixels change (source 2..5 × 2..5 at 1:1).
+    expect(diffCount(a, b)).toBe(16);
+    for (let y = 0; y < 720; y++)
+      for (let x = 0; x < 1280; x++) {
+        const inMask = x >= 102 && x < 106 && y >= 102 && y < 106;
+        if (!inMask) expect(b.px(x, y)).toEqual(a.px(x, y));
+      }
+    // Inside the mask: red hue over the tinted silhouette.
+    for (let y = 102; y < 106; y++)
+      for (let x = 102; x < 106; x++) {
+        const [r, g, bl] = b.px(x, y);
+        expect(r).toBeGreaterThan(g);
+        expect(r).toBeGreaterThan(bl);
       }
   }, 30000);
 });

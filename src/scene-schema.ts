@@ -319,11 +319,6 @@ export const SCENE_SCHEMA = {
       type: "object",
       required: ["id", "type", "position", "size", "asset"],
       additionalProperties: false,
-      // One content-color treatment per layer: the uniform tint and the
-      // masked adjust are mutually exclusive — the contract lives here so a
-      // schema-only consumer rejects exactly what thumby rejects; src/scene.ts
-      // maps the violation to one friendly message.
-      allOf: [{ not: { allOf: [{ required: ["tint"] }, { required: ["adjust"] }] } }],
       properties: {
         id: { $ref: "#/definitions/id" },
         type: { const: "image" },
@@ -351,9 +346,9 @@ export const SCENE_SCHEMA = {
             "layer's resolved Asset alpha — every pixel the image covers with " +
             "alpha renders exactly this color, transparent pixels stay " +
             "untouched, and the source Asset's bytes are never modified. Same " +
-            "semantics for raster and vector Assets. Mutually exclusive with " +
-            "adjust (one content-color treatment per layer). Variants patch " +
-            "it as one whole field.",
+            "semantics for raster and vector Assets. The masked adjust " +
+            "composes over the tinted result (the named-mask contract is " +
+            "untouched). Variants patch it as one whole field.",
         },
         effects: { $ref: "#/definitions/effects" },
       },

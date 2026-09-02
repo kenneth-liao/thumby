@@ -31,12 +31,14 @@ resolved Asset alpha:
   colors; `effects` then grade the result (one filter chain: blur →
   colorAdjust → glow → shadow); layer `opacity` composites the finished
   layer. The asset's own colors never reappear downstream of the tint.
-- **One content-color treatment per layer.** `tint` and `adjust` are
-  mutually exclusive at the schema boundary (`layers[i].tint`, "mutually
-  exclusive" — one friendly-message home in src/scene.ts), like the text and
-  shape color-vs-fill contracts. A Variant patch that merges the two fails
-  the merged-document gate: the combination is rejected, never silently
-  composed.
+- **The named-mask contract is untouched.** The masked `adjust` (ADR-0007)
+  composes over the tinted result: the tint div paints first and the adjust
+  overlay blends on top of it (`mix-blend-mode: color` — hue and saturation
+  from the adjust color, luminance from the tint inside the mask; outside
+  the mask the tint shows byte-identically). DEC-021 excludes changes to
+  named semantic masks, so tint adds no rule to them — a Creator Asset with
+  named masks can carry a tint, and the composition is pinned by a focused
+  pixel regression.
 - **The source Asset is never rewritten** (TEST-015, ADR-0002): no pipeline
   stage produces a "tinted" copy; two differently tinted Layers share one
   Asset identity.
@@ -47,11 +49,12 @@ The pixel contract is "the authored color wherever the image has alpha" —
 exactly what a mask built from the asset's own alpha gives, with the Asset
 itself as the single source of the silhouette. A bake-time recolor or a
 second Asset per color would fork identity for what is one render parameter
-(the ADR-0002/ADR-0007 reasoning, one step further). Rejecting `tint` +
-`adjust` keeps one content-color treatment per layer: both repaint the same
-silhouette, so their composition would be a degenerate flat-over-flat
-result, not a meaningful contract — and fail-fast at the gate beats a
-deterministic-but-incoherent pixel soup.
+(the ADR-0002/ADR-0007 reasoning, one step further). The composition order
+is the markup's paint order — the tint replaces the content's colors and
+the adjustment blends on top — so tint cannot change what `adjust` means;
+an earlier draft rejected the combination at the schema boundary and was
+reversed in review (SPEC-1) because it changed the named-mask contract's
+surface, which the spec excluded.
 
 ## Rollback
 

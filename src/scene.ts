@@ -67,8 +67,9 @@ export interface ImageLayer extends BaseLayer {
   adjust?: { mask: string; color: string };
   /**
    * Uniform tint (DEC-021): one authored color painted through the resolved
-   * Asset's alpha — render-time, source bytes never modified. Mutually
-   * exclusive with `adjust` (one content-color treatment per layer).
+   * Asset's alpha — render-time, source bytes never modified. The masked
+   * `adjust` composes over the tinted result (the named-mask contract is
+   * untouched).
    */
   tint?: string;
   /** Editable visual effects applied to the image's rendered alpha. */
@@ -332,25 +333,6 @@ function shapeContractErrors(layer: ShapeLayer): SceneError[] {
   return [];
 }
 
-/**
- * The image content-color contract — at most one of tint/adjust — with its
- * friendly message, mirroring the imageLayer `allOf` block the way
- * textContractErrors and shapeContractErrors mirror theirs. Paths are
- * layer-relative.
- */
-function imageContractErrors(layer: ImageLayer): SceneError[] {
-  if (layer.tint !== undefined && layer.adjust !== undefined)
-    return [
-      {
-        path: "tint",
-        message:
-          `"tint" and "adjust" are mutually exclusive — one content-color ` +
-          `treatment per image layer`,
-      },
-    ];
-  return [];
-}
-
 /** `jsonPointerToPath` output relative to a layer, prefixed with `layers[i]`. */
 const layerPath = (at: string, sub: string) => `${at}.${jsonPointerToPath(sub)}`;
 
@@ -449,9 +431,7 @@ function expandBranch(errors: AjvError[], root: unknown, at: string): SceneError
         ? textContractErrors(root as unknown as TextLayer)
         : type === "shape"
           ? shapeContractErrors(root as unknown as ShapeLayer)
-          : type === "image"
-            ? imageContractErrors(root as unknown as ImageLayer)
-            : [];
+          : [];
     out.push(...contract.map((e) => ({ ...e, path: at === "" ? e.path : `${at}.${e.path}` })));
   }
   return out;

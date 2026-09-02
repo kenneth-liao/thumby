@@ -584,11 +584,11 @@ the tint is a render-time composition, offline and deterministic.
 the silhouette exactly as they shape the raw image, layer `opacity`
 composites the tinted result, and `effects` grade it (the one filter chain
 applies after the tint paints the content — the asset's own colors never
-reappear). It is mutually exclusive with the masked `adjust` — one
-content-color treatment per layer; combining the two fails at `scene
-validate` with a `layers[i].tint` error before any render. For a
-shading-preserving recolor of one masked region (a shirt that keeps its
-folds), use `adjust` instead.
+reappear). The masked `adjust` composes over the tinted result: inside its
+named mask the pixels take the adjust color's hue and saturation with the
+tint's luminance; outside the mask the tint shows byte-identical. For a
+shading-preserving recolor of one masked region on an untinted layer,
+`adjust` alone keeps the asset's own shading.
 
 Variants patch `tint` as one whole field, so differently tinted renders come
 from one untouched Asset:
