@@ -131,9 +131,11 @@ function securityHeaders(extra: Record<string, string> = {}): Record<string, str
  * layers get a generated-index radio (one script-free radio group is the
  * single selection state), an exact hit/highlight box over the render, and a
  * selectable listing row; hidden layers appear once as disabled,
- * non-selectable rows with bounds absent and no canvas target. Selectors use
- * only the generated tree index — a raw layer id never enters an attribute —
- * and ids render as escaped text.
+ * non-selectable rows with bounds absent and no canvas target. Raw layer ids
+ * never enter selectors or generated control attributes (id, for, data-sel —
+ * generated tree indices only); escaped ids appear solely as inert
+ * data-layer-id association attributes on the hit/highlight boxes and as
+ * escaped listing text.
  */
 export function renderAuthorView(scene: string, layers: RenderedLayer[]): string {
   const steps = Array.from({ length: 11 }, (_, i) => i * 10);
