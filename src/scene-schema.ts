@@ -339,6 +339,17 @@ export const SCENE_SCHEMA = {
         },
         crop: { $ref: "#/definitions/crop" },
         adjust: { $ref: "#/definitions/adjust" },
+        tint: {
+          $ref: "#/definitions/color",
+          description:
+            "Uniform tint (DEC-021): one authored color painted through this " +
+            "layer's resolved Asset alpha — every pixel the image covers with " +
+            "alpha renders exactly this color, transparent pixels stay " +
+            "untouched, and the source Asset's bytes are never modified. Same " +
+            "semantics for raster and vector Assets. The masked adjust " +
+            "composes over the tinted result (the named-mask contract is " +
+            "untouched). Variants patch it as one whole field.",
+        },
         effects: { $ref: "#/definitions/effects" },
       },
     },

@@ -65,6 +65,13 @@ export interface ImageLayer extends BaseLayer {
   fit?: "cover" | "contain" | "fill" | "none";
   /** Deterministic local colorization through a named mask (REQ-019). */
   adjust?: { mask: string; color: string };
+  /**
+   * Uniform tint (DEC-021): one authored color painted through the resolved
+   * Asset's alpha — render-time, source bytes never modified. The masked
+   * `adjust` composes over the tinted result (the named-mask contract is
+   * untouched).
+   */
+  tint?: string;
   /** Editable visual effects applied to the image's rendered alpha. */
   effects?: Effects;
   crop?: { left: number; top: number; right: number; bottom: number };

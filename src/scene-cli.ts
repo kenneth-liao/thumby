@@ -254,6 +254,7 @@ function summarizeLayer(
     summary.asset = layer.asset;
     summary.fit = layer.fit ?? LAYER_DEFAULTS.fit;
     if (layer.adjust !== undefined) summary.adjust = layer.adjust;
+    if (layer.tint !== undefined) summary.tint = layer.tint;
     if (layer.crop !== undefined) summary.crop = layer.crop;
     // Fail fast like the old `.get(id)!`: a validated image layer's asset is
     // always resolved, so a miss here is a contract bug, not an empty field.

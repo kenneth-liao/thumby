@@ -164,7 +164,9 @@ function imageMarkup(
   const fit = layer.fit ?? LAYER_DEFAULTS.fit;
   if (!layer.crop) {
     return (
-      `<img src="${uri}" style="width:100%;height:100%;object-fit:${fit};display:block;">` +
+      (layer.tint
+        ? tintMarkup(layer, uri, maskSizeFor(fit))
+        : `<img src="${uri}" style="width:100%;height:100%;object-fit:${fit};display:block;">`) +
       adjustOverlayMarkup(layer, maskUri, maskSizeFor(fit))
     );
   }
@@ -178,7 +180,9 @@ function imageMarkup(
   const { window: win, image: img } = cropFitGeometry(layer.size, layer.crop, fit, natural);
   return (
     `<div style="position:absolute;left:${win.x}px;top:${win.y}px;width:${win.width}px;height:${win.height}px;overflow:hidden;">` +
-    `<img src="${uri}" style="position:absolute;left:${img.x}px;top:${img.y}px;width:${img.width}px;height:${img.height}px;display:block;">` +
+    (layer.tint
+      ? tintMarkup(layer, uri, "100% 100%", { x: img.x, y: img.y, width: img.width, height: img.height })
+      : `<img src="${uri}" style="position:absolute;left:${img.x}px;top:${img.y}px;width:${img.width}px;height:${img.height}px;display:block;">`) +
     adjustOverlayMarkup(layer, maskUri, "100% 100%", { x: img.x, y: img.y, width: img.width, height: img.height }) +
     `</div>`
   );
@@ -191,6 +195,43 @@ function imageMarkup(
  */
 function maskSizeFor(fit: "cover" | "contain" | "fill" | "none"): string {
   return fit === "fill" ? "100% 100%" : fit === "none" ? "auto" : fit;
+}
+
+/** One mask-* declaration, standard then -webkit- — Chromium supports both, and
+ *  the code then says what the schema and README say (`mask-image`). */
+function maskCss(prop: string, value: string): string {
+  return `${prop}:${value};-webkit-${prop}:${value};`;
+}
+
+/**
+ * The uniform tint (DEC-021): the layer's resolved Asset painted in one
+ * authored color. The Asset's own bytes double as the alpha mask, so every
+ * pixel the image covers with alpha renders exactly `tint` and every
+ * transparent pixel stays untouched — full color replacement, not the hue
+ * blend the masked adjustment performs. It reuses ADR-0007's mask machinery
+ * (mask-image + mask-size mirroring object-fit) with the Asset itself as the
+ * mask, so raster and vector Assets share one code path and one semantics.
+ * The `box` form is for cropped layers: the overlay takes the img's exact
+ * geometry (mask-size 100% 100%, since the mask IS the asset,
+ * pixel-for-pixel).
+ */
+function tintMarkup(
+  layer: ImageLayer,
+  uri: string,
+  maskSize: string,
+  box?: { x: number; y: number; width: number; height: number },
+): string {
+  const pos = box
+    ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
+    : `left:0;top:0;width:100%;height:100%;`;
+  return (
+    `<div style="position:absolute;${pos}background:${layer.tint};` +
+    maskCss("mask-image", `url('${uri}')`) +
+    maskCss("mask-size", maskSize) +
+    maskCss("mask-position", "center") +
+    maskCss("mask-repeat", "no-repeat") +
+    `"></div>`
+  );
 }
 
 /**
@@ -217,16 +258,13 @@ function adjustOverlayMarkup(
   const pos = box
     ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
     : `left:0;top:0;width:100%;height:100%;`;
-  // Standard mask-* first, -webkit- alongside — Chromium supports both, and
-  // the code then says what the schema and README say (`mask-image`).
-  const mask = (prop: string, value: string) =>
-    `${prop}:${value};-webkit-${prop}:${value};`;
+  // Standard mask-* first, -webkit- alongside — see maskCss.
   return (
     `<div style="position:absolute;${pos}background:${layer.adjust.color};` +
-    mask("mask-image", `url('${maskUri}')`) +
-    mask("mask-size", maskSize) +
-    mask("mask-position", "center") +
-    mask("mask-repeat", "no-repeat") +
+    maskCss("mask-image", `url('${maskUri}')`) +
+    maskCss("mask-size", maskSize) +
+    maskCss("mask-position", "center") +
+    maskCss("mask-repeat", "no-repeat") +
     `mix-blend-mode:color;"></div>`
   );
 }

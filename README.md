@@ -563,6 +563,48 @@ its bounding box:
 A worked grouped component lives at
 `test/fixtures/shape-group/logo-card.json` — render it and inspect the PNG.
 
+### Uniform tint — one color through an Image Asset's alpha
+
+An Image layer can paint one authored color through its resolved Asset's
+alpha with `tint` (US-034, DEC-021):
+
+```json
+{ "id": "logo", "type": "image", "asset": "./logo.svg",
+  "tint": "#38bdf8" }
+```
+
+Every pixel the asset covers with alpha renders **exactly** the tint — a
+flat, uniform recolor (a monochrome logo or icon becomes one solid color);
+every transparent pixel is byte-identical to the untinted render; and the
+source Asset's bytes are never modified, so two differently tinted Layers
+can share one Asset. Raster and vector Assets share the same semantics —
+the tint is a render-time composition, offline and deterministic.
+
+`tint` composes with the rest of the image contract: crop and `fit` select
+the silhouette exactly as they shape the raw image, layer `opacity`
+composites the tinted result, and `effects` grade it (the one filter chain
+applies after the tint paints the content — the asset's own colors never
+reappear). The masked `adjust` composes over the tinted result: inside its
+named mask the pixels take the adjust color's hue and saturation with the
+tint's luminance; outside the mask the tint shows byte-identical. For a
+shading-preserving recolor of one masked region on an untinted layer,
+`adjust` alone keeps the asset's own shading.
+
+Variants patch `tint` as one whole field, so differently tinted renders come
+from one untouched Asset:
+
+```json
+{ "variants": {
+  "sky": { "changes": [{ "layer": "logo", "set": { "tint": "#38bdf8" } }] } } }
+```
+
+The decision and rationale — full color replacement through the asset's own
+alpha, a fixed composition order that leaves the named-mask contract
+untouched, no byte mutation — live in
+`docs/adr/0012-uniform-tint-paints-through-asset-alpha.md`. Rollback notes:
+`tint` is an optional image-layer property — a Scene using it fails to load
+on older binaries with an unknown-property error, before any render.
+
 ### Named masks — local colorization
 
 A Creator Asset can reference **named semantic masks** — PNGs whose alpha

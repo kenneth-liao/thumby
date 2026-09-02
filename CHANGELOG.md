@@ -4,15 +4,18 @@
 
 ### Added
 
+- Uniform Image-layer tint (US-034–US-035, #55, ADR-0012): `tint` paints one authored color through the resolved Asset's alpha — same semantics for raster and vector Assets — with transparent pixels byte-identical to the untinted render, source bytes and Asset identity untouched (two tinted Layers share one Asset), and fixed composition with crop/fit/opacity/effects; the masked `adjust` composes over the tinted result, and `scene inspect` surfaces it
 - `scene reference import <scene> <file>` (US-001–US-004, #54): normalize a local PNG, JPEG, or WebP image to the exact 1280×720 PNG profile, store the copy inside the Scene bundle, and associate it atomically — `--source` records provenance as `reference.source`
 - Non-16:9 input is refused before anything is written (an unstated subjective crop or a distortion is never chosen); failed imports leave the previous Scene and its associated files untouched
 
 ### Fixed
 
+- Tint composes with the masked `adjust` instead of being restricted as mutually exclusive (#67, SPEC-1): the named-mask contract is unchanged — tint paints the content, `adjust` blends over the tinted result inside its mask; the 0.29.1 schema restriction is removed
 - Reference Thumbnail import is race-safe and fail-closed: per-Scene locking with bounded contention (no automatic stale-lock stealing — operator cleanup), token-gated release that only ever removes its own lock, owned rollback covering everything after reservation including partial writes, shared by every replacing Scene writer (#54, #66)
 
 ### Changed
 
+- The mask-CSS declarations for the masked `adjust` and `tint` overlays build from one shared `maskCss` helper (#67) — markup bytes unchanged
 - Model selection for typed-Reference Jobs reads one registry capability source (#53, #65): gpt-image is qualified reference-capable; an explicitly incompatible selection (registry key or raw gateway id) is refused before any spend and lists every qualified choice; recorded raw gateway ids that name a registered model rerun qualified; a reference run on a text-only rate records its run cost as unknown with a basis warning
 
 - The image-kind Generation Job request shape has one home: `buildImageRequestArgs` in `src/generate.ts`, used by both production generation and the TEST-012 qualification harness (#52, #64). The harness now takes only image-kind models, publishes evidence through a single redacting and field-whitelisting serializer, roots its artifacts at the repo's gitignored `out/`, bounds every billing lookup with partial evidence persisted once the paid call settles, and records only per-generation billing as an exact per-call cost
