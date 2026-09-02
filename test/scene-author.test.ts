@@ -35,10 +35,13 @@ const execFileP = promisify(execFile);
 const ROOT = path.resolve(import.meta.dir, "..");
 const CLI = path.join(ROOT, "src/scene-cli.ts");
 
-/** The session CSP, asserted byte-exact — the contract the view relies on. */
+/** The session CSP, asserted byte-exact — the contract the view relies on.
+ *  #60: the one same-origin script (app.js), same-origin movement fetches,
+ *  and data-URI preview images are the only relaxations from the script-free
+ *  #58 posture; every other directive stays 'none'. */
 const CSP =
-  "default-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'; " +
-  "img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+  "default-src 'none'; script-src 'self'; connect-src 'self'; object-src 'none'; " +
+  "img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 const CAPABILITY = /^[0-9a-f]{64}$/;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -484,11 +487,15 @@ describe("scene author — live session", () => {
         expect(res.body.length).toBe(0);
       }
 
-      // Non-GET on a valid route → 405, empty.
+      // Non-GET on a render/reference route → 405, empty; non-POST on the
+      // movement route → 405, empty.
       for (const [method, reqPath] of [
         ["POST", `/${token}/view`],
         ["PUT", `/${token}/render.png`],
         ["DELETE", `/${token}/reference.png`],
+        ["GET", `/${token}/move`],
+        ["PUT", `/${token}/move`],
+        ["DELETE", `/${token}/move`],
       ] as const) {
         const res = await rawRequest(port, reqPath, { method });
         expect(res.status).toBe(405);
@@ -554,7 +561,7 @@ describe("scene author — live session", () => {
   );
 
   test(
-    "the view is script-free and its overlay adjusts with pure CSS; every request stays on the session origin",
+    "the view ships exactly one same-origin script and its overlay adjusts with pure CSS; every request stays on the session origin",
     async () => {
       const browser = await getBrowser();
       const ctx = await browser.newContext({
@@ -571,8 +578,10 @@ describe("scene author — live session", () => {
       const page: Page = await ctx.newPage();
       try {
         await page.goto(started.url);
-        // Script-free by construction — and the CSP would have blocked it anyway.
-        expect(await page.locator("script").count()).toBe(0);
+        // Exactly one script — the session's own static app.js, same-origin
+        // (the CSP's script-src 'self' would block anything else).
+        expect(await page.locator("script").count()).toBe(1);
+        expect(await page.locator("script").getAttribute("src")).toBe("app.js");
 
         // Side by side is a true horizontal row at this viewport: the two
         // figures share one vertical position and sit at distinct horizontal
@@ -712,7 +721,7 @@ describe("scene author — live session", () => {
         expect(servedHtml).not.toContain('onerror');
         const viewHtml = await page.content();
         expect(viewHtml).not.toContain("<svg onload");
-        expect(await page.locator("script").count()).toBe(0);
+        expect(await page.locator("script").count()).toBe(1);
         expect(await page.locator('.listing .row[data-sel="3"] .name').textContent()).toBe(SNEAKY_ID);
 
         // Selection starts empty.
@@ -886,6 +895,1099 @@ describe("scene author — live session", () => {
     }
     if (fix) await rm(fix.root, { recursive: true, force: true });
   });
+});
+
+// --- moving Layers with unsaved live preview (#60) -------------------------
+
+describe("scene author — moving Layers with unsaved live preview (#60)", () => {
+  /**
+   * A movement-focused Scene: a top-level shape, a scaled+mirrored+rotated
+   * Group with nested children (one with its own rotation, one nested Group
+   * deeper), a hidden shape, and a Connector. Tree order (the view's index
+   * space): bg, chip, card, card-plate, card-tilt, card-inner, dot, hush, link.
+   */
+  const movementScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
+    ...scene,
+    layers: [
+      { id: "bg", type: "image", asset: "./bg.svg", position: { x: 0, y: 0 }, size: { width: 1280, height: 720 } },
+      { id: "chip", type: "shape", shape: "rect", color: "#22cc88", position: { x: 900, y: 120 }, size: { width: 180, height: 110 } },
+      {
+        id: "card",
+        type: "group",
+        position: { x: 180, y: 140 },
+        size: { width: 360, height: 260 },
+        scale: 2,
+        mirror: true,
+        rotation: 30,
+        layers: [
+          { id: "card-plate", type: "image", asset: "./photo.svg", position: { x: 16, y: 16 }, size: { width: 140, height: 100 } },
+          { id: "card-tilt", type: "shape", shape: "rect", color: "#dd4477", position: { x: 210, y: 170 }, size: { width: 90, height: 60 }, rotation: 17 },
+          {
+            id: "card-inner",
+            type: "group",
+            position: { x: 40, y: 190 },
+            size: { width: 120, height: 60 },
+            scale: 1.5,
+            layers: [
+              { id: "dot", type: "shape", shape: "ellipse", color: "#ffcc00", position: { x: 10, y: 10 }, size: { width: 40, height: 30 } },
+            ],
+          },
+        ],
+      },
+      { id: "hush", type: "shape", shape: "rect", color: "#555577", position: { x: 640, y: 600 }, size: { width: 100, height: 60 }, visible: false },
+      { id: "link", type: "connector", from: "chip", to: "card", arrow: true },
+    ],
+  });
+
+  let fix: Fixture;
+  let session: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  let events: SessionEvents;
+  let started: { event: string; url: string };
+  let url: URL;
+  let token: string;
+  let port: number;
+  let closed: Promise<JsonEvent>;
+
+  beforeAll(async () => {
+    fix = await makeFixture("move", movementScene);
+    session = Bun.spawn(["bun", CLI, "author", fix.scenePath], {
+      cwd: ROOT,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    events = new SessionEvents(session);
+    const evt = await events.waitForEvent("started", 120_000);
+    started = evt as { event: string; url: string };
+    url = new URL(started.url);
+    port = Number(url.port);
+    token = url.pathname.split("/").filter(Boolean)[0] ?? "";
+    // Awaited by the final immutability test; the collector pumps either way.
+    closed = events.waitForEvent("closed", 120_000);
+  }, 180_000);
+
+  afterAll(async () => {
+    if (session && session.exitCode === null && session.signalCode === null) {
+      session.kill("SIGTERM");
+      await session.exited;
+    }
+    if (fix) await rm(fix.root, { recursive: true, force: true });
+  });
+
+  /** In-page bounds of a canvas hit/highlight element, inverted from its style. */
+  const boundsFromBox = async (page: Page, sel: string) => {
+    const style = await page.locator(sel).getAttribute("style");
+    const pct = (re: RegExp) => {
+      const hit = style!.match(re);
+      expect(hit).not.toBeNull();
+      return Number(hit![1]);
+    };
+    return {
+      // The server emits "left:X%" inline; after the view script rewrites a
+      // box, CSSOM serializes "left: X%" — allow both.
+      x: (pct(/left:\s*([\d.-]+)%/) / 100) * 1280,
+      y: (pct(/top:\s*([\d.-]+)%/) / 100) * 720,
+      width: (pct(/width:\s*([\d.-]+)%/) / 100) * 1280,
+      height: (pct(/height:\s*([\d.-]+)%/) / 100) * 720,
+    };
+  };
+
+  /**
+   * One explicitly sequential end-to-end scenario on one live session. The
+   * phases intentionally build on each other — every accepted movement
+   * changes the session state the next phase starts from — so the phase
+   * order is part of this test's contract, and revision/unsaved counts are
+   * asserted exactly at every phase. No sibling test moves Layers, so this
+   * scenario owns its session from the "started" event onward.
+   */
+  test(
+    "the movement scenario: top-level and nested drags, persisted-vs-unsaved presentation, rejected movements, overlapping previews, and repeated cycles — all unsaved",
+    async () => {
+      const sceneBytesBefore = await readFile(fix.scenePath);
+      const renderAtStart = (await rawRequest(port, `/${token}/render.png`)).body;
+      const browser = await getBrowser();
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1000 },
+        deviceScaleFactor: 1,
+      });
+      const origin = url.origin;
+      const requested: string[] = [];
+      ctx.on("request", (r) => requested.push(r.url()));
+      await ctx.route("**/*", (route) =>
+        route.request().url().startsWith(origin) ? route.continue() : route.abort(),
+      );
+      const page: Page = await ctx.newPage();
+      interface ResponseLayer {
+        id: string;
+        visible: boolean;
+        bounds: { x: number; y: number; width: number; height: number } | null;
+        position?: { persisted: { x: number; y: number }; current: { x: number; y: number } };
+      }
+      interface MoveResponse {
+        rev: number;
+        warnings: string[];
+        layers: ResponseLayer[];
+      }
+      /** A movement POST from inside the page (same-origin, route-blocked ctx). */
+      const postMove = async (id: string, dx: number, dy: number): Promise<MoveResponse> => {
+        const res = await page.evaluate(
+          async ({ id, dx, dy }) => {
+            const base = location.pathname.replace(/\/view$/, "/");
+            const r = await fetch(base + "move", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id, dx, dy }),
+            });
+            return { status: r.status, body: await r.json() };
+          },
+          { id, dx, dy },
+        );
+        expect(res.status).toBe(200);
+        return res.body as MoveResponse;
+      };
+      const byId = (body: MoveResponse, id: string) => {
+        const l = body.layers.find((x) => x.id === id);
+        expect(l).toBeDefined();
+        return l!;
+      };
+      const centerOf = (l: ResponseLayer) => {
+        expect(l.bounds).not.toBeNull();
+        return { x: l.bounds!.x + l.bounds!.width / 2, y: l.bounds!.y + l.bounds!.height / 2 };
+      };
+      /** The listing's exact bounds text, parsed back to numbers. */
+      const parseBoundsText = (t: string) => {
+        const m = t.match(/^([\d.-]+),([\d.-]+) · ([\d.-]+)×([\d.-]+)$/);
+        expect(m).not.toBeNull();
+        return { x: Number(m![1]), y: Number(m![2]), width: Number(m![3]), height: Number(m![4]) };
+      };
+      /** Raw movement POST with exact body/content-type/length control. */
+      const postRaw = (
+        body: string,
+        contentType: string | null,
+        opts: { chunked?: boolean; contentLength?: string } = {},
+      ) =>
+        new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+          const headers: Record<string, string> = { connection: "close" };
+          if (contentType !== null) headers["content-type"] = contentType;
+          if (opts.contentLength !== undefined) headers["content-length"] = opts.contentLength;
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port,
+              path: `/${token}/move`,
+              method: "POST",
+              headers,
+            },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on("data", (c: Buffer) => chunks.push(c));
+              res.on("end", () =>
+                resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) }),
+              );
+            },
+          );
+          req.on("error", reject);
+          if (opts.chunked) {
+            // No Content-Length: Node frames the body as chunked, so the
+            // server must enforce the limit on the streamed bytes.
+            const mid = Math.floor(body.length / 2);
+            req.write(body.slice(0, mid));
+            req.write(body.slice(mid));
+            req.end();
+          } else {
+            req.end(body);
+          }
+        });
+      const statusText = () => page.locator("#status").textContent();
+      const appliedRev = async () =>
+        Number(await page.locator("#status").getAttribute("data-rev"));
+      const previewSrc = () => page.locator(".canvas img").getAttribute("src");
+      /** A real pointer drag on a selected canvas hit target, by displayed-px
+       *  delta. The Layer is selected through the listing first — a selected
+       *  Layer's hit sits above every unselected hit (the selection
+       *  guarantee) — and the hit's center is asserted to be the topmost
+       *  element at the intended drag point before the drag starts. */
+      const dragHit = async (sel: string, dxPx: number, dyPx: number) => {
+        await page.locator(`.listing .row[data-sel="${sel}"]`).click();
+        const point = await page.evaluate((sel: string) => {
+          const el = document.querySelector(`.canvas .hit[data-sel="${sel}"]`);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, sel);
+        expect(point).not.toBeNull();
+        const topmost = await page.evaluate(
+          ({ x, y }: { x: number; y: number }) =>
+            document.elementFromPoint(x, y)?.getAttribute("data-sel") ?? null,
+          point!,
+        );
+        expect(topmost).toBe(sel);
+        await page.mouse.move(point!.x, point!.y);
+        await page.mouse.down();
+        await page.mouse.move(point!.x + dxPx, point!.y + dyPx, { steps: 4 });
+        await page.mouse.up();
+      };
+
+      try {
+        await page.goto(started.url);
+
+        // --- phase 1: the fresh session starts clean ------------------------
+        expect(await page.locator(".listing .row.modified").count()).toBe(0);
+        expect(await statusText()).toBe("rev 0 · unsaved 0 · Scene file unchanged");
+
+        // --- phase 2: dragging a selected top-level Layer -------------------
+        // The chip's initial rendered box is its authored box (top-level,
+        // untransformed): center (990, 175) in frame px.
+        const chipBox = await boundsFromBox(page, '.canvas .box[data-sel="1"]');
+        expect(chipBox.x).toBeCloseTo(900, 0);
+        expect(chipBox.y).toBeCloseTo(120, 0);
+
+        // Drag the chip by a known displayed-px delta: 80 right, 50 up.
+        const displayed = (await page.locator(".canvas img").boundingBox())!.width;
+        const scale = 1280 / displayed;
+        await dragHit("1", 80, -50);
+
+        // The preview swapped to a fresh canonical render, applied atomically.
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector(".canvas img")
+              ?.getAttribute("src")
+              ?.startsWith("data:image/png;base64,"),
+          undefined,
+          { timeout: 30_000 },
+        );
+        const frameDx = 80 * scale;
+        const frameDy = -50 * scale;
+
+        // The moved Layer's rendered bounds followed the drag in frame px.
+        const chipAfter = await boundsFromBox(page, '.canvas .box[data-sel="1"]');
+        expect(chipAfter.x + chipAfter.width / 2).toBeCloseTo(990 + frameDx, 0);
+        expect(chipAfter.y + chipAfter.height / 2).toBeCloseTo(175 + frameDy, 0);
+
+        // The listing row distinguishes persisted from unsaved values.
+        const row = page.locator('.listing .row[data-sel="1"]');
+        expect(await row.getAttribute("class")).toContain("modified");
+        expect(await row.locator(".was").textContent()).toBe("was 900,120");
+        expect(await row.locator(".pos").textContent()).not.toBe("900,120");
+
+        // The status line: exactly revision 1, exactly one unsaved Layer.
+        expect(await statusText()).toBe("rev 1 · unsaved 1 · Scene file unchanged");
+
+        // The selected hit's priority is derived from this render's own layer
+        // count — strictly above every unselected hit (the last hit's
+        // compositing index) — never a fixed constant a large index outranks.
+        const zOf = (sel: string) =>
+          page
+            .locator(`.canvas .hit[data-sel="${sel}"]`)
+            .evaluate((el) => Number(getComputedStyle(el).zIndex));
+        expect(await zOf("1")).toBe(10); // nine layers: count + 1
+        expect(await zOf("8")).toBe(9); // the Connector hit: the max unselected
+        expect(await zOf("1")).toBeGreaterThan(await zOf("8"));
+
+        // render.png now serves the latest preview, not the session-start one:
+        // the Scene changed, so the canonical pixels changed with it.
+        const renderAfterDrag = (await rawRequest(port, `/${token}/render.png`)).body;
+        expect(Buffer.compare(renderAtStart, renderAfterDrag)).not.toBe(0);
+
+        // --- phase 3: nested drags through measured Group transforms --------
+        // Independent expected-value math (test-side): the card Group's CSS
+        // transform "scale(2) rotate(30deg) scaleX(-1)" composes mirror →
+        // rotate → scale; its linear map turns an authored local delta into
+        // the frame-px delta the drag produced. The session must invert
+        // exactly this map — derived in production from the rendered DOM,
+        // never from a second transform model.
+        const deg = (d: number) => (d * Math.PI) / 180;
+        type M = [number, number, number, number]; // row-major [a,b,c,d]: frame = [[a,c],[b,d]]·local
+        const mul2 = (m: M, x: M): M => [
+          m[0] * x[0] + m[2] * x[1], m[1] * x[0] + m[3] * x[1],
+          m[0] * x[2] + m[2] * x[3], m[1] * x[2] + m[3] * x[3],
+        ];
+        const inv2 = (m: M): M => {
+          const det = m[0] * m[3] - m[1] * m[2];
+          return [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det];
+        };
+        const apply2 = (m: M, dx: number, dy: number) => ({
+          x: m[0] * dx + m[2] * dy,
+          y: m[1] * dx + m[3] * dy,
+        });
+        const cardBasis: M = mul2(
+          mul2([2, 0, 0, 2], [Math.cos(deg(30)), Math.sin(deg(30)), -Math.sin(deg(30)), Math.cos(deg(30))]),
+          [-1, 0, 0, 1],
+        );
+        const innerBasis: M = mul2(cardBasis, [1.5, 0, 0, 1.5]);
+
+        // The nested image inside the scaled+mirrored+rotated Group: a
+        // frame-px drag of (40, −20) maps to the inverse-transformed local
+        // delta, and its rendered bounds center moves by exactly (40, −20).
+        const respA = await postMove("card-plate", 40, -20);
+        expect(respA.rev).toBe(2);
+        const persisted = byId(respA, "card-plate").position!.persisted;
+        expect(persisted).toEqual({ x: 16, y: 16 });
+        const localA = apply2(inv2(cardBasis), 40, -20);
+        const currentA = byId(respA, "card-plate").position!.current;
+        expect(currentA.x).toBeCloseTo(16 + localA.x, 2);
+        expect(currentA.y).toBeCloseTo(16 + localA.y, 2);
+
+        // A second drag moves the rendered bounds by exactly the frame delta.
+        const respB = await postMove("card-plate", 10, 5);
+        expect(respB.rev).toBe(3);
+        const centerB = centerOf(byId(respB, "card-plate"));
+        const centerA = centerOf(byId(respA, "card-plate"));
+        expect(centerB.x - centerA.x).toBeCloseTo(10, 0);
+        expect(centerB.y - centerA.y).toBeCloseTo(5, 0);
+
+        // A child with its own rotation (card-tilt, 17°): its own transform
+        // never enters the mapping — the drag maps through the ancestors
+        // only, and the rendered bounds follow the frame delta exactly.
+        const respC = await postMove("card-tilt", -25, 35);
+        expect(respC.rev).toBe(4);
+        const tiltPersisted = byId(respC, "card-tilt").position!.persisted;
+        expect(tiltPersisted).toEqual({ x: 210, y: 170 });
+        const localC = apply2(inv2(cardBasis), -25, 35);
+        const tiltCurrent = byId(respC, "card-tilt").position!.current;
+        expect(tiltCurrent.x).toBeCloseTo(210 + localC.x, 2);
+        expect(tiltCurrent.y).toBeCloseTo(170 + localC.y, 2);
+        const tiltCenter = centerOf(byId(respC, "card-tilt"));
+        const tiltCenterBefore = centerOf(byId(respB, "card-tilt"));
+        expect(tiltCenter.x - tiltCenterBefore.x).toBeCloseTo(-25, 0);
+        expect(tiltCenter.y - tiltCenterBefore.y).toBeCloseTo(35, 0);
+
+        // A doubly-nested child (dot: card → card-inner → dot): the two
+        // Groups' measured bases compose.
+        const respD = await postMove("dot", 30, 12);
+        expect(respD.rev).toBe(5);
+        const dotPersisted = byId(respD, "dot").position!.persisted;
+        expect(dotPersisted).toEqual({ x: 10, y: 10 });
+        const localD = apply2(inv2(innerBasis), 30, 12);
+        const dotCurrent = byId(respD, "dot").position!.current;
+        expect(dotCurrent.x).toBeCloseTo(10 + localD.x, 2);
+        expect(dotCurrent.y).toBeCloseTo(10 + localD.y, 2);
+        const dotCenter = centerOf(byId(respD, "dot"));
+        const dotCenterBefore = centerOf(byId(respC, "dot"));
+        expect(dotCenter.x - dotCenterBefore.x).toBeCloseTo(30, 0);
+        expect(dotCenter.y - dotCenterBefore.y).toBeCloseTo(12, 0);
+
+        // The Group itself is top-level: identity mapping, exact integers.
+        const respE = await postMove("card", -10, 5);
+        expect(respE.rev).toBe(6);
+        expect(byId(respE, "card").position!.current).toEqual({ x: 170, y: 145 });
+        const cardCenter = centerOf(byId(respE, "card"));
+        const cardCenterBefore = centerOf(byId(respD, "card"));
+        expect(cardCenter.x - cardCenterBefore.x).toBeCloseTo(-10, 0);
+        expect(cardCenter.y - cardCenterBefore.y).toBeCloseTo(5, 0);
+
+        // Every accepted movement's response carries the fresh render's
+        // warnings channel (safe-area and auto-fit signals ride along).
+        for (const r of [respA, respB, respC, respD, respE]) {
+          expect(Array.isArray(r.warnings)).toBe(true);
+        }
+
+        // --- phase 4: the view distinguishes persisted from unsaved ---------
+        // Re-open the view: a fresh page renders the server's current state.
+        await page.reload({ waitUntil: "load" });
+        // The fixture's authored positions — the persisted home's only legal
+        // values, no matter how many movements this scenario has made.
+        const AUTHORED: Record<string, { x: number; y: number }> = {
+          bg: { x: 0, y: 0 },
+          chip: { x: 900, y: 120 },
+          card: { x: 180, y: 140 },
+          "card-plate": { x: 16, y: 16 },
+          "card-tilt": { x: 210, y: 170 },
+          "card-inner": { x: 40, y: 190 },
+          dot: { x: 10, y: 10 },
+        };
+        const rows = page.locator(".listing .row");
+        expect(await rows.count()).toBe(9);
+        let movedCount = 0;
+        for (let i = 0; i < 9; i++) {
+          const r = rows.nth(i);
+          const name = (await r.locator(".name").textContent())!;
+          const cls = (await r.getAttribute("class")) ?? "";
+          if (name === "link") {
+            // The Connector row: selectable and bounds-bearing, never positioned.
+            expect(cls.includes("modified")).toBe(false);
+            expect(await r.locator(".pos").count()).toBe(0);
+            expect(await r.locator(".was").count()).toBe(0);
+            continue;
+          }
+          if (name === "hush") {
+            // The hidden row: disabled, with no position facts.
+            expect(cls.includes("hidden")).toBe(true);
+            expect(await r.locator(".pos").count()).toBe(0);
+            expect(await r.locator(".was").count()).toBe(0);
+            continue;
+          }
+          const authored = AUTHORED[name]!;
+          const pos = (await r.locator(".pos").textContent())!;
+          const was = (await r.locator(".was").textContent())!;
+          const isMoved = pos !== `${authored.x},${authored.y}`;
+          if (isMoved) movedCount++;
+          expect(cls.includes("modified")).toBe(isMoved);
+          expect(was).toBe(isMoved ? `was ${authored.x},${authored.y}` : "");
+        }
+        // Exactly the five Layers this scenario moved are marked unsaved; the
+        // persisted home never drifted from the authored values.
+        expect(movedCount).toBe(5);
+        expect(await statusText()).toBe("rev 6 · unsaved 5 · Scene file unchanged");
+        expect(await appliedRev()).toBe(6);
+
+        // --- phase 5: rejected movements retain the last valid preview ------
+        const renderBeforeRejections = (await rawRequest(port, `/${token}/render.png`)).body;
+        // Unknown id → actionable, naming the id.
+        const unknown = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/json");
+        expect(unknown.status).toBe(400);
+        const unknownBody = JSON.parse(unknown.body.toString("utf8")) as {
+          errors: { path: string; message: string }[];
+        };
+        expect(unknownBody.errors.length).toBeGreaterThan(0);
+        expect(unknownBody.errors[0]!.message).toContain("nope");
+        // A Connector: no authored position — move its targets instead.
+        const connector = await postRaw(JSON.stringify({ id: "link", dx: 1, dy: 1 }), "application/json");
+        expect(connector.status).toBe(400);
+        expect(connector.body.toString("utf8")).toContain("no authored position");
+        // A Layer that paints nothing has no draggable canvas target.
+        const hiddenMove = await postRaw(JSON.stringify({ id: "hush", dx: 1, dy: 1 }), "application/json");
+        expect(hiddenMove.status).toBe(400);
+        expect(hiddenMove.body.toString("utf8")).toContain("paints nothing");
+        // A non-numeric delta is rejected at the boundary.
+        const nonNumeric = await postRaw(JSON.stringify({ id: "chip", dx: "fast", dy: 1 }), "application/json");
+        expect(nonNumeric.status).toBe(400);
+        expect(nonNumeric.body.toString("utf8")).toContain("finite");
+        // The media type is parsed exactly and case-insensitively: any
+        // application/json with parameters is accepted; prefixed/suffixed
+        // types are not. Both directions assert the outcome of the check they
+        // exercise — an accepted type reaches the unknown-id error, a
+        // rejected type stops at the content-type guidance.
+        const caseVariant = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "APPLICATION/JSON");
+        expect(caseVariant.status).toBe(400);
+        expect(caseVariant.body.toString("utf8")).toContain("nope");
+        const withParams = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/json; charset=utf-8");
+        expect(withParams.status).toBe(400);
+        expect(withParams.body.toString("utf8")).toContain("nope");
+        const jsonp = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/jsonp");
+        expect(jsonp.status).toBe(400);
+        expect(jsonp.body.toString("utf8")).toContain("application/json");
+        const jsonSuffix = await postRaw(JSON.stringify({ id: "nope", dx: 1, dy: 1 }), "application/json+xml");
+        expect(jsonSuffix.status).toBe(400);
+        expect(jsonSuffix.body.toString("utf8")).toContain("application/json");
+        // Malformed JSON and a wrong content type are rejected with guidance.
+        const malformed = await postRaw("not json{{{", "application/json");
+        expect(malformed.status).toBe(400);
+        expect(malformed.body.toString("utf8")).toContain("not valid JSON");
+        const wrongType = await postRaw(JSON.stringify({ id: "chip", dx: 1, dy: 1 }), "text/plain");
+        expect(wrongType.status).toBe(400);
+        expect(wrongType.body.toString("utf8")).toContain("application/json");
+        // An oversized body is refused outright.
+        const oversized = await postRaw(
+          JSON.stringify({ id: "chip", dx: 1, dy: 1, pad: "x".repeat(17 * 1024) }),
+          "application/json",
+        );
+        expect(oversized.status).toBe(413);
+        // The limit counts BYTES on the streamed body: a multibyte body can
+        // exceed the byte budget with far fewer characters than the limit.
+        const multibyteBody = JSON.stringify({ id: "chip", dx: 1, dy: 1, pad: "é".repeat(8200) });
+        expect(Buffer.byteLength(multibyteBody, "utf8")).toBeGreaterThan(16 * 1024);
+        expect(multibyteBody.length).toBeLessThan(16 * 1024);
+        const multibyte = await postRaw(multibyteBody, "application/json");
+        expect(multibyte.status).toBe(413);
+        const multibyteChunked = await postRaw(multibyteBody, "application/json", { chunked: true });
+        expect(multibyteChunked.status).toBe(413);
+        // Chunked framing carries no Content-Length at all — the streamed
+        // byte count is the only enforcement.
+        const chunked = await postRaw(
+          `{"id":"chip","dx":1,"dy":1,"pad":"${"x".repeat(17 * 1024)}"}`,
+          "application/json",
+          { chunked: true },
+        );
+        expect(chunked.status).toBe(413);
+        // Every rejection left the latest preview exactly as it was.
+        expect(
+          Buffer.compare((await rawRequest(port, `/${token}/render.png`)).body, renderBeforeRejections),
+        ).toBe(0);
+        expect(await appliedRev()).toBe(6);
+        expect(await statusText()).toBe("rev 6 · unsaved 5 · Scene file unchanged");
+
+        // One accepted movement first, so the retained-preview assertion below
+        // compares data-URI bytes rather than a route reference.
+        await dragHit("3", 20, 10);
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 7,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe("rev 7 · unsaved 5 · Scene file unchanged");
+        const imgAtRev7 = await previewSrc();
+        expect(imgAtRev7).not.toBeNull();
+        expect(imgAtRev7).toContain("data:image/png;base64,");
+
+        // A movement that cannot pass the complete canonical gate fails the
+        // same way: the project asset is gone, so resolution fails and the
+        // candidate is discarded — the view shows the actionable error and
+        // retains the last valid preview.
+        const photoPath = path.join(fix.root, "photo.svg");
+        const photoBytes = await readFile(photoPath);
+        await rm(photoPath);
+        const statusBeforeFailure = await statusText();
+        await dragHit("3", 20, 10);
+        await page.waitForFunction(
+          (prev) => document.getElementById("status")?.textContent !== prev,
+          statusBeforeFailure,
+          { timeout: 30_000 },
+        );
+        const errorStatus = await statusText();
+        expect(errorStatus).toContain("missing project asset");
+        expect(errorStatus).toContain("photo.svg");
+        // The last valid preview is retained byte-for-byte; no revision moved.
+        expect(await previewSrc()).toBe(imgAtRev7);
+        expect(await appliedRev()).toBe(7);
+        // Restoring the asset makes the same drag succeed.
+        await writeFile(photoPath, photoBytes);
+        await dragHit("3", 20, 10);
+        await page.waitForFunction(
+          (prev) => document.getElementById("status")?.textContent !== prev,
+          errorStatus,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe("rev 8 · unsaved 5 · Scene file unchanged");
+        expect(await previewSrc()).not.toBe(imgAtRev7);
+
+        // --- phase 6: overlapping previews never display stale state --------
+        // Two real drags in quick succession with the first movement's
+        // response held back: the later movement's response resolves first,
+        // and the client must apply the newer revision and discard the stale
+        // one — an older result can never become the newest display.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __moves: { rev: number; png: string }[];
+          };
+          w.__origFetch = window.fetch;
+          w.__moves = [];
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            const delayed = first
+              ? new Promise<Response>((resolve) => setTimeout(() => resolve(p), 2000))
+              : p;
+            first = false;
+            void delayed
+              .then((r) => r.clone().json())
+              .then(
+                (b: { rev: number; png: string; layers: ResponseLayer[] }) => w.__moves.push(b),
+              );
+            return delayed;
+          }) as unknown as typeof fetch;
+        });
+        const imgBeforeStale = await previewSrc();
+        await dragHit("1", 15, 5);
+        await dragHit("1", 15, 5);
+        await page.waitForFunction(
+          () => ((window as unknown as { __moves?: unknown[] }).__moves ?? []).length >= 2,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const moves = await page.evaluate(
+          () => (window as unknown as { __moves: { rev: number; png: string; layers: ResponseLayer[] }[] }).__moves,
+        );
+        // The held-back response resolved last and was discarded: the display
+        // shows exactly the newest revision.
+        expect(moves).toHaveLength(2);
+        expect(moves[1]!.rev).toBe(moves[0]!.rev - 1);
+        expect(await appliedRev()).toBe(moves[0]!.rev);
+        expect(await previewSrc()).toBe(`data:image/png;base64,${moves[0]!.png}`);
+        expect(await previewSrc()).not.toBe(imgBeforeStale);
+        // The Connector's listing bounds follow its targets: the positionless
+        // row still updates its geometry with every applied preview.
+        const connectorText = (await page.locator('.listing .row[data-sel="8"] .bounds').textContent())!;
+        const linkEntry = moves[0]!.layers.find((l) => l.id === "link");
+        expect(linkEntry).toBeDefined();
+        expect(linkEntry!.bounds).not.toBeNull();
+        expect(parseBoundsText(connectorText)).toEqual(linkEntry!.bounds!);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // An older movement's HTTP rejection resolving late must not
+        // overwrite the status of a newer accepted preview: error updates are
+        // allowed only while their request is the client's current one.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __hiddenRev?: number;
+            __late?: boolean;
+          };
+          w.__origFetch = window.fetch;
+          w.__hiddenRev = undefined;
+          w.__late = false;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p
+              .then((r) => r.clone().json())
+              .then((b: { rev: number }) => {
+                w.__hiddenRev = b.rev;
+              });
+            return new Promise((resolve) =>
+              setTimeout(() => {
+                w.__late = true;
+                resolve(
+                  new Response(JSON.stringify({ errors: [{ path: "body", message: "stale rejection" }] }), {
+                    status: 400,
+                    headers: { "content-type": "application/json" },
+                  }),
+                );
+              }, 2000),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await dragHit("1", 10, 0);
+        await dragHit("1", 10, 0);
+        await page.waitForFunction(
+          () => (window as unknown as { __hiddenRev?: number }).__hiddenRev !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const staleRejected = await page.evaluate(
+          () => (window as unknown as { __hiddenRev: number }).__hiddenRev,
+        );
+        expect(staleRejected).toBe(11);
+        await page.waitForFunction(
+          (h: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === h + 1,
+          staleRejected,
+          { timeout: 30_000 },
+        );
+        const statusAfterNewer = await statusText();
+        expect(statusAfterNewer).toBe(`rev ${staleRejected! + 1} · unsaved 5 · Scene file unchanged`);
+        // The stale rejection resolves now: the status must not move.
+        await page.waitForFunction(
+          () => (window as unknown as { __late?: boolean }).__late === true,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe(statusAfterNewer);
+        expect(await appliedRev()).toBe(staleRejected! + 1);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // The same guarantee for the unreachable-network branch: an older
+        // request failing late cannot overwrite a newer accepted preview.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __hiddenRev?: number;
+            __late?: boolean;
+          };
+          w.__origFetch = window.fetch;
+          w.__hiddenRev = undefined;
+          w.__late = false;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p
+              .then((r) => r.clone().json())
+              .then((b: { rev: number }) => {
+                w.__hiddenRev = b.rev;
+              });
+            return new Promise((_, reject) =>
+              setTimeout(() => {
+                w.__late = true;
+                reject(new TypeError("network down"));
+              }, 2000),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await dragHit("1", 10, 0);
+        await dragHit("1", 10, 0);
+        await page.waitForFunction(
+          () => (window as unknown as { __hiddenRev?: number }).__hiddenRev !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const staleUnreachable = await page.evaluate(
+          () => (window as unknown as { __hiddenRev: number }).__hiddenRev,
+        );
+        expect(staleUnreachable).toBe(13);
+        await page.waitForFunction(
+          (h: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === h + 1,
+          staleUnreachable,
+          { timeout: 30_000 },
+        );
+        const statusAfterNewest = await statusText();
+        expect(statusAfterNewest).toBe(`rev ${staleUnreachable! + 1} · unsaved 5 · Scene file unchanged`);
+        // The late network failure resolves now: the status must not move.
+        await page.waitForFunction(
+          () => (window as unknown as { __late?: boolean }).__late === true,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe(statusAfterNewest);
+        expect(await appliedRev()).toBe(staleUnreachable! + 1);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // The exact reverse order: an older REAL success is delayed while a
+        // newer request is genuinely rejected. The rejection displays first;
+        // the older success must then still apply its valid preview, geometry,
+        // and applied revision — but must not overwrite the newer rejection's
+        // status text.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __older?: { rev: number; png: string; layers: { id: string; position?: { current: { x: number; y: number } } }[] };
+          };
+          w.__origFetch = window.fetch;
+          w.__older = undefined;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p.then((r) => r.clone().json()).then((b) => {
+              w.__older = b;
+            });
+            // The real success is held back from the client; the server has
+            // already committed it.
+            return new Promise<Response>((resolve) => setTimeout(() => resolve(p), 2000));
+          }) as unknown as typeof fetch;
+        });
+        const statusBeforeReverse = await statusText();
+        await dragHit("1", 10, 0); // real success, delayed
+        await dragHit("8", 10, 0); // a Connector drag: real rejection, displayed first
+        await page.waitForFunction(
+          (prev) => document.getElementById("status")?.textContent !== prev,
+          statusBeforeReverse,
+          { timeout: 30_000 },
+        );
+        const reverseError = await statusText();
+        expect(reverseError).toContain("no authored position");
+        // The delayed success has not applied yet: the applied revision is
+        // still the pre-rejection one.
+        expect(await appliedRev()).toBe(14);
+        await page.waitForFunction(
+          () => (window as unknown as { __older?: unknown }).__older !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const olderSuccess = await page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __older: { rev: number; png: string; layers: { id: string; position?: { current: { x: number; y: number } } }[] };
+              }
+            ).__older,
+        );
+        expect(olderSuccess).not.toBeNull();
+        expect(olderSuccess!.rev).toBe(15);
+        await page.waitForFunction(
+          (r: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === r,
+          olderSuccess!.rev,
+          { timeout: 30_000 },
+        );
+        // The accepted state became visible — preview, listing, applied
+        // revision — while the newer rejection text survived.
+        expect(await previewSrc()).toBe(`data:image/png;base64,${olderSuccess!.png}`);
+        const chipPosAfter = (await page.locator('.listing .row[data-sel="1"] .pos').textContent())!;
+        const chipFromOlder = olderSuccess!.layers.find((l) => l.id === "chip")!.position!.current;
+        expect(chipFromOlder.x + "," + chipFromOlder.y).toBe(chipPosAfter);
+        expect(await statusText()).toBe(reverseError);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // Arrival-order FIFO: the first request's handler enqueues its whole
+        // read/parse/apply pipeline at arrival — before its first body read —
+        // so a slowly streamed body cannot commit after a later complete one.
+        const delayedFirstBody = (): Promise<{ a: Buffer; b: Buffer }> =>
+          new Promise((resolve, reject) => {
+            const bodyA = JSON.stringify({ id: "chip", dx: 10, dy: 0 });
+            const bodyB = JSON.stringify({ id: "chip", dx: 20, dy: 0 });
+            const bodies: { a?: Buffer; b?: Buffer } = {};
+            let done = false;
+            let failTimer: ReturnType<typeof setTimeout> | undefined;
+            const settle = () => {
+              if (done) return;
+              if (bodies.a !== undefined && bodies.b !== undefined) {
+                done = true;
+                if (failTimer) clearTimeout(failTimer);
+                resolve({ a: bodies.a!, b: bodies.b! });
+              }
+            };
+            const fail = (err: Error) => {
+              if (!done) {
+                done = true;
+                if (failTimer) clearTimeout(failTimer);
+                reject(err);
+              }
+            };
+            const reqA = httpRequest(
+              {
+                host: "127.0.0.1",
+                port,
+                path: `/${token}/move`,
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "content-length": String(bodyA.length),
+                  connection: "close",
+                },
+              },
+              (res) => {
+                const chunks: Buffer[] = [];
+                res.on("data", (c: Buffer) => chunks.push(c));
+                res.on("end", () => {
+                  bodies.a = Buffer.concat(chunks);
+                  settle();
+                });
+              },
+            );
+            reqA.on("error", fail);
+            // The write flushes A's headers plus this body prefix in one
+            // segment; the handler enqueues its whole pipeline at arrival.
+            // Wait a controlled interval before B so A's arrival is
+            // unambiguous, and keep A's body incomplete for 1.5s — B fully
+            // arrives while A is still streaming.
+            reqA.write(bodyA.slice(0, 5));
+            setTimeout(() => {
+              const reqB = httpRequest(
+                {
+                  host: "127.0.0.1",
+                  port,
+                  path: `/${token}/move`,
+                  method: "POST",
+                  headers: { "content-type": "application/json", connection: "close" },
+                },
+                (res) => {
+                  const chunks: Buffer[] = [];
+                  res.on("data", (c: Buffer) => chunks.push(c));
+                  res.on("end", () => {
+                    bodies.b = Buffer.concat(chunks);
+                    settle();
+                  });
+                },
+              );
+              reqB.on("error", fail);
+              reqB.end(bodyB);
+              setTimeout(() => {
+                reqA.write(bodyA.slice(5));
+                reqA.end();
+              }, 1400);
+            }, 100);
+            failTimer = setTimeout(
+              () => fail(new Error("delayed-first-body overlap did not settle")),
+              30_000,
+            );
+          });
+        const { a: aRaw, b: bRaw } = await delayedFirstBody();
+        const aMove = JSON.parse(aRaw.toString("utf8")) as MoveResponse;
+        const bMove = JSON.parse(bRaw.toString("utf8")) as MoveResponse;
+        expect(aMove.rev).toBe(16);
+        expect(bMove.rev).toBe(17);
+        // B's cumulative state includes A's movement, committed first.
+        const chipArrivalA = aMove.layers.find((l) => l.id === "chip")!.position!.current.x;
+        const chipArrivalB = bMove.layers.find((l) => l.id === "chip")!.position!.current.x;
+        expect(chipArrivalB).toBeCloseTo(chipArrivalA + 20, 3);
+
+        // Final status/data-rev consistency after the overlap: the next real
+        // drag applies the newest revision to both.
+        await dragHit("1", 5, 0);
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 18,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe("rev 18 · unsaved 5 · Scene file unchanged");
+
+        // Rapid overlapping movements serialize strictly FIFO: revisions
+        // advance one by one and each response carries the cumulative state
+        // of every delta so far.
+        const chipPosBefore = (await page.locator('.listing .row[data-sel="1"] .pos').textContent())!;
+        const chipXBefore = Number(chipPosBefore.split(",")[0]);
+        const chipYBefore = Number(chipPosBefore.split(",")[1]);
+        const deltas = [10, 20, 30, 40, 50, 60];
+        const burst = await Promise.all(deltas.map((d) => postMove("chip", d, 0)));
+        for (let i = 0; i < burst.length; i++) {
+          expect(burst[i]!.rev).toBe(19 + i);
+          const chip = byId(burst[i]!, "chip").position!.current;
+          expect(chip.x).toBeCloseTo(
+            chipXBefore + deltas.slice(0, i + 1).reduce((a, b) => a + b, 0),
+            3,
+          );
+          expect(chip.y).toBeCloseTo(chipYBefore, 3);
+        }
+
+        // --- phase 7: repeated preview cycles --------------------------------
+        // Move → fresh canonical preview, alternating top-level and nested
+        // Layers across several cycles; every cycle's rendered bounds follow
+        // that cycle's exact frame-px drag.
+        let last = burst[burst.length - 1]!;
+        const cycles: { id: string; dx: number; dy: number }[] = [
+          { id: "chip", dx: 5, dy: 0 },
+          { id: "card-plate", dx: 6, dy: -4 },
+          { id: "chip", dx: 5, dy: 0 },
+          { id: "card-plate", dx: -6, dy: 4 },
+        ];
+        for (let ci = 0; ci < cycles.length; ci++) {
+          const c = cycles[ci]!;
+          const next = await postMove(c.id, c.dx, c.dy);
+          expect(next.rev).toBe(25 + ci);
+          const center = centerOf(byId(next, c.id));
+          const centerBefore = centerOf(byId(last, c.id));
+          expect(center.x - centerBefore.x).toBeCloseTo(c.dx, 0);
+          expect(center.y - centerBefore.y).toBeCloseTo(c.dy, 0);
+          last = next;
+        }
+
+        // --- phase 8: nothing was ever saved ---------------------------------
+        const sceneBytesAfter = await readFile(fix.scenePath);
+        expect(Buffer.compare(sceneBytesBefore, sceneBytesAfter)).toBe(0);
+        // Every request the page made stayed on the loopback session.
+        for (const req of requested) expect(req.startsWith(origin)).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+    },
+    300_000,
+  );
+});
+
+// --- tiny-scale Groups (#60, INT-2) ----------------------------------------
+
+describe("scene author — tiny-scale Groups stay draggable (#60)", () => {
+  /**
+   * A Group scaled 0.00001 — a valid positive Scene scale whose measured
+   * basis coefficients collapse to zero at 4-decimal rounding and whose
+   * determinant (1e-10) sits below any absolute invertibility cutoff.
+   */
+  const tinyScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
+    ...scene,
+    layers: [
+      { id: "bg", type: "image", asset: "./bg.svg", position: { x: 0, y: 0 }, size: { width: 1280, height: 720 } },
+      {
+        id: "tiny",
+        type: "group",
+        position: { x: 60, y: 500 },
+        size: { width: 200, height: 200 },
+        scale: 0.00001,
+        layers: [
+          { id: "tiny-dot", type: "shape", shape: "ellipse", color: "#ffcc00", position: { x: 10, y: 10 }, size: { width: 20, height: 20 } },
+        ],
+      },
+    ],
+  });
+
+  let fix: Fixture;
+  let session: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  let events: SessionEvents;
+  let started: { event: string; url: string };
+  let url: URL;
+  let token: string;
+  let port: number;
+
+  beforeAll(async () => {
+    fix = await makeFixture("tiny", tinyScene);
+    session = Bun.spawn(["bun", CLI, "author", fix.scenePath], {
+      cwd: ROOT,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    events = new SessionEvents(session);
+    const evt = await events.waitForEvent("started", 120_000);
+    started = evt as { event: string; url: string };
+    url = new URL(started.url);
+    port = Number(url.port);
+    token = url.pathname.split("/").filter(Boolean)[0] ?? "";
+  }, 180_000);
+
+  afterAll(async () => {
+    if (session && session.exitCode === null && session.signalCode === null) {
+      session.kill("SIGTERM");
+      await session.exited;
+    }
+    if (fix) await rm(fix.root, { recursive: true, force: true });
+  });
+
+  test(
+    "a Layer inside a tiny-scale Group follows frame-px drags: full basis precision and scale-relative invertibility",
+    async () => {
+      const browser = await getBrowser();
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1000 },
+        deviceScaleFactor: 1,
+      });
+      const origin = url.origin;
+      await ctx.route("**/*", (route) =>
+        route.request().url().startsWith(origin) ? route.continue() : route.abort(),
+      );
+      const page: Page = await ctx.newPage();
+      interface ResponseLayer {
+        id: string;
+        visible: boolean;
+        bounds: { x: number; y: number; width: number; height: number } | null;
+        position?: { persisted: { x: number; y: number }; current: { x: number; y: number } };
+      }
+      interface MoveResponse {
+        rev: number;
+        warnings: string[];
+        layers: ResponseLayer[];
+      }
+      const postMove = async (id: string, dx: number, dy: number): Promise<MoveResponse> => {
+        const res = await page.evaluate(
+          async ({ id, dx, dy }) => {
+            const base = location.pathname.replace(/\/view$/, "/");
+            const r = await fetch(base + "move", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id, dx, dy }),
+            });
+            return { status: r.status, body: await r.json() };
+          },
+          { id, dx, dy },
+        );
+        expect(res.status).toBe(200);
+        return res.body as MoveResponse;
+      };
+      const centerOf = (l: ResponseLayer) => {
+        expect(l.bounds).not.toBeNull();
+        return { x: l.bounds!.x + l.bounds!.width / 2, y: l.bounds!.y + l.bounds!.height / 2 };
+      };
+      try {
+        await page.goto(started.url);
+
+        // Frame (30, 12) through scale 1e-5: the local delta is +3e6, +1.2e6
+        // — huge but finite and valid; the rendered center follows the frame.
+        const respA = await postMove("tiny-dot", 30, 12);
+        const currentA = respA.layers.find((l) => l.id === "tiny-dot")!.position!.current;
+        expect(currentA.x).toBeCloseTo(10 + 3_000_000, 2);
+        expect(currentA.y).toBeCloseTo(10 + 1_200_000, 2);
+        const respB = await postMove("tiny-dot", 10, 5);
+        const centerB = centerOf(respB.layers.find((l) => l.id === "tiny-dot")!);
+        const centerA = centerOf(respA.layers.find((l) => l.id === "tiny-dot")!);
+        expect(centerB.x - centerA.x).toBeCloseTo(10, 0);
+        expect(centerB.y - centerA.y).toBeCloseTo(5, 0);
+      } finally {
+        await ctx.close();
+      }
+    },
+    90_000,
+  );
 });
 
 // --- shutdown path (fault injection) ---------------------------------------

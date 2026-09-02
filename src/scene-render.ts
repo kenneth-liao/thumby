@@ -761,10 +761,10 @@ async function renderResolvedToPng(
       const spec = [...inspectionLayers(resolved.scene.layers)];
       const measured = await page.evaluate(collectLayerBounds, spec);
       layers = spec.map((s, i): RenderedLayer => {
-        const bounds = measured[i]!;
-        return bounds === null
+        const { box, basis } = measured[i]!;
+        return box === null
           ? { id: s.id, type: s.type as SceneLayer["type"], visible: false, bounds: null }
-          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds };
+          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds: box, basis };
       });
     }
 
@@ -799,6 +799,21 @@ export interface LayerBox {
 }
 
 /**
+ * The measured 2×2 linear map from the space a Layer's authored `position`
+ * lives in (canvas px at top level, the parent Group's local px when nested)
+ * to frame px, row-major: frame = [[a, c], [b, d]] · local. Measured from the
+ * rendered DOM's computed ancestor transforms in the same inspection pass
+ * (DEC-007: the one transform model is the renderer's own CSS — this only
+ * reads what the browser actually applied). Identity at top level.
+ */
+export interface Basis {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+}
+
+/**
  * One resolved Layer as the render pass actually drew it (#59) — a
  * discriminated union, so a hidden Layer carrying bounds (or a visible one
  * without them) is unrepresentable:
@@ -817,6 +832,12 @@ export interface VisibleRenderedLayer {
   type: SceneLayer["type"];
   visible: true;
   bounds: LayerBox;
+  /**
+   * The measured local→frame linear map for this Layer's position (#60):
+   * inverting it turns a frame-px drag delta into the authored delta. A
+   * Connector has no authored position; its basis is the identity map.
+   */
+  basis: Basis;
 }
 
 /** A Layer that paints nothing — hidden or fully transparent, at any depth. */
@@ -879,9 +900,59 @@ function* inspectionLayers(
  */
 const collectLayerBounds = async (
   spec: { id: string; type: string; visible: boolean }[],
-): Promise<(LayerBox | null)[]> => {
+): Promise<{ box: LayerBox | null; basis: Basis }[]> => {
   const els = [...document.querySelectorAll<HTMLElement>(".scene-layer")];
   const round = (v: number) => Number(v.toFixed(4));
+  /*
+   * The measured local→frame linear basis (#60): the accumulated 2×2 linear
+   * part of every ancestor .scene-layer's computed transform — the same CSS
+   * the renderer emitted, as the browser actually resolved it (transform
+   * origins affect only translation, so the linear part composes directly;
+   * the Layer's own transform moves its content within its box and never
+   * enters the map). Reading the DOM — never recomputing scene math — keeps
+   * this a consumer of the one transform model (DEC-007).
+   */
+  const basisOf = (el: HTMLElement): Basis => {
+    const chain: HTMLElement[] = [];
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.classList.contains("scene-layer")) chain.push(p);
+    }
+    let a = 1;
+    let b = 0;
+    let c = 0;
+    let d = 1;
+    // Outermost first: frame = M_outer · (M_inner · local).
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const t = getComputedStyle(chain[i]!).transform;
+      if (!t || t === "none") continue;
+      const v = t.startsWith("matrix3d(")
+        ? t.slice(9, -1).split(",").map(parseFloat)
+        : t.startsWith("matrix(")
+          ? t.slice(7, -1).split(",").map(parseFloat)
+          : null;
+      if (!v || v.length < 6) continue;
+      const ma = v[0]!;
+      const mb = v[1]!;
+      const mc = t.startsWith("matrix3d(") ? v[4]! : v[2]!;
+      const md = t.startsWith("matrix3d(") ? v[5]! : v[3]!;
+      const na = a * ma + c * mb;
+      const nb = b * ma + d * mb;
+      const nc = a * mc + c * md;
+      const nd = b * mc + d * md;
+      a = na;
+      b = nb;
+      c = nc;
+      d = nd;
+    }
+    return {
+      // Full measured precision: the movement consumer inverts this basis, and
+      // rounding here would zero out valid small positive Group scales.
+      a,
+      b,
+      c,
+      d,
+    };
+  };
   let canvas: HTMLCanvasElement | null = null;
   let ctx: CanvasRenderingContext2D | null = null;
   const rasterizePaintedAabb = (
@@ -938,14 +1009,17 @@ const collectLayerBounds = async (
     });
   // Strictly sequential: one layer measured at a time, so at most one
   // rasterization canvas exists for the whole pass.
-  const out: (LayerBox | null)[] = [];
+  const out: { box: LayerBox | null; basis: Basis }[] = [];
   for (const s of spec) {
     const el = els.find((e) => e.dataset.layerId === s.id);
     if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
     if (!s.visible) {
-      out.push(null);
+      // Self-contained: Playwright serializes only this function into the
+      // page, so the identity basis is inline, never a module constant.
+      out.push({ box: null, basis: { a: 1, b: 0, c: 0, d: 1 } });
       continue;
     }
+    const basis = basisOf(el);
     if (s.type === "connector") {
       const svg = el.querySelector("svg");
       if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
@@ -953,10 +1027,13 @@ const collectLayerBounds = async (
       const painted = await rasterizePaintedAabb(svg, frame);
       if (painted) {
         out.push({
-          x: round(frame.x + painted.x),
-          y: round(frame.y + painted.y),
-          width: round(painted.width),
-          height: round(painted.height),
+          box: {
+            x: round(frame.x + painted.x),
+            y: round(frame.y + painted.y),
+            width: round(painted.width),
+            height: round(painted.height),
+          },
+          basis,
         });
       } else {
         // Nothing painted (degenerate geometry) — the path's own geometry,
@@ -966,15 +1043,21 @@ const collectLayerBounds = async (
         const r = path.getBoundingClientRect();
         const sw = parseFloat(getComputedStyle(path).strokeWidth) || 0;
         out.push({
-          x: round(r.x - sw / 2),
-          y: round(r.y - sw / 2),
-          width: round(r.width + sw),
-          height: round(r.height + sw),
+          box: {
+            x: round(r.x - sw / 2),
+            y: round(r.y - sw / 2),
+            width: round(r.width + sw),
+            height: round(r.height + sw),
+          },
+          basis,
         });
       }
     } else {
       const r = el.getBoundingClientRect();
-      out.push({ x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) });
+      out.push({
+        box: { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) },
+        basis,
+      });
     }
   }
   return out;

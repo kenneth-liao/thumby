@@ -877,24 +877,47 @@ session binds only to 127.0.0.1 on an ephemeral port, and 32 random bytes in
 the path are the unguessable capability — every request must present the
 exact Host and capability or it gets an empty 403/404/405; there is no
 path-based file serving. The view shows the current Render and the Reference
-Thumbnail side by side plus an adjustable overlay — pure CSS, no script —
-under a strict CSP (default/script/connect/object 'none', images same-origin
-only, inline style only) with `no-store`/`nosniff`/`no-referrer`; the session
-and its view make no remote requests, and `/reference.png` serves the exact
-bytes validation read (never reread). The view also lists every Layer of the
+Thumbnail side by side plus an adjustable overlay — the overlay and opacity
+stay pure CSS — under a strict CSP (default/object 'none', script, fetches,
+and images same-origin only — the view's one script is the session's own
+`app.js`, and preview swaps arrive as data-URI images), with
+`no-store`/`nosniff`/`no-referrer`; the session and its view make no remote
+requests, and `/reference.png` serves the exact bytes validation read (never
+reread). The view also lists every Layer of the
 resolved Scene exactly once in render order (nested Group children and
-Connectors included) with its rendered bounds, and a script-free radio group
-selects a Layer from either the listing or the canvas — the highlighted box
-is the Layer's exact transformed bounds on the current Render. Hidden Layers
-appear once as disabled, non-selectable rows with no canvas target. Opening
-and using selection never writes. Selecting a Layer highlights its exact
+Connectors included) with its rendered bounds, and a radio group selects a
+Layer from either the listing or the canvas — the highlighted box is the
+Layer's exact transformed bounds on the current Render. Hidden Layers appear
+once as disabled, non-selectable rows with no canvas target. Opening and
+using selection never writes. Selecting a Layer highlights its exact
 rendered bounds on the current Render — the transformed box for positioned
 Layers, the painted extent (stroke, dash, curve, arrowhead) for a
-Connector. Ctrl-C or SIGTERM ends the session and
+Connector.
+
+Dragging a selected positioned Layer (#60) moves it: the view sends the
+frame-px drag delta and the session updates the Layer's authored position in
+its in-memory session state — canvas px for a top-level Layer, the inverse
+of the Group's measured render transform for a nested one — then renders a
+fresh preview through the canonical validation and render path. Each
+accepted movement bumps a revision; responses carry the render, the fresh
+bounds, and that revision atomically, and the view applies only a newer
+revision, so an overlapping or out-of-order response can never display an
+older state. The listing distinguishes the persisted Scene values from the
+unsaved session values (a `was` marker plus a modified flag per moved Layer,
+and an unsaved count in the status line), an invalid movement is reported
+with a field-specific error while the last valid preview stays on display,
+and a selected Layer's drag surface sits above every unselected hit while
+unselected hits keep compositing order. Connectors have no authored position
+and cannot be dragged. The session never writes the Scene file: every
+adjustment lives in session state until an explicit save lands (saving is a
+separate step, not part of this session), so exiting or losing the session
+leaves the Scene bytes unchanged.
+
+Ctrl-C or SIGTERM ends the session and
 releases its listener and browser cleanly. A missing or invalid Reference
-fails before any session exists, naming the field to fix. Layer mutation,
-saving, and generation are out of scope — the session is a review view; edit
-the Scene file itself.
+fails before any session exists, naming the field to fix. Resizing, numeric
+position/size editing, saving, and generation are out of scope — edit the
+Scene file itself for those.
 
 ## Overlay cards
 
