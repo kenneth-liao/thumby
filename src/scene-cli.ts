@@ -36,6 +36,7 @@ import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { checkReference, diffPng, renderCompareSheet } from "./compare.js";
+import { startAuthorSession } from "./scene-author.js";
 import { importReference, acquireSceneLock, atomicReplace, atomicCreate } from "./reference-import.js";
 import {
   buildManifest,
@@ -64,6 +65,11 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         alpha overlay, and a per-channel difference view) plus
                                         the diff and render PNGs into out/. Review artifacts
                                         only — never a manifest, never the final Render.
+  bun run scene author  <scene.json>   Open the live authoring session: validates the Scene and
+                                        its Reference Thumbnail, renders once in memory, then
+                                        serves the Render and Reference side by side plus an
+                                        adjustable overlay on a capability-scoped loopback URL
+                                        (printed as one-line JSON). Ctrl-C or SIGTERM closes it.
   bun run scene reference import <scene.json> <file>
                                         Normalize a local raster image (PNG, JPEG, or
                                         WebP) to the canonical Reference Thumbnail profile
@@ -906,6 +912,41 @@ async function dispatch(
   }
   if (cmd === "compare") return usageError(`"scene compare" takes exactly one scene file`);
 
+  if (cmd === "author") {
+    if (!file || rest.length) return usageError(`"scene author" takes exactly one scene file and no options`);
+    const read = await readSceneFile(file);
+    if ("errors" in read) return invalid(read.errors);
+    const sceneDir = path.dirname(path.resolve(file));
+    // The one validation gate — before any browser, before any listener.
+    const result = await loadScene(sceneDir, library, read.raw);
+    if (!result.ok) return invalid(result.errors);
+    // The required-Reference gate: the same check as compare (format,
+    // dimensions, containment — its bytes are read once, exactly those are
+    // served), then presence — a live session with no Reference Thumbnail has
+    // nothing to review, so an absent association is a hard pre-listen failure
+    // naming the field to fix, never a reference-less session.
+    const ref = await checkReference(sceneDir, result.resolved.scene);
+    if (!ref.ok) return invalid(ref.errors);
+    if (!ref.reference)
+      return invalid([
+        {
+          path: "reference",
+          message:
+            `this Scene has no associated Reference Thumbnail — set the "reference.path" field to a ` +
+            `project-relative PNG at exactly 1280×720, e.g. { "reference": { "path": "reference.png" } }, to open an authoring session.`,
+        },
+      ]);
+    // One in-memory Render before the session listens: a session never serves
+    // a Render it has not already produced (and a failed render never opens one).
+    const { png } = await renderScene(result.resolved);
+    // Holds the session until SIGTERM/SIGINT drives the one shutdown path.
+    return startAuthorSession({
+      scene: path.basename(path.resolve(file), ".json"),
+      renderPng: png,
+      reference: ref.reference,
+    });
+  }
+
   if (cmd === "reference" && file === "import") {
     const [sceneArg, inputArg, ...flags] = rest;
     if (!sceneArg || !inputArg)
@@ -940,8 +981,8 @@ async function dispatch(
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, author, render, guidelines, reference import, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, author, render, guidelines, reference import, or rerender`,
   );
 }
 

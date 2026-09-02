@@ -1188,8 +1188,8 @@ describe("scene cli", () => {
   it("exits 2 with usage on an unknown command", async () => {
     const { exitCode, output } = await cliRun(["nonsense"]);
     expect(exitCode).toBe(2);
-    expect((output as { errors: { message: string }[] }).errors[0]!.message).toMatch(
-      /unknown command "nonsense"/,
-    );
+    const message = (output as { errors: { message: string }[] }).errors[0]!.message;
+    expect(message).toMatch(/unknown command "nonsense"/);
+    expect(message).toMatch(/expected .*author/);
   });
 });
