@@ -981,8 +981,8 @@ async function dispatch(
 
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, author, render, guidelines, reference import, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, author, render, guidelines, reference import, or rerender`,
   );
 }
 
