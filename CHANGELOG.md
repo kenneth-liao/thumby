@@ -4,8 +4,12 @@
 
 ### Added
 
-- `scene reference import <scene> <file>` (US-001–US-004, #54): normalize a local raster image (PNG, JPEG, WebP, GIF, AVIF, BMP) to the exact 1280×720 PNG profile, store the copy inside the Scene bundle, and associate it atomically — `--source` records provenance as `reference.source`
+- `scene reference import <scene> <file>` (US-001–US-004, #54): normalize a local PNG, JPEG, or WebP image to the exact 1280×720 PNG profile, store the copy inside the Scene bundle, and associate it atomically — `--source` records provenance as `reference.source`
 - Non-16:9 input is refused before anything is written (an unstated subjective crop or a distortion is never chosen); failed imports leave the previous Scene and its associated files untouched
+
+### Fixed
+
+- Reference Thumbnail import is race-safe and fail-closed: serialized per-Scene locking, exclusive no-replace storage, bounded PNG/JPEG/WebP intake, and surfaced rollback failures (#54, #66)
 
 ### Changed
 

@@ -705,23 +705,32 @@ it is a review artifact, not a reproducible Render.
 ### Importing a Reference Thumbnail
 
 `scene reference import <scene.json> <file>` is one normalization boundary
-plus one atomic transaction (DEC-001..004): it takes a local raster image —
-anything the bundled browser decodes (PNG, JPEG, WebP, GIF first frame, AVIF,
-BMP; the input may live anywhere, it is external source material) — and
-normalizes it to the canonical profile: an exact 1280×720 PNG stored inside
-the scene's directory as `<scene>.reference.png`, then associated by writing
-the Scene's `reference.path` to that copy. The stored name is never
-overwritten or written through: when it is taken, the import stores
-`<scene>.reference-2.png`, `-3`… instead — an existing file, directory, or
-symlink alias is skipped, so a previous association's file always survives.
+plus one atomic transaction (DEC-001..004), serialized per Scene by a lock
+file (`<scene>.lock` — leave it in place: it relocates with the bundle, and a
+crashed import's lock is recovered automatically). Supported input is
+exactly a regular local **PNG, JPEG, or WebP** file — anything else is
+refused with a convert-locally hint, never handed to a decoder blind. The
+input may live anywhere; it is external source material. Ingestion is
+resource-bounded: the file is opened and the opened handle is measured
+(regular files only), the 64 MB encoded cap is enforced on that measurement
+and re-bounded by the read window itself, and the header's declared geometry
+must fit the decoded-pixel budget before the browser rasterizes anything.
 
 Normalization is deliberately non-distorting and non-subjective: a 16:9 input
-is uniformly rescaled (1:1 when already exact, so identical pixels are stored
-unchanged); any other aspect is refused before anything is written, because
-fitting it would require an unstated subjective crop or a distortion. Crop or
-resize the image to 16:9 yourself (e.g. `sips -z 720 1280 shot.png` to scale,
-`--cropToHeightWidth 720 1280` to crop with stated intent), then import the
-result. SVG is vector, not raster — rasterize it locally first.
+is uniformly rescaled to exactly 1280×720 (1:1 when already exact, so
+identical pixels are stored unchanged); any other aspect is refused before
+anything is written, because fitting it would require an unstated subjective
+crop or a distortion. Crop or resize the image to 16:9 yourself (e.g. `sips
+-z 720 1280 shot.png` to scale, `--cropToHeightWidth 720 1280` to crop with
+stated intent), then import the result.
+
+The copy is stored inside the scene's directory as `<scene>.reference.png`,
+associated by writing the Scene's `reference.path` to that copy. Storage is
+reserved with an **exclusive no-replace create** — the create is the free-name
+check, so a name taken after any earlier scan is skipped, never replaced: an
+existing file, directory, or symlink alias is never overwritten or written
+through (`<scene>.reference-2.png`, `-3`… instead), and a previous
+association's file always survives.
 
 `--source "…"` records user-supplied provenance as `reference.source` — free
 text, recorded verbatim, never resolved as a path: the relocatable bundle
@@ -730,12 +739,19 @@ stored PNG's bytes, never a second hash (ADR-0002).
 
 The transaction validates the complete resulting Scene through the same gate
 as `scene validate` before the Scene file is replaced, and every write lands
-through a temp file + rename. Any failure — missing or unreadable input,
-refused normalization, failed validation, failed commit — rolls the new copy
-back and leaves the previous Scene and its associated files byte-identical
-and usable. The renderer and the Render manifest ignore the reference
-entirely (DEC-009), so importing never changes rendered pixels or manifest
-identities.
+through a temp file + rename. Immediately before commit, the Scene's current
+bytes are compared to the bytes the import first read — an intervening edit
+fails closed. Any failure — missing or unreadable input, refused
+normalization, failed validation, a changed Scene, a failed commit — rolls
+the new copy back and leaves the previous Scene and its associated files
+byte-identical and usable; a rollback whose removal fails is reported as a
+second error naming the retained path.
+
+The renderer never reads the reference, and the Render manifest never records
+it as a Render input (DEC-009): importing changes neither rendered pixels nor
+resolved Asset identities. The manifest's scene byte identity (its sha256)
+necessarily changes, because the reference metadata is part of the Scene
+bytes — the same consequence `scene compare` documents below.
 
 ### Reference comparison
 

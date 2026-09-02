@@ -65,8 +65,8 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         the diff and render PNGs into out/. Review artifacts
                                         only — never a manifest, never the final Render.
   bun run scene reference import <scene.json> <file>
-                                        Normalize a local raster image (PNG, JPEG, WebP, GIF,
-                                        AVIF, BMP) to the canonical Reference Thumbnail profile
+                                        Normalize a local raster image (PNG, JPEG, or
+                                        WebP) to the canonical Reference Thumbnail profile
                                         (exact 1280×720 PNG), store the copy inside the scene's
                                         directory, and associate it with the Scene atomically.
                                         --source <text> records user-supplied provenance.
@@ -148,26 +148,39 @@ Safe areas (REQ-012)
 
 Reference Thumbnail import (DEC-001..004)
   "scene reference import <scene> <file>" is one normalization boundary plus
-  one atomic transaction. Input: any local raster image the bundled browser
-  decodes (PNG, JPEG, WebP, GIF first frame, AVIF, BMP); the input may live
-  anywhere — it is external source material. Normalization is non-distorting
-  and non-subjective: a 16:9 input is uniformly rescaled to exactly 1280×720
+  one atomic transaction, serialized per Scene by a lock file (<scene>.lock —
+  leave it in place: it relocates with the bundle, and a crashed import's
+  lock is recovered automatically). Supported input is exactly a regular
+  local PNG, JPEG, or WebP file; it may live anywhere — it is external
+  source material. Ingestion is resource-bounded: the file is opened and the
+  opened handle is measured (regular files only), the 64 MB encoded cap is
+  enforced on that measurement and re-bounded by the read window itself, and
+  the header's declared geometry must fit the decoded-pixel budget before
+  the browser rasterizes anything. Normalization is non-distorting and
+  non-subjective: a 16:9 input is uniformly rescaled to exactly 1280×720
   (1:1 when already exact); any other aspect is refused before anything is
   written, because fitting it would require an unstated subjective crop or a
   distortion — crop or resize locally with stated intent, then import. The
-  copy is stored inside the scene's directory as <scene>.reference.png (a -2,
-  -3… suffix is used when a name is taken: an existing file, directory, or
-  symlink alias is never overwritten or written through, so the previous
+  copy is stored inside the scene's directory as <scene>.reference.png (a
+  -2, -3… suffix is used when a name is taken — the reservation is an
+  exclusive no-replace create, so an existing file, directory, or symlink
+  alias is never overwritten or written through, and the previous
   association's file always survives). --source records user-supplied
   provenance as reference.source free text: never resolved as a path — no
   external file dependency — and never a second stored hash (identity derives
   from bytes). Before the Scene file is replaced, the complete resulting
-  Scene passes the same validation gate as "scene validate"; any failure —
-  missing or unreadable input, refused normalization, failed validation, or a
-  failed commit — rolls the new copy back and leaves the previous Scene and
-  its associated files byte-identical and usable. The renderer and the Render
-  manifest ignore the reference entirely (DEC-009), so importing never
-  changes rendered pixels or manifest identities.
+  Scene passes the same validation gate as "scene validate", and the Scene's
+  current bytes are compared to the bytes this import first read — an
+  intervening edit fails closed. Any failure — missing or unreadable input,
+  refused normalization, failed validation, a changed Scene, or a failed
+  commit — rolls the new copy back and leaves the previous Scene and its
+  associated files byte-identical and usable; a rollback whose removal fails
+  is reported as a second error naming the retained path. The renderer never
+  reads the reference, and the Render manifest never records it as a Render
+  input (DEC-009): importing changes neither rendered pixels nor resolved
+  Asset identities — the manifest's scene byte identity (its sha256)
+  necessarily changes, because the reference metadata is part of the Scene
+  bytes.
 `;
 
 interface CliResult {

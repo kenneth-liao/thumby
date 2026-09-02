@@ -14,9 +14,10 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { decodePng, encodePngRgba } from "../src/png.js";
+import { decodePng, encodePngRgba, MAX_ENCODED_BYTES } from "../src/png.js";
 import { run as cliRun } from "../src/scene-cli.js";
 import { importReference } from "../src/reference-import.js";
+import { readRasterMeta } from "../src/raster-meta.js";
 import { withRenderPage } from "../src/browser.js";
 import { chromium } from "playwright";
 
@@ -216,8 +217,10 @@ describe("scene reference import", () => {
       [webpInput, "webp"],
     ] as const) {
       const file = await sceneFileWith({}, `${name}.json`);
-      const { exitCode } = await importRun(["reference", "import", file, input]);
-      expect(exitCode).toBe(0);
+      const { exitCode, output } = await importRun(["reference", "import", file, input]);
+      // On any failure the structured CLI error is the assertion message —
+      // the import contract is actionable, so the test failure must be too.
+      expect(exitCode, JSON.stringify(output)).toBe(0);
       // The stored copy is a genuine PNG (decoded by the strict parser) at
       // the canonical profile — never the source format.
       const decoded = decodePng(
@@ -380,7 +383,7 @@ describe("scene reference import", () => {
     expect(vOut.reference).toBe("rollback.reference.png");
   }, 20000);
 
-  it("rendering the imported Scene yields the same pixels and manifest identities as an equivalent Scene without the reference", async () => {
+  it("rendering the imported Scene yields the same pixels and the same resolved Asset identities as an equivalent Scene without the reference — the Scene's byte identity changes by design", async () => {
     // Two identical projects; only one gets a Reference Thumbnail.
     const mk = async (name: string): Promise<string> => {
       const dir = path.join(fix.root, name);
@@ -516,4 +519,229 @@ describe("scene reference import", () => {
       /expected schema, .*reference import/,
     );
   });
+});
+
+// --- serialized transaction (INT-1, PROD-1, PROD-2, PROD-3) -------------------
+
+describe("scene reference import — serialized transaction", () => {
+  it("serializes concurrent imports — both succeed, both copies survive intact, the Scene points at the last", async () => {
+    const input = path.join(fix.root, "shot-concurrent.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "concurrent.json");
+
+    // Two imports of the same Scene at once: the per-Scene lock serializes
+    // them, so the second reads the first's committed Scene, reserves the
+    // next free name exclusively, and commits on top — no copy replaced, no
+    // Scene overwrite of an intervening edit.
+    const [a, b] = await Promise.all([
+      importRun(["reference", "import", file, input]),
+      importRun(["reference", "import", file, input]),
+    ]);
+    expect(a.exitCode).toBe(0);
+    expect(b.exitCode).toBe(0);
+    const names = (await readdir(fix.projectRoot))
+      .filter((f) => f.startsWith("concurrent.reference"))
+      .sort();
+    expect(names).toEqual(["concurrent.reference-2.png", "concurrent.reference.png"]);
+    for (const name of names) {
+      const decoded = decodePng(await readFile(path.join(fix.projectRoot, name)));
+      expect(decoded.width).toBe(1280);
+      expect(decoded.height).toBe(720);
+    }
+    const scene = JSON.parse(await readFile(file, "utf8")) as {
+      reference: { path: string };
+    };
+    expect(scene.reference.path).toBe("concurrent.reference-2.png");
+    const { exitCode } = await importRun(["validate", file]);
+    expect(exitCode).toBe(0);
+  }, 60000);
+
+  it("reserves the destination exclusively — taken names are skipped, their bytes never replaced", async () => {
+    const first = path.join(fix.projectRoot, "exclusive.reference.png");
+    const second = path.join(fix.projectRoot, "exclusive.reference-2.png");
+    await writeFile(first, Buffer.from("first association bytes"));
+    await writeFile(second, Buffer.from("second association bytes"));
+    const input = path.join(fix.root, "shot-exclusive.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "exclusive.json");
+
+    const { exitCode, output } = await importRun(["reference", "import", file, input]);
+    expect(exitCode).toBe(0);
+    expect(output.reference).toMatchObject({ path: "exclusive.reference-3.png" });
+    // The taken names' bytes were never replaced.
+    expect(await readFile(first)).toEqual(Buffer.from("first association bytes"));
+    expect(await readFile(second)).toEqual(Buffer.from("second association bytes"));
+  }, 20000);
+
+  it("fails closed when the Scene changed since it was read — an intervening edit is never overwritten", async () => {
+    const input = path.join(fix.root, "shot-cas.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "cas.json");
+    const sceneBefore = await readFile(file);
+
+    // Fault-injection seam (the writeScene precedent): the pre-commit
+    // comparison observes bytes different from the ones the import read.
+    let reads = 0;
+    const tampered =
+      JSON.stringify(sceneDoc({ layers: [{ ...LAYERS[0], color: "#ffffff" }] }), null, 2) + "\n";
+    const result = await importReference(file, input, {
+      readScene: async (f) => (reads++ === 0 ? readFile(f) : Buffer.from(tampered)),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.path).toBe("scene");
+      expect(result.errors[0]!.message).toMatch(/changed after this import read it/);
+      expect(result.errors[0]!.message).toMatch(/refuses to overwrite an intervening edit/);
+      expect(result.errors[0]!.message).toMatch(/Re-run the import/);
+    }
+    // The real Scene bytes are untouched, and the reservation rolled back.
+    expect(await readFile(file)).toEqual(sceneBefore);
+    await expect(readFile(path.join(fix.projectRoot, "cas.reference.png"))).rejects.toThrow();
+  }, 20000);
+
+  it("a failed commit with a failed rollback is one composite error naming the retained contained path", async () => {
+    const input = path.join(fix.root, "shot-composite.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "composite.json");
+    const sceneBefore = await readFile(file);
+
+    const result = await importReference(file, input, {
+      writeScene: () => Promise.reject(new Error("injected commit failure")),
+      removeStored: () => Promise.reject(new Error("injected removal failure")),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(2);
+      expect(result.errors[0]!.path).toBe("scene");
+      expect(result.errors[0]!.message).toMatch(/injected commit failure/);
+      expect(result.errors[1]!.path).toBe("reference");
+      // The retained copy is identified by its contained path, with remediation.
+      expect(result.errors[1]!.message).toMatch(/composite\.reference\.png/);
+      expect(result.errors[1]!.message).toMatch(/Delete that file, or re-import/);
+      expect(result.errors[1]!.message).toMatch(/injected removal failure/);
+    }
+    // The retained copy is still on disk; the Scene bytes are untouched.
+    expect(
+      (await readFile(path.join(fix.projectRoot, "composite.reference.png"))).length,
+    ).toBeGreaterThan(0);
+    expect(await readFile(file)).toEqual(sceneBefore);
+  }, 20000);
+
+  it("refuses a non-regular-file input before reading it", async () => {
+    const dir = path.join(fix.root, "input-dir");
+    await mkdir(dir, { recursive: true });
+    const file = await sceneFileWith({}, "notregular.json");
+    const sceneBefore = await readFile(file);
+    const dirBefore = (await readdir(fix.projectRoot)).sort();
+
+    const { exitCode, output } = await importRun(["reference", "import", file, dir]);
+    expect(exitCode).toBe(1);
+    const errors = output.errors as { path: string; message: string }[];
+    expect(errors[0]!.path).toBe("file");
+    expect(errors[0]!.message).toMatch(/not a regular file/);
+    expect(errors[0]!.message).toMatch(/a directory/);
+    expect(await readFile(file)).toEqual(sceneBefore);
+    expect((await readdir(fix.projectRoot)).sort()).toEqual(dirBefore);
+  }, 20000);
+
+  it("refuses an over-limit input by size before reading it", async () => {
+    const big = path.join(fix.root, "big.png");
+    await writeFile(big, Buffer.alloc(MAX_ENCODED_BYTES + 1));
+    const file = await sceneFileWith({}, "oversize.json");
+    const sceneBefore = await readFile(file);
+    const dirBefore = (await readdir(fix.projectRoot)).sort();
+
+    const { exitCode, output } = await importRun(["reference", "import", file, big]);
+    expect(exitCode).toBe(1);
+    const errors = output.errors as { path: string; message: string }[];
+    expect(errors[0]!.path).toBe("file");
+    expect(errors[0]!.message).toMatch(/over the 64 MB import limit/);
+    expect(await readFile(file)).toEqual(sceneBefore);
+    expect((await readdir(fix.projectRoot)).sort()).toEqual(dirBefore);
+  }, 20000);
+
+  it("readRasterMeta returns trusted geometry for every supported format — the budget's one input", async () => {
+    // PNG: crafted header (bounds-checked reads; CRCs are the decoder's job).
+    const png = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+    png.write("IHDR", 12, "latin1");
+    png.writeUInt32BE(2560, 16);
+    png.writeUInt32BE(1440, 20);
+    expect(readRasterMeta(png, "x.png")).toEqual({ format: "png", width: 2560, height: 1440 });
+
+    // JPEG: a minimal SOF0 frame header (4608×8192, 1 component).
+    const jpeg = Buffer.from([
+      0xff, 0xd8, // SOI
+      0xff, 0xc0, 0x00, 0x0b, 0x08, 0x12, 0x00, 0x20, 0x00, 0x01, 0x01, 0x11, 0x00,
+      0xff, 0xd9, // EOI
+    ]);
+    expect(readRasterMeta(jpeg, "x.jpg")).toEqual({ format: "jpeg", width: 8192, height: 4608 });
+
+    // WebP: the real extended-file bytes the bundled browser encodes for a
+    // 640×360 canvas (VP8X: 4 flag bytes, then 24-bit width−1, height−1).
+    const [webp] = await withRenderPage((page) =>
+      page.evaluate(() => {
+        const c = document.createElement("canvas");
+        c.width = 640;
+        c.height = 360;
+        const ctx = c.getContext("2d")!;
+        ctx.fillStyle = "#2080c0";
+        ctx.fillRect(0, 0, 640, 360);
+        return [c.toDataURL("image/webp")];
+      }),
+    ) as [string];
+    const webpBytes = Buffer.from(webp.replace(/^data:image\/webp;base64,/, ""), "base64");
+    expect(readRasterMeta(webpBytes, "x.webp")).toEqual({ format: "webp", width: 640, height: 360 });
+
+    // Anything else is refused with a convert-locally hint — never guessed.
+    expect(readRasterMeta(Buffer.from("not an image"), "x.png")).toMatch(
+      /not a PNG, JPEG, or WebP image/,
+    );
+  }, 20000);
+
+  it("enforces the decoded budget from trusted header metadata before rasterization", async () => {
+    // PNG whose IHDR declares 20000×11250 — over the per-axis decoded budget.
+    // The parser reads header bytes only, so the CRC mismatch is irrelevant:
+    // the refusal fires before any decoder runs.
+    const pngBytes = encodePngRgba(64, 36, quadrants(64, 36));
+    pngBytes.writeUInt32BE(20000, 16);
+    pngBytes.writeUInt32BE(11250, 20);
+    const pngInput = path.join(fix.root, "huge-declared.png");
+    await writeFile(pngInput, pngBytes);
+    const pngScene = await sceneFileWith({}, "huge-png.json");
+    const { exitCode, output } = await importRun(["reference", "import", pngScene, pngInput]);
+    expect(exitCode).toBe(1);
+    const errors = output.errors as { path: string; message: string }[];
+    expect(errors[0]!.path).toBe("file");
+    expect(errors[0]!.message).toMatch(/20000×11250/);
+    expect(errors[0]!.message).toMatch(/per-axis decoded budget/);
+    expect(
+      (await readdir(fix.projectRoot)).filter((f) => f.startsWith("huge-png.reference")),
+    ).toEqual([]);
+
+    // JPEG whose SOF0 frame header declares 8192×4608 — within the per-axis
+    // budget but over the decoded-pixel budget.
+    const jpeg = Buffer.from([
+      0xff, 0xd8, // SOI
+      0xff, 0xc0, 0x00, 0x0b, 0x08, 0x12, 0x00, 0x20, 0x00, 0x01, 0x01, 0x11, 0x00, // SOF0: 4608×8192, 1 component
+      0xff, 0xd9, // EOI
+    ]);
+    const jpegInput = path.join(fix.root, "huge-declared.jpg");
+    await writeFile(jpegInput, jpeg);
+    const jpegScene = await sceneFileWith({}, "huge-jpeg.json");
+    const { exitCode: jCode, output: jOut } = await importRun([
+      "reference",
+      "import",
+      jpegScene,
+      jpegInput,
+    ]);
+    expect(jCode).toBe(1);
+    const jErrors = jOut.errors as { path: string; message: string }[];
+    expect(jErrors[0]!.path).toBe("file");
+    expect(jErrors[0]!.message).toMatch(/8192×4608/);
+    expect(jErrors[0]!.message).toMatch(/-pixel decoded budget/);
+    expect(
+      (await readdir(fix.projectRoot)).filter((f) => f.startsWith("huge-jpeg.reference")),
+    ).toEqual([]);
+  }, 20000);
 });
