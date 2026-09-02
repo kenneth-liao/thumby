@@ -4,6 +4,7 @@
 
 ### Added
 
+- Scene author sessions resize selected positioned Layers from measured corner handles and edit exact position/size values through one synchronized session state, rejecting invalid or unavailable geometry without replacing the last valid preview (#61).
 - The Scene author session moves a selected positioned Layer by dragging: each movement previews through the canonical renderer from unsaved session state while the Scene file stays untouched (#60).
 - The Scene author session lists every resolved Layer once with its rendered bounds and selects Layers from the listing or the canvas through one script-free radio group (#59).
 - Offline Scene author sessions show a validated Scene and Reference Thumbnail side by side and in an adjustable overlay through a capability-scoped loopback URL (#58).
