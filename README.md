@@ -908,10 +908,9 @@ and an unsaved count in the status line), an invalid movement is reported
 with a field-specific error while the last valid preview stays on display,
 and a selected Layer's drag surface sits above every unselected hit while
 unselected hits keep compositing order. Connectors have no authored position
-and cannot be dragged. The session never writes the Scene file: every
-adjustment lives in session state until an explicit save lands (saving is a
-separate step, not part of this session), so exiting or losing the session
-leaves the Scene bytes unchanged.
+and cannot be dragged. Every adjustment lives in session state until the
+explicit save lands, so exiting or losing the session without saving leaves
+the Scene bytes unchanged.
 
 Resizing and numeric geometry (#61): a selected positioned Layer shows four
 resize handles anchored at its measured rendered corners (read directly from
@@ -930,10 +929,30 @@ last valid preview never leaves the display. A Layer without an authored
 position or size — a Connector — is read-only for these controls and explains
 why: its geometry derives from its `from`/`to` target Layers.
 
+Saving (#62): the status bar carries a Save control. Clicking it POSTs an
+empty body to the session's token-scoped `/save` route, which joins the same
+arrival-order queue as the geometry edits — a save arriving after earlier
+edits persists exactly those committed edits, and later edits stay unsaved.
+The save re-validates the complete candidate through the ordinary gate and
+atomically replaces the Scene file with exactly the raw authored document —
+pretty-printed JSON, never theme-resolved defaults, render measurements,
+handles, or other derived render state. The save also refuses when the file
+on disk no longer holds the exact bytes the session opened with: an external
+edit is never overwritten, and the error names what happened. Every failure —
+an invalid field, an unreadable or locked file, a failed write — leaves the
+previous Scene usable, writes nothing, and reports the actionable error
+instead of success; the status line shows the saving/saved/failure state
+without wiping newer results or in-progress edits. After a successful save
+the persisted baseline resets: the unsaved markers clear, further edits are
+unsaved against the saved document, and the next save compares against the
+just-written bytes. A saved Scene stays an ordinary Scene: normal final
+`scene render`, its manifest, and manifest-backed offline rerendering remain
+the acceptance path.
+
 Ctrl-C or SIGTERM ends the session and
 releases its listener and browser cleanly. A missing or invalid Reference
-fails before any session exists, naming the field to fix. Saving and
-generation remain separate workflow steps.
+fails before any session exists, naming the field to fix. Generation remains
+a separate workflow step.
 
 ## Overlay cards
 
