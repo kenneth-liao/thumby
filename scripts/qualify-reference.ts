@@ -35,11 +35,14 @@
  * Publication contract (PROD-1): evidence leaves the box through exactly one
  * serializer (publishedJson) — every string passes credential redaction for
  * each supported Gateway auth source (AI_GATEWAY_API_KEY, VERCEL_OIDC_TOKEN)
- * and a length cap; warnings and errors pass strict field whitelists before
- * serialization; the local reference path is never recorded. Absolute
- * Gateway balances are never emitted. Artifacts stay under the repo-rooted,
- * gitignored out/ tree regardless of the caller's cwd (PROD-2), and a partial
- * record is persisted the moment the paid call settles, then enriched (PROD-3).
+ * and local-filesystem facts (the reference argument, the repo root, the
+ * caller's cwd), then a length cap; warnings and errors pass strict field
+ * whitelists before serialization; the local reference path is never
+ * recorded; the fatal CLI boundary emits the same whitelisted, redacted,
+ * capped shape — never a stack. Absolute Gateway balances are never emitted.
+ * Artifacts stay under the repo-rooted, gitignored out/ tree regardless of
+ * the caller's cwd (PROD-2), and a partial record is persisted the moment
+ * the paid call settles, then enriched (PROD-3).
  *
  * Usage: bun scripts/qualify-reference.ts <model-key|gateway-id> <reference-image>
  */
@@ -60,6 +63,15 @@ const MAX_PUBLISHED_STRING = 2000;
 /** Repo-rooted artifact home — independent of the caller's cwd (PROD-2). */
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 const OUT_DIR = path.join(REPO_ROOT, "out", "qualify-reference");
+
+/**
+ * Local filesystem facts that must never appear in emitted output (PROD-1):
+ * the reference argument joins at startup; the repo root and caller's cwd are
+ * known from the start. Degenerate short values ("/", "") are never facts.
+ */
+const LOCAL_PATH_FACTS: string[] = [REPO_ROOT, process.cwd()].filter(
+  (p) => typeof p === "string" && p.length > 1,
+);
 
 const PROMPT = [
   "Simplified, recognizable representation of the referenced application window:",
@@ -83,6 +95,7 @@ export function secretValues(): string[] {
 function redactAll(value: string): string {
   let out = value;
   for (const secret of secretValues()) out = out.replaceAll(secret, "<redacted>");
+  for (const fact of LOCAL_PATH_FACTS) out = out.replaceAll(fact, "<local-path>");
   return out;
 }
 
@@ -227,6 +240,23 @@ async function writeEvidence(evidence: Record<string, unknown>, stem: string): P
 
 // --- the harness ----------------------------------------------------------------
 
+/**
+ * The reference ingestion boundary (PROD-1): a failure is refused with a
+ * path-free message — stderr becomes ticket evidence, so it never carries
+ * local filesystem layout, and the raw fs error (message and stack both name
+ * the path) never reaches the fatal handler.
+ */
+async function readReference(refPath: string): Promise<Buffer> {
+  try {
+    return await readFile(refPath);
+  } catch {
+    console.error(
+      "Reference image could not be read (check the path and permissions). Nothing was sent; no spend.",
+    );
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const [modelArg, refPath] = process.argv.slice(2);
   if (!modelArg || !refPath) {
@@ -247,7 +277,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const refBytes = await readFile(refPath); // throws before any spend if unreadable
+  LOCAL_PATH_FACTS.push(refPath); // the operator's argument is a local fact from here on
+  const refBytes = await readReference(refPath); // path-free refusal before any spend if unreadable
   const refHash = createHash("sha256").update(refBytes).digest("hex");
   const requestArgs = buildImageRequestArgs(spec, PROMPT, [refBytes]);
 
@@ -393,8 +424,11 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((err: Error) => {
-    console.error(redactAll(err.stack ?? err.message));
+  main().catch((err: unknown) => {
+    // The same publication boundary as the evidence record (PROD-1):
+    // whitelisted error fields only — no stack, no local paths, redacted,
+    // capped.
+    console.error(publishedJson({ fatal: true, error: publishableError(err) }));
     process.exit(1);
   });
 }

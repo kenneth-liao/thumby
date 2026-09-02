@@ -6,6 +6,7 @@
  * fields and prove the boundary removes them. No network, no spend.
  */
 import { describe, test, expect } from "bun:test";
+import path from "node:path";
 import {
   publishableWarning,
   publishableError,
@@ -89,5 +90,34 @@ describe("publishableError — status/type/ids/body whitelist", () => {
   test("a plain Error yields only its name and message", () => {
     const out = publishableError(new Error("boom"));
     expect(out).toEqual({ name: "Error", message: "boom" });
+  });
+});
+
+describe("CLI fatal boundary (PROD-1 re-review)", () => {
+  test("an unreadable absolute Reference path exits path-free: no local path, no credentials, no stack, capped lines", () => {
+    const secretPath = "/nonexistent/qual-ref-probe-3f2a/ref.png";
+    const keyPlant = "gw-key-plant-9d41c";
+    const oidcPlant = "oidc-plant-7b2e0";
+    const proc = Bun.spawnSync({
+      cmd: [
+        "bun",
+        path.resolve(import.meta.dir, "../scripts/qualify-reference.ts"),
+        "gpt-image",
+        secretPath,
+      ],
+      env: { ...process.env, AI_GATEWAY_API_KEY: keyPlant, VERCEL_OIDC_TOKEN: oidcPlant },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    expect(proc.exitCode).toBe(1);
+    const stderr = proc.stderr.toString();
+    expect(stderr.trim().length).toBeGreaterThan(0);
+    expect(stderr).not.toContain(secretPath); // no local filesystem layout
+    expect(stderr).not.toContain(keyPlant); // no credential material
+    expect(stderr).not.toContain(oidcPlant);
+    expect(stderr).not.toContain("at "); // no stack frames
+    for (const line of stderr.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(2100); // the length cap holds at the CLI boundary
+    }
   });
 });
