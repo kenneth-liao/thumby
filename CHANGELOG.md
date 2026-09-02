@@ -4,6 +4,7 @@
 
 ### Added
 
+- Scene author sessions resize selected positioned Layers from measured corner handles and edit exact position/size values through one synchronized session state, rejecting invalid or unavailable geometry without replacing the last valid preview (#61).
 - The Scene author session moves a selected positioned Layer by dragging: each movement previews through the canonical renderer from unsaved session state while the Scene file stays untouched (#60).
 - The Scene author session lists every resolved Layer once with its rendered bounds and selects Layers from the listing or the canvas through one script-free radio group (#59).
 - Offline Scene author sessions show a validated Scene and Reference Thumbnail side by side and in an adjustable overlay through a capability-scoped loopback URL (#58).
@@ -15,6 +16,9 @@
 
 ### Fixed
 
+- Scene author geometry edits keep reporting an unreachable session even when the failing field carries a newer unsubmitted value (#61).
+- Scene author numeric geometry edits preserve in-progress values across other fields' commits, stale rejections, and network failures, and resizing is verified from every corner, including nested and rotated Layers (#61).
+- Scene author geometry edits keep exact numeric position/size values, and stale, rejected, or unreachable geometry requests can no longer desynchronize the numeric form or the last valid preview (#61).
 - Scene author movement keeps Connector bounds and the latest request status current, queues changes by request arrival, and supports valid tiny-scale Groups (#60).
 - Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
 - Scene author Connector selection highlights the connector's exact painted extent — stroke, dash, curve, and arrowhead measured from the browser's own rasterization of the rendered connector — instead of a conservative stroke/arrow envelope, and a hidden Layer's inspection state can no longer carry bounds (#59).

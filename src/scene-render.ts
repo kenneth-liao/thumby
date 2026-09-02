@@ -761,10 +761,10 @@ async function renderResolvedToPng(
       const spec = [...inspectionLayers(resolved.scene.layers)];
       const measured = await page.evaluate(collectLayerBounds, spec);
       layers = spec.map((s, i): RenderedLayer => {
-        const { box, basis } = measured[i]!;
+        const { box, basis, fullBasis, corners } = measured[i]!;
         return box === null
           ? { id: s.id, type: s.type as SceneLayer["type"], visible: false, bounds: null }
-          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds: box, basis };
+          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds: box, basis, fullBasis, corners };
       });
     }
 
@@ -827,6 +827,20 @@ export interface Basis {
  *   itself or any ancestor Group — paints nothing, so bounds are absent:
  *   null, never a zero-size box.
  */
+/** One authored box corner's frame-px position, DOM-measured (#61). */
+export interface LayerPoint {
+  x: number;
+  y: number;
+}
+
+/** The four authored box corners of a positioned Layer, in frame px (#61). */
+export interface LayerCorners {
+  nw: LayerPoint;
+  ne: LayerPoint;
+  se: LayerPoint;
+  sw: LayerPoint;
+}
+
 export interface VisibleRenderedLayer {
   id: string;
   type: SceneLayer["type"];
@@ -838,6 +852,19 @@ export interface VisibleRenderedLayer {
    * Connector has no authored position; its basis is the identity map.
    */
   basis: Basis;
+  /**
+   * The measured local→frame linear map including the Layer's own transform
+   * (#61): the box-corner map a resize drag decomposes. A Connector has no
+   * authored box; its full basis is the identity map.
+   */
+  fullBasis: Basis;
+  /**
+   * The four authored box corners, measured directly in the render DOM (#61):
+   * paintless zero-size markers at the box's corners, read through the
+   * browser's own ancestor+own transforms — never inferred from the painted
+   * AABB. Null only for a Connector (no authored box of its own).
+   */
+  corners: LayerCorners | null;
 }
 
 /** A Layer that paints nothing — hidden or fully transparent, at any depth. */
@@ -900,23 +927,19 @@ function* inspectionLayers(
  */
 const collectLayerBounds = async (
   spec: { id: string; type: string; visible: boolean }[],
-): Promise<{ box: LayerBox | null; basis: Basis }[]> => {
+): Promise<{ box: LayerBox | null; basis: Basis; fullBasis: Basis; corners: LayerCorners | null }[]> => {
   const els = [...document.querySelectorAll<HTMLElement>(".scene-layer")];
   const round = (v: number) => Number(v.toFixed(4));
   /*
-   * The measured local→frame linear basis (#60): the accumulated 2×2 linear
-   * part of every ancestor .scene-layer's computed transform — the same CSS
-   * the renderer emitted, as the browser actually resolved it (transform
-   * origins affect only translation, so the linear part composes directly;
-   * the Layer's own transform moves its content within its box and never
-   * enters the map). Reading the DOM — never recomputing scene math — keeps
-   * this a consumer of the one transform model (DEC-007).
+   * The measured local→frame linear bases (#60, #61): the accumulated 2×2
+   * linear part of computed transforms along the ancestor .scene-layer chain
+   * — the same CSS the renderer emitted, as the browser actually resolved it
+   * (transform origins affect only translation, so the linear part composes
+   * directly; the Layer's own transform moves its content within its box and
+   * never enters the ancestor basis). Reading the DOM — never recomputing
+   * scene math — keeps this a consumer of the one transform model (DEC-007).
    */
-  const basisOf = (el: HTMLElement): Basis => {
-    const chain: HTMLElement[] = [];
-    for (let p = el.parentElement; p; p = p.parentElement) {
-      if (p.classList.contains("scene-layer")) chain.push(p);
-    }
+  const composeLinear = (chain: HTMLElement[]): Basis => {
     let a = 1;
     let b = 0;
     let c = 0;
@@ -945,13 +968,56 @@ const collectLayerBounds = async (
       d = nd;
     }
     return {
-      // Full measured precision: the movement consumer inverts this basis, and
-      // rounding here would zero out valid small positive Group scales.
+      // Full measured precision: the movement and resize consumers invert
+      // these bases, and rounding here would zero out valid small positive
+      // Group scales.
       a,
       b,
       c,
       d,
     };
+  };
+  const basisOf = (el: HTMLElement): Basis => {
+    const chain: HTMLElement[] = [];
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.classList.contains("scene-layer")) chain.push(p);
+    }
+    return composeLinear(chain);
+  };
+  const fullBasisOf = (el: HTMLElement): Basis => {
+    const chain: HTMLElement[] = [el];
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.classList.contains("scene-layer")) chain.push(p);
+    }
+    // Outermost first — the Layer's own transform sits innermost, mapping its
+    // authored box axes before the ancestors apply.
+    return composeLinear(chain);
+  };
+  /*
+   * The four authored box corners, measured directly in the render DOM (#61):
+   * paintless zero-size markers placed at the box's local corners read their
+   * own transformed positions through the browser (ancestor + own transforms
+   * included) — the corner facts come from the same DOM the pixels came
+   * from, never from an AABB reconstruction. The markers are removed before
+   * this pass returns, so the screenshot is unchanged (they paint nothing).
+   */
+  const measureCorners = (el: HTMLElement): LayerCorners => {
+    const marker = (left: string, top: string) => {
+      const m = document.createElement("span");
+      m.style.cssText =
+        "position:absolute;width:0;height:0;margin:0;border:0;padding:0;pointer-events:none;";
+      m.style.left = left;
+      m.style.top = top;
+      el.appendChild(m);
+      return m;
+    };
+    const marks = [marker("0", "0"), marker("100%", "0"), marker("100%", "100%"), marker("0", "100%")];
+    const points = marks.map((m) => {
+      const r = m.getBoundingClientRect();
+      return { x: round(r.x), y: round(r.y) };
+    });
+    for (const m of marks) m.remove();
+    return { nw: points[0]!, ne: points[1]!, se: points[2]!, sw: points[3]! };
   };
   let canvas: HTMLCanvasElement | null = null;
   let ctx: CanvasRenderingContext2D | null = null;
@@ -1008,19 +1074,24 @@ const collectLayerBounds = async (
       img.src = uri;
     });
   // Strictly sequential: one layer measured at a time, so at most one
-  // rasterization canvas exists for the whole pass.
-  const out: { box: LayerBox | null; basis: Basis }[] = [];
+  // rasterization canvas and one marker set exist for the whole pass.
+  const out: { box: LayerBox | null; basis: Basis; fullBasis: Basis; corners: LayerCorners | null }[] = [];
   for (const s of spec) {
     const el = els.find((e) => e.dataset.layerId === s.id);
     if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
     if (!s.visible) {
       // Self-contained: Playwright serializes only this function into the
-      // page, so the identity basis is inline, never a module constant.
-      out.push({ box: null, basis: { a: 1, b: 0, c: 0, d: 1 } });
+      // page, so the identity bases are inline, never a module constant.
+      const identity = { a: 1, b: 0, c: 0, d: 1 };
+      out.push({ box: null, basis: identity, fullBasis: identity, corners: null });
       continue;
     }
     const basis = basisOf(el);
     if (s.type === "connector") {
+      // A Connector has no authored box: corners stay absent; the full basis
+      // is still measured (its wrapper carries no own transform, so it equals
+      // the ancestor basis — measured, never assumed).
+      const fullBasis = fullBasisOf(el);
       const svg = el.querySelector("svg");
       if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
       const frame = svg.getBoundingClientRect();
@@ -1034,6 +1105,8 @@ const collectLayerBounds = async (
             height: round(painted.height),
           },
           basis,
+          fullBasis,
+          corners: null,
         });
       } else {
         // Nothing painted (degenerate geometry) — the path's own geometry,
@@ -1050,6 +1123,8 @@ const collectLayerBounds = async (
             height: round(r.height + sw),
           },
           basis,
+          fullBasis,
+          corners: null,
         });
       }
     } else {
@@ -1057,6 +1132,8 @@ const collectLayerBounds = async (
       out.push({
         box: { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) },
         basis,
+        fullBasis: fullBasisOf(el),
+        corners: measureCorners(el),
       });
     }
   }

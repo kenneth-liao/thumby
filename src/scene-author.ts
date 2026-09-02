@@ -5,38 +5,44 @@
  * showing the Render and the Reference Thumbnail side by side and as an
  * adjustable overlay.
  *
- * Moving Layers (#60): the session holds the authoring state in memory. The
- * gate-validated raw Scene document (authored values, pre-theme) is the one
- * mutable home; a frozen clone taken at session start is the persisted home
- * the view compares against. Each completed drag POSTs one movement — the
- * stable Layer id plus a frame-px delta. The handler clones the current raw
- * state, applies the delta (identity at top level; the inverse of the
- * measured local→frame basis from scene-render's inspection pass for nested
- * Layers), re-runs the complete canonical gate (loadScene: schema,
- * semantics, theme, resolution — local asset/library rereads are accepted)
- * and renders a fresh preview through renderSceneInspection. Only after both
- * validation and render succeed do the candidate raw state, its preview,
- * and the new revision become current; every failure answers with an
- * actionable, field-specific error and changes nothing. Movements serialize
- * strictly FIFO — one candidate validates/renders at a time, revisions are
- * monotonic, and the view applies only a newer revision, so an older result
- * can never replace a newer display. No route writes anything: exiting or
- * losing the session without saving leaves the Scene file byte-identical.
+ * Geometry editing (#60, #61): the session holds the authoring state in
+ * memory. The gate-validated raw Scene document (authored values, pre-theme)
+ * is the one mutable home; a frozen clone taken at session start is the
+ * persisted home the view compares against. Every geometry input reduces to
+ * the same commit: a movement drag POSTs /move (id + frame-px delta), a
+ * corner-handle drag POSTs /resize (id + authored-corner handle + the frame-px
+ * displacement of that corner), and the numeric panel POSTs /geometry (id +
+ * the exact authored fields to set). The handler clones the current raw
+ * state, applies the change (numeric edits land exactly; drag/resize deltas
+ * are mapped through the renderer-measured bases from scene-render's
+ * inspection pass — the ancestor basis for movement and centers, the full
+ * basis including the Layer's own transform for resize), re-runs the complete
+ * canonical gate (loadScene: schema, semantics, theme, resolution — local
+ * asset/library rereads are accepted) and renders a fresh preview through
+ * renderSceneInspection. The complete next state and its full response are
+ * built before any live state is touched; only then does the commit assign
+ * them, so no failure or throw can leave a half-mutated session. Every
+ * rejection answers with an actionable, field-specific error and changes
+ * nothing. Changes serialize strictly FIFO — one candidate validates/renders
+ * at a time, revisions are monotonic, and the view applies only a newer
+ * revision, so an older result can never replace a newer display. No route
+ * writes anything: exiting or losing the session without saving leaves the
+ * Scene file byte-identical.
  *
  * Security posture: the server binds 127.0.0.1:0 only (loopback, ephemeral
  * port); a 32-random-byte capability exists only inside session.url — no
  * separate token field, no query parameters. Every request must carry the
  * exact generated Host header and hit one exact token-scoped route
- * (/view, /render.png, /reference.png, /app.js as GET; /move as POST);
- * anything else is an empty 403/404/405. There is no path-based file
- * serving: a wrong path can never reach the filesystem. The view's one
- * script is this session's own static /app.js — no inline script, no eval,
- * no remote origin anywhere; movement requests are same-origin fetches with
- * an application/json content-type and a bounded body. The session and its
- * view make no remote requests: images are served from the held preview
- * bytes and the exact validated Reference bytes (checkReference read the
- * file once; the session never rereads it), and preview renders compose
- * from asset bytes already resolved in memory.
+ * (/view, /render.png, /reference.png, /app.js as GET; /move, /resize,
+ * /geometry as POST); anything else is an empty 403/404/405. There is no
+ * path-based file serving: a wrong path can never reach the filesystem. The
+ * view's one script is this session's own static /app.js — no inline script,
+ * no eval, no remote origin anywhere; geometry requests are same-origin
+ * fetches with an application/json content-type and a bounded body. The
+ * session and its view make no remote requests: images are served from the
+ * held preview bytes and the exact validated Reference bytes (checkReference
+ * read the file once; the session never rereads it), and preview renders
+ * compose from asset bytes already resolved in memory.
  *
  * Lifecycle: one shutdown path. SIGTERM and SIGINT run the same shutdown —
  * stop the listener, release the held browser (page, context, browser,
@@ -48,7 +54,13 @@
 import crypto, { timingSafeEqual } from "node:crypto";
 import type { CheckedReference } from "./compare.js";
 import type { Library } from "./assets.js";
-import type { Basis, RenderedLayer, VisibleRenderedLayer } from "./scene-render.js";
+import type {
+  Basis,
+  LayerBox,
+  LayerCorners,
+  RenderedLayer,
+  VisibleRenderedLayer,
+} from "./scene-render.js";
 import { renderSceneInspection } from "./scene-render.js";
 import { loadScene, type Scene, type SceneError, type SceneLayer } from "./scene.js";
 import { n } from "./scene-geometry.js";
@@ -70,13 +82,53 @@ export interface ViewPosition {
   current: { x: number; y: number };
 }
 
+/** Authored size facts for the persisted-vs-unsaved presentation (#61). */
+export interface ViewSize {
+  /** The size the loaded Scene file authored — frozen at session start. */
+  persisted: { width: number; height: number };
+  /** The current in-session authored size — the one mutable home. */
+  current: { width: number; height: number };
+}
+
+/** The measured authored-corner handle anchors, frame px (#61). */
+export type ViewHandles = LayerCorners;
+
 /**
- * A rendered Layer plus, for every Layer with an authored position, the
- * persisted-vs-unsaved position facts the view presents (#60). Connectors
- * have no authored position; hidden Layers keep their position facts (they
- * cannot be moved, but their rows still report the authored values).
+ * The outbound view facts: exactly what the client consumes — the Layer's
+ * identity, its render facts, and the view's geometry fields. Renderer-only
+ * measurements (the linear bases and the raw corner readings behind
+ * `handles`) stay in server state and are never serialized; the handle
+ * coordinates appear exactly once. A hidden Layer carries no geometry facts
+ * and never bounds (a hidden Layer with bounds is unrepresentable).
  */
-export type ViewLayer = RenderedLayer & { position?: ViewPosition };
+export interface HiddenViewLayer {
+  id: string;
+  type: SceneLayer["type"];
+  visible: false;
+  bounds: null;
+  /** The coordinate space the Layer's authored values would live in (#61). */
+  space: string;
+  /** Why geometry editing is read-only, naming the absent authored fields (#61). */
+  geometryNote?: string;
+}
+
+/** The visible Layer's view facts (#60, #61). */
+export interface VisibleViewLayer {
+  id: string;
+  type: SceneLayer["type"];
+  visible: true;
+  bounds: LayerBox;
+  position?: ViewPosition;
+  size?: ViewSize;
+  /** The coordinate space the authored values live in — canvas px, or the parent Group's local px (#61). */
+  space: string;
+  /** The DOM-measured authored-corner handle anchors (#61). Present only when the Layer has both authored fields. */
+  handles?: ViewHandles;
+  /** Why geometry editing is read-only for this Layer, naming the absent authored fields (#61). */
+  geometryNote?: string;
+}
+
+export type ViewLayer = HiddenViewLayer | VisibleViewLayer;
 
 export interface AuthorSessionInput {
   /** Scene basename — the view's title. */
@@ -190,12 +242,12 @@ function securityHeaders(extra: Record<string, string> = {}): Record<string, str
   };
 }
 
-/** The client script for the one interactive view (#60): pointer drags on the
- * canvas hit targets POST one movement per completed drag, and every response
- * is applied atomically — preview bytes, hit/highlight geometry, listing
- * rows, and the status line move together, and only a newer revision ever
- * replaces the display. This is a static string: no scene data, no user
- * input, nothing interpolated. */
+/** The client script for the one interactive view (#60, #61): pointer drags on
+ * the canvas hit targets POST one movement per completed drag, corner-handle
+ * drags POST one resize, and every response is applied atomically — preview
+ * bytes, hit/highlight/handle geometry, listing rows, and the status line
+ * move together, and only a newer revision ever replaces the display. This is
+ * a static string: no scene data, no user input, nothing interpolated. */
 const CLIENT_SCRIPT = `(() => {
   "use strict";
   const base = location.pathname.replace(/\\/view$/, "/");
@@ -209,30 +261,33 @@ const CLIENT_SCRIPT = `(() => {
 
   const changed = (p) =>
     p.persisted.x !== p.current.x || p.persisted.y !== p.current.y;
-  const unsavedCount = (layers) => layers.filter((l) => l.position && changed(l.position)).length;
+  const sizeChanged = (s) =>
+    s.persisted.width !== s.current.width || s.persisted.height !== s.current.height;
+  const unsavedCount = (layers) =>
+    layers.filter((l) => (l.position && changed(l.position)) || (l.size && sizeChanged(l.size))).length;
 
   const setRow = (i, l) => {
     const row = document.querySelector('.listing .row[data-sel="' + i + '"]');
     if (!row) return;
     // Bounds update for every rendered Layer before the position guard: a
     // Connector has no authored position, but its geometry still follows its
-    // targets.
+    // targets. The modified class follows either authored field (#61).
     if (l.bounds) {
       const bounds = row.querySelector(".bounds");
       if (bounds)
         bounds.textContent =
           l.bounds.x + "," + l.bounds.y + " · " + l.bounds.width + "×" + l.bounds.height;
     }
+    const moved = (l.position && changed(l.position)) || (l.size && sizeChanged(l.size));
+    row.classList.toggle("modified", moved);
     if (!l.position) return;
     const pos = row.querySelector(".pos");
     const was = row.querySelector(".was");
-    const moved = changed(l.position);
     if (pos) pos.textContent = l.position.current.x + "," + l.position.current.y;
     if (was)
-      was.textContent = moved
+      was.textContent = changed(l.position)
         ? "was " + l.position.persisted.x + "," + l.position.persisted.y
         : "";
-    row.classList.toggle("modified", moved);
   };
 
   const apply = (body, current) => {
@@ -255,7 +310,61 @@ const CLIENT_SCRIPT = `(() => {
         hit.style.width = "max(" + pct(l.bounds.width, 1280) + ",14px)";
         hit.style.height = "max(" + pct(l.bounds.height, 720) + ",14px)";
       }
+      // Resize handles re-anchor to the freshly measured transformed corners
+      // of the Layer's own box — never the painted AABB (#61).
+      if (l.handles) {
+        const keys = ["nw", "ne", "se", "sw"];
+        for (const k of keys) {
+          const h = document.querySelector(
+            '.canvas .handle[data-sel="' + i + '"][data-handle="' + k + '"]',
+          );
+          if (h) {
+            h.style.left = pct(l.handles[k].x, 1280);
+            h.style.top = pct(l.handles[k].y, 720);
+          }
+        }
+      }
       setRow(i, l);
+      // The numeric form follows the same geometry state: every accepted
+      // response advances each field's data-accepted baseline and rewrites
+      // the persisted-diff marker and the modified class (#61). A field is
+      // locally dirty exactly when its typed value has drifted from its
+      // baseline — one authoritative DOM representation, no separate edit
+      // home — and a locally dirty, in-progress value is never overwritten
+      // by another request's acceptance; only the field's own accepted
+      // request converges value and baseline (#74).
+      const form = document.querySelector('.geometry .geom[data-sel="' + i + '"]');
+      if (form) {
+        for (const inp of form.querySelectorAll("input[data-field]")) {
+          const f = inp.dataset.field;
+          const v =
+            f === "x" || f === "y"
+              ? l.position
+                ? l.position.current[f]
+                : null
+              : l.size
+                ? l.size.current[f]
+                : null;
+          if (v === null || v === undefined) continue;
+          const dirty = inp.value !== inp.dataset.accepted;
+          inp.dataset.accepted = String(v);
+          if (!dirty) inp.value = inp.dataset.accepted;
+        }
+        const posMoved = l.position && changed(l.position);
+        const sizeMoved = l.size && sizeChanged(l.size);
+        const was = form.querySelector(".geom-was");
+        if (was) {
+          const parts = [];
+          if (posMoved)
+            parts.push("pos was " + l.position.persisted.x + "," + l.position.persisted.y);
+          if (sizeMoved)
+            parts.push(
+              "size was " + l.size.persisted.width + "×" + l.size.persisted.height,
+            );
+          was.textContent = parts.join(" · ");
+        }
+        form.classList.toggle("modified", Boolean(posMoved || sizeMoved));
+      }
     });
     if (warnings) warnings.textContent = body.warnings.join(" · ");
     // The applied revision stays accurate even when a newer outcome owns the
@@ -273,10 +382,51 @@ const CLIENT_SCRIPT = `(() => {
     // older failure must never overwrite a newer outcome.
     if (!current) return;
     const messages = (body && body.errors ? body.errors : []).map((e) => e.message);
-    status.textContent = messages.length ? messages.join(" · ") : "movement rejected";
+    status.textContent = messages.length ? messages.join(" · ") : "geometry change rejected";
     // Revision, preview bytes, geometry, and rows stay untouched: the last
     // valid preview remains on display.
   };
+
+  /** One response outcome, shared by every geometry poster: a rejection
+   * writes the status line only while its request is the client's current
+   * one (and lets the caller restore its own inputs first); an acceptance
+   * applies only a newer revision. */
+  const settle = async (res, seq, onReject) => {
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      // Only the client's current request may restore form state or write
+      // the status line: a stale rejection must never overwrite a newer
+      // request's pending or accepted form input.
+      if (onReject) onReject(seq === issued);
+      showError(body, seq === issued);
+      return;
+    }
+    // Responses resolve in completion order; only a newer revision may ever
+    // replace the display, so an older result cannot become the newest state.
+    if (body && body.rev > applied) {
+      apply(body, seq === issued);
+      applied = body.rev;
+    }
+  };
+
+  // The one field-restore home (#61, #74): a rejected or unreachable request
+  // puts its own field back to its last accepted value — other fields' local,
+  // in-progress edits are never touched, and neither is a newer unsubmitted
+  // edit of the same field (the request's captured edit generation must still
+  // be current).
+  const restoreField = (inp) => {
+    inp.value = inp.dataset.accepted;
+  };
+
+  // The one unreachable-session fallback text, shared by every geometry
+  // poster — the same request/apply/error path serves move, resize, and
+  // numeric edits (#61).
+  const unreachable = "geometry request failed — the session is unreachable";
 
   const move = async (id, dx, dy) => {
     // Monotonic client order: each request knows whether a newer one has
@@ -290,30 +440,70 @@ const CLIENT_SCRIPT = `(() => {
         body: JSON.stringify({ id: id, dx: dx, dy: dy }),
       });
     } catch {
-      if (seq === issued)
-        status.textContent = "movement failed — the session is unreachable";
+      if (seq === issued) status.textContent = unreachable;
       return;
     }
-    let body = null;
-    try {
-      body = await res.json();
-    } catch {
-      body = null;
-    }
-    if (!res.ok) {
-      showError(body, seq === issued);
-      return;
-    }
-    // Responses resolve in completion order; only a newer revision may ever
-    // replace the display, so an older result cannot become the newest state.
-    if (body && body.rev > applied) {
-      apply(body, seq === issued);
-      applied = body.rev;
-    }
+    await settle(res, seq);
   };
 
-  for (const hit of document.querySelectorAll(".canvas .hit")) {
-    hit.addEventListener("pointerdown", (e) => {
+  // One completed corner drag: the frame-px displacement of the grabbed
+  // authored corner. The session maps it through the measured bases (#61).
+  const resize = async (id, handle, dx, dy) => {
+    const seq = ++issued;
+    let res;
+    try {
+      res = await fetch(base + "resize", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: id, handle: handle, dx: dx, dy: dy }),
+      });
+    } catch {
+      if (seq === issued) status.textContent = unreachable;
+      return;
+    }
+    await settle(res, seq);
+  };
+
+  // One exact numeric geometry edit: one field of one form. The request
+  // captures the field's edit generation (data-edit, bumped on every input);
+  // a current rejection or network failure restores the field's last accepted
+  // value only while that captured generation is still current — a newer
+  // unsubmitted edit of the same field is never clobbered, while the
+  // unreachable failure itself is always surfaced for a current request
+  // (#61, #74).
+  const geometry = async (form, inp, value) => {
+    const gen = inp.dataset.edit;
+    const seq = ++issued;
+    let res;
+    try {
+      res = await fetch(base + "geometry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: form.dataset.layerId,
+          set: { [inp.dataset.field]: value },
+        }),
+      });
+    } catch {
+      // Status ownership and restore are separate: a globally current request
+      // always surfaces the unreachable failure, while the field restores
+      // only when its captured edit generation is still current (#74 RE-1).
+      if (seq === issued) status.textContent = unreachable;
+      if (seq === issued && inp.dataset.edit === gen) restoreField(inp);
+      return;
+    }
+    await settle(res, seq, (current) => {
+      if (current && inp.dataset.edit === gen) restoreField(inp);
+    });
+  };
+
+  // One drag lifecycle for every canvas gesture target (#61): hits move a
+  // Layer, handles resize it. A gesture counts only once the pointer passes
+  // the 3px threshold; pointerup commits it and pointercancel aborts it —
+  // both tear every gesture listener down, so a finished or aborted gesture
+  // can never leave a listener behind.
+  const bindDrag = (el, onDelta) => {
+    el.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       const startX = e.clientX;
       const startY = e.clientY;
@@ -321,21 +511,65 @@ const CLIENT_SCRIPT = `(() => {
       const onMove = (ev) => {
         if (Math.hypot(ev.clientX - startX, ev.clientY - startY) >= 3) dragging = true;
       };
-      const onUp = (ev) => {
-        hit.removeEventListener("pointermove", onMove);
-        if (!dragging) return; // a plain click: the label's native selection applies
+      const finish = (ev, commit) => {
+        el.removeEventListener("pointermove", onMove);
+        el.removeEventListener("pointerup", onUp);
+        el.removeEventListener("pointercancel", onCancel);
+        if (!commit || !dragging) return;
         const scale = 1280 / img.getBoundingClientRect().width;
-        void move(hit.dataset.layerId, (ev.clientX - startX) * scale, (ev.clientY - startY) * scale);
+        onDelta((ev.clientX - startX) * scale, (ev.clientY - startY) * scale);
       };
-      hit.addEventListener("pointermove", onMove);
-      hit.addEventListener("pointerup", onUp, { once: true });
+      const onUp = (ev) => finish(ev, true);
+      const onCancel = () => finish(null, false);
+      el.addEventListener("pointermove", onMove);
+      el.addEventListener("pointerup", onUp, { once: true });
+      el.addEventListener("pointercancel", onCancel, { once: true });
       try {
-        hit.setPointerCapture(e.pointerId);
+        el.setPointerCapture(e.pointerId);
       } catch {
         // A synthetic pointer has no capturable id; dispatch reaches the
         // listeners directly.
       }
     });
+  };
+
+  for (const hit of document.querySelectorAll(".canvas .hit")) {
+    // A plain click on a hit selects: the label's native radio selection
+    // applies; only a real drag moves.
+    bindDrag(hit, (dx, dy) => void move(hit.dataset.layerId, dx, dy));
+  }
+
+  for (const handle of document.querySelectorAll(".canvas .handle")) {
+    // A plain click on a handle changes nothing; only a real drag resizes.
+    bindDrag(handle, (dx, dy) =>
+      void resize(handle.dataset.layerId, handle.dataset.handle, dx, dy),
+    );
+  }
+
+  // Numeric geometry edits (#61): a field's change event (Enter or blur)
+  // commits exactly that field's value — one input, one exact authored
+  // value. Other still-dirty fields are never swept into the request, and an
+  // unparseable value never reaches the session — it restores in place.
+  for (const form of document.querySelectorAll(".geometry .geom")) {
+    if (!form.dataset.layerId) continue; // a read-only note has no fields
+    const submit = (inp) => {
+      if (inp.value === inp.dataset.accepted) return;
+      const v = Number(inp.value);
+      if (inp.value.trim() === "" || !Number.isFinite(v)) {
+        inp.value = inp.dataset.accepted;
+        return;
+      }
+      void geometry(form, inp, v);
+    };
+    for (const inp of form.querySelectorAll("input[data-field]")) {
+      // The field's edit generation lives on the input itself and bumps on
+      // every input event — programmatic baseline updates never fire one, so
+      // the generation counts user edits only (#74).
+      inp.addEventListener("input", () => {
+        inp.dataset.edit = String(Number(inp.dataset.edit ?? "0") + 1);
+      });
+      inp.addEventListener("change", () => void submit(inp));
+    }
   }
 })();`;
 
@@ -355,11 +589,12 @@ const CLIENT_SCRIPT = `(() => {
  * data-layer-id association attributes on the hit/highlight boxes and as
  * escaped listing text.
  *
- * Unsaved movement state (#60): the status line names the revision and the
- * unsaved-Layer count; each positioned row reports its current authored
- * position and, once it differs from the persisted Scene values, a "was"
- * marker and the modified class. The one script (app.js) applies each
- * movement response atomically and never lets an older revision win.
+ * Unsaved movement state (#60, #61): the status line names the revision and
+ * the unsaved-Layer count (position or size); each positioned row reports its
+ * current authored position and, once it differs from the persisted Scene
+ * values, a "was" marker and the modified class. The one script (app.js)
+ * applies each geometry response atomically and never lets an older revision
+ * win.
  */
 export function renderAuthorView(
   scene: string,
@@ -392,14 +627,17 @@ export function renderAuthorView(
   // derived from this render's own layer count — strictly above the maximum
   // compositing-order hit index (1 + count − 1) — never a fixed constant a
   // large layer count could outrank. Unselected hits keep the compositing
-  // order on their inline style.
+  // order on their inline style. The selected Layer's resize handles rise one
+  // step above the selected hit (#61).
   const selectedHitZ = layers.length + 1;
   const selectionRules = layers
     .map((l, i) =>
       l.visible
         ? `#layer-${i}:checked ~ .views .box[data-sel="${i}"]{display:block}\n` +
           `#layer-${i}:checked ~ .views .hit[data-sel="${i}"]{outline:2px solid #ffd166;z-index:${selectedHitZ}!important}\n` +
-          `#layer-${i}:checked ~ .listing .row[data-sel="${i}"]{background:#26282e;box-shadow:inset 2px 0 0 #ffd166}`
+          `#layer-${i}:checked ~ .views .handle[data-sel="${i}"]{display:block;z-index:${selectedHitZ + 1}}\n` +
+          `#layer-${i}:checked ~ .listing .row[data-sel="${i}"]{background:#26282e;box-shadow:inset 2px 0 0 #ffd166}\n` +
+          `#layer-${i}:checked ~ .geometry .geom[data-sel="${i}"]{display:flex}`
         : "",
     )
     .filter(Boolean)
@@ -434,6 +672,25 @@ export function renderAuthorView(
       );
     })
     .join("");
+  // Resize handles (#61): four per visible Layer that has both authored
+  // position and size, anchored at the DOM-measured transformed authored
+  // corners — never the painted AABB. Hidden until the Layer is selected; the
+  // view script posts one resize per completed corner drag.
+  const HANDLE_KEYS = ["nw", "ne", "se", "sw"] as const;
+  const handles = layers
+    .map((l, i) => {
+      // Geometry fields only exist on a visible Layer's view facts.
+      if (!l.visible || !l.handles) return "";
+      const anchors = l.handles;
+      return HANDLE_KEYS.map((k) => {
+        const c = anchors[k];
+        return (
+          `<span class="handle" data-sel="${i}" data-handle="${k}" data-layer-id="${escapeHtml(l.id)}" ` +
+          `style="left:${pctOf(c.x, 1280)};top:${pctOf(c.y, 720)}"></span>`
+        );
+      }).join("");
+    })
+    .join("");
   // The listing: every layer exactly once, in render order. Visible rows are
   // labels for the same radios; hidden rows are disabled divs with bounds
   // absent — visibly hidden, never selectable. Positioned rows carry their
@@ -441,6 +698,14 @@ export function renderAuthorView(
   // persisted Scene values (#60); the view script updates both per response.
   const boundsText = (b: { x: number; y: number; width: number; height: number }) =>
     `${b.x},${b.y} · ${b.width}×${b.height}`;
+  const sizeMoved = (l: ViewLayer) => {
+    const v = l.visible ? l : null;
+    return Boolean(
+      v?.size &&
+        (v.size.persisted.width !== v.size.current.width ||
+          v.size.persisted.height !== v.size.current.height),
+    );
+  };
   const rows = layers
     .map((l, i) => {
       const head = `<span class="idx">${i}</span><span class="type">${l.type}</span>` +
@@ -451,20 +716,75 @@ export function renderAuthorView(
       if (!l.position)
         return `<label class="row" for="layer-${i}" data-sel="${i}">${head}` +
           `<span class="bounds">${boundsText(l.bounds)}</span></label>`;
-      const moved = l.position.persisted.x !== l.position.current.x ||
-        l.position.persisted.y !== l.position.current.y;
-      const was = moved ? `<span class="was">was ${fmtPos(l.position.persisted)}</span>` : `<span class="was"></span>`;
+      const moved =
+        l.position.persisted.x !== l.position.current.x ||
+        l.position.persisted.y !== l.position.current.y ||
+        sizeMoved(l);
+      const was = l.position.persisted.x !== l.position.current.x ||
+        l.position.persisted.y !== l.position.current.y
+        ? `<span class="was">was ${fmtPos(l.position.persisted)}</span>`
+        : `<span class="was"></span>`;
       return `<label class="row${moved ? " modified" : ""}" for="layer-${i}" data-sel="${i}">${head}` +
         `${was}<span class="pos">${fmtPos(l.position.current)}</span>` +
         `<span class="bounds">${boundsText(l.bounds)}</span></label>`;
     })
     .join("\n");
-  const unsaved = layers.filter(
-    (l) =>
-      l.position &&
-      (l.position.persisted.x !== l.position.current.x ||
-        l.position.persisted.y !== l.position.current.y),
-  ).length;
+  // Unsaved = any Layer whose authored position or size differs from the
+  // persisted Scene values — one geometry state counts both (#61).
+  const unsaved = layers.filter((l) => {
+    const v = l.visible ? l : null;
+    return Boolean(
+      (v?.position &&
+        (v.position.persisted.x !== v.position.current.x ||
+          v.position.persisted.y !== v.position.current.y)) ||
+        sizeMoved(l),
+    );
+  }).length;
+
+  // The geometry panel (#61): one entry per visible Layer — a numeric form
+  // for the authored fields it carries (x/y need position, width/height
+  // need size), or a read-only note naming the absent fields (a Connector's
+  // note adds its target-derivation reason). Hidden Layers have no entry:
+  // they are not selectable. Each input's data-accepted attribute is the DOM
+  // home of its last accepted value, rendered initially and rewritten by the
+  // view script on every accepted response — rejection restores from it.
+  const geomLabel = (field: string) =>
+    field === "x" ? "x" : field === "y" ? "y" : field === "width" ? "w" : "h";
+  const geomInput = (field: string, value: number) =>
+    `<label>${geomLabel(field)} ` +
+    `<input data-field="${field}" type="number" step="any" value="${value}" data-accepted="${value}"></label>`;
+  const geomEntries = layers
+    .map((l, i) => {
+      if (!l.visible) return "";
+      const fields = [
+        ...(l.position ? ["x", "y"] : []),
+        ...(l.size ? ["width", "height"] : []),
+      ];
+      const space = `<span class="space">${escapeHtml(l.space ?? "")}</span>`;
+      const note = l.geometryNote
+        ? `<span class="geom-note">${escapeHtml(l.geometryNote)}</span>`
+        : "";
+      if (fields.length === 0)
+        return `<div class="geom note" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}">` +
+          `${space}<span class="geom-was"></span>${note}</div>`;
+      const controls = fields
+        .map((f) =>
+          geomInput(
+            f,
+            f === "x"
+              ? l.position!.current.x
+              : f === "y"
+                ? l.position!.current.y
+                : f === "width"
+                  ? l.size!.current.width
+                  : l.size!.current.height,
+          ),
+        )
+        .join("");
+      return `<div class="geom" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}">` +
+        `${space}${controls}<span class="geom-was"></span>${note}</div>`;
+    })
+    .join("\n");
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -504,6 +824,14 @@ input[type="radio"]{position:absolute;opacity:0;pointer-events:none}
 .listing .row.hidden{color:#6a6a72;opacity:.55;cursor:default}
 .listing .row.hidden .type{color:#6a6a72}
 .listing .row.hidden .state{color:#c96f6f;margin-left:auto;font-style:italic}
+.geometry{width:1280px;max-width:100%;margin:0 0 16px;border:1px solid #26282e;border-radius:8px;background:#101216;padding:4px 0}
+.geom{display:none;align-items:baseline;gap:12px;padding:4px 12px;font:12px/1.7 ui-monospace,monospace;flex-wrap:wrap}
+.geom label{display:flex;align-items:baseline;gap:4px;color:#8a8a94}
+.geom input{width:10ch;background:#0b0b0d;border:1px solid #26282e;border-radius:4px;color:#e7e7ea;font:inherit;padding:1px 6px}
+.geom.modified input{border-color:#ffd166}
+.geom .space{color:#7fb0ff;min-width:16ch}
+.geom .geom-was{color:#c96f6f;font-style:italic}
+.geom .geom-note{color:#8a8a94;font-style:italic}
 .views .side{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
   .side figure{flex:1 1 480px;min-width:480px;max-width:1280px;margin:0;background:linear-gradient(160deg,#16181d,#0e1013);border:1px solid #26282e;border-radius:8px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:10px}
 .side img{display:block;width:100%;max-width:1280px;height:auto;border-radius:4px}
@@ -516,6 +844,8 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 .canvas .hit{position:absolute;display:block;cursor:pointer;border-radius:2px}
 .canvas .hit:hover{outline:1px dashed rgba(255,209,102,.55)}
 .canvas .box{position:absolute;display:none;outline:2px solid #ffd166;outline-offset:-1px;pointer-events:none;border-radius:2px}
+.canvas .handle{position:absolute;display:none;width:9px;height:9px;transform:translate(-50%,-50%);border:1px solid #0b0b0d;background:#ffd166;border-radius:2px;pointer-events:auto;cursor:nwse-resize}
+.canvas .handle[data-handle="ne"],.canvas .handle[data-handle="sw"]{cursor:nesw-resize}
 </style></head><body>
 <h1>Scene author · ${escapeHtml(scene)}</h1>
 <input type="radio" name="mode" id="mode-side" checked>
@@ -525,10 +855,11 @@ ${layerRadios}
 <div class="statusbar"><span id="status" data-rev="${meta.rev}">rev ${meta.rev} · unsaved ${unsaved} · Scene file unchanged</span><span id="warnings">${escapeHtml(meta.warnings.join(" · "))}</span></div>
 <div class="controls">view <label for="mode-side">side by side</label><label for="mode-overlay">overlay</label><span>opacity</span>${labels}</div>
 <div class="listing">${rows}</div>
+<div class="geometry">${geomEntries}</div>
 <div class="views">
   <div class="side">
     <figure><img src="reference.png" alt="Reference Thumbnail"><figcaption>reference</figcaption></figure>
-    <figure><div class="canvas"><img src="render.png" alt="Render">${hits}${boxes}</div><figcaption>render — click a layer to select it, drag it to move it</figcaption></figure>
+    <figure><div class="canvas"><img src="render.png" alt="Render">${hits}${boxes}${handles}</div><figcaption>render — click a layer to select it, drag it to move it, drag a corner to resize it</figcaption></figure>
   </div>
   <div class="overlay">
     <img src="reference.png" alt="Reference Thumbnail (under)">
@@ -541,24 +872,24 @@ ${layerRadios}
 
 // --- movements (#60) ---------------------------------------------------------
 
-/** A movement body limit generous for {id,dx,dy} and bounded against abuse. */
-const MOVEMENT_BODY_LIMIT = 16 * 1024;
+/** A geometry body limit generous for {id,…} requests and bounded against abuse. */
+const GEOMETRY_BODY_LIMIT = 16 * 1024;
 
 type BodyRead = { ok: true; text: string } | { ok: false; status: 400 | 413; message: string };
 
 /**
- * Read a movement body with the byte budget enforced while streaming. A
- * trustworthy Content-Length over the limit refuses before any body byte is
+ * Read a geometry request body with the byte budget enforced while streaming.
+ * A trustworthy Content-Length over the limit refuses before any body byte is
  * read; a missing, unparseable, or lying header cannot smuggle an oversized
  * body past the streamed byte count either. The limit counts bytes, so a
  * multibyte body is refused on its encoded size, not its character count.
  */
-const readMovementBody = async (req: Request): Promise<BodyRead> => {
+const readJsonBody = async (req: Request): Promise<BodyRead> => {
   const declared = req.headers.get("content-length");
   if (declared !== null) {
     const length = Number(declared);
-    if (Number.isInteger(length) && length >= 0 && length > MOVEMENT_BODY_LIMIT)
-      return { ok: false, status: 413, message: `movement body exceeds ${MOVEMENT_BODY_LIMIT} bytes` };
+    if (Number.isInteger(length) && length >= 0 && length > GEOMETRY_BODY_LIMIT)
+      return { ok: false, status: 413, message: `request body exceeds ${GEOMETRY_BODY_LIMIT} bytes` };
   }
   if (!req.body) return { ok: true, text: "" };
   const reader = req.body.getReader();
@@ -571,12 +902,12 @@ const readMovementBody = async (req: Request): Promise<BodyRead> => {
       if (chunk.done) break;
       value = chunk.value;
     } catch {
-      return { ok: false, status: 400, message: "movement body could not be read" };
+      return { ok: false, status: 400, message: "request body could not be read" };
     }
     total += value.byteLength;
-    if (total > MOVEMENT_BODY_LIMIT) {
+    if (total > GEOMETRY_BODY_LIMIT) {
       void reader.cancel().catch(() => {});
-      return { ok: false, status: 413, message: `movement body exceeds ${MOVEMENT_BODY_LIMIT} bytes` };
+      return { ok: false, status: 413, message: `request body exceeds ${GEOMETRY_BODY_LIMIT} bytes` };
     }
     chunks.push(value);
   }
@@ -605,42 +936,43 @@ const isApplicationJson = (contentType: string | null): boolean =>
   contentType !== null && contentType.split(";", 1)[0]!.trim().toLowerCase() === "application/json";
 
 /**
- * Parse a movement body at the boundary: a JSON object carrying the stable
- * Layer id and finite frame-px deltas. Everything else is a structured,
- * actionable rejection.
+ * Parse a movement body at the boundary: a JSON object carrying exactly the
+ * stable Layer id and finite frame-px deltas — unknown fields rejected,
+ * never ignored (#61).
  */
 function parseMovement(text: string): Movement | SceneError[] {
-  let body: unknown;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    return [{ path: "body", message: "movement body is not valid JSON" }];
-  }
-  if (typeof body !== "object" || body === null)
-    return [{ path: "body", message: "movement body must be a JSON object" }];
-  const b = body as Record<string, unknown>;
+  const b = parseJsonObject(text, ["id", "dx", "dy"]);
+  if (Array.isArray(b)) return b;
   if (typeof b.id !== "string" || b.id.length === 0)
     return [{ path: "id", message: "movement needs the Layer's stable id as a non-empty string" }];
-  if (typeof b.dx !== "number" || !Number.isFinite(b.dx) || typeof b.dy !== "number" || !Number.isFinite(b.dy))
+  if (
+    typeof b.dx !== "number" ||
+    !Number.isFinite(b.dx) ||
+    typeof b.dy !== "number" ||
+    !Number.isFinite(b.dy)
+  )
     return [{ path: "dx,dy", message: "movement needs finite frame-px deltas as numbers for both dx and dy" }];
   return { id: b.id, dx: b.dx, dy: b.dy };
 }
 
 /**
  * Find a Layer anywhere in the scene tree by its stable id, with its
- * field-specific path (e.g. `layers[2].layers[0]`) for actionable errors.
+ * field-specific path (e.g. `layers[2].layers[0]`) for actionable errors and
+ * the id of the Group that contains it (null at top level — the coordinate
+ * space the view labels, #61).
  */
 function findLayer(
   layers: SceneLayer[],
   id: string,
   path = "layers",
-): { layer: SceneLayer; path: string } | undefined {
+  parentId: string | null = null,
+): { layer: SceneLayer; path: string; parentId: string | null } | undefined {
   for (let i = 0; i < layers.length; i++) {
     const layer = layers[i]!;
     const here = `${path}[${i}]`;
-    if (layer.id === id) return { layer, path: here };
+    if (layer.id === id) return { layer, path: here, parentId };
     if (layer.type === "group") {
-      const found = findLayer(layer.layers, id, `${here}.layers`);
+      const found = findLayer(layer.layers, id, `${here}.layers`, layer.id);
       if (found) return found;
     }
   }
@@ -648,39 +980,78 @@ function findLayer(
 }
 
 /**
- * The authored position of a positioned Layer. Connectors have no authored
- * position — reaching one here is a contract bug, never a silent default.
- * One helper for both the read side (persisted/current presentation facts)
- * and the write side (the mutation target): a Connector can never reach
- * either site, because the movement boundary rejects it first.
+ * The authored geometry a Layer carries, read once for both the presentation
+ * facts and the mutation target: which of position/size exist. Connectors
+ * carry neither; every other Layer type requires both (the schema enforces
+ * it) — the capability shape keeps every consumer from ever assuming a type.
  */
-function positionedPosition(tree: SceneLayer, id: string): { x: number; y: number } {
-  if (tree.type === "connector")
-    throw new Error(`layer "${id}" is a Connector — it has no authored position`);
-  return tree.position;
+function authoredGeometry(tree: SceneLayer): {
+  position?: { x: number; y: number };
+  size?: { width: number; height: number };
+} {
+  if (tree.type === "connector") return {};
+  return { position: tree.position, size: tree.size };
 }
 
 /**
- * The view's Layer facts: the render pass's own layers plus, for every
- * Layer with an authored position, the persisted-vs-unsaved position pair.
- * Persisted positions come only from the frozen clone of the loaded Scene;
- * current positions only from the mutable home — one home per fact, never a
- * fallback between them.
+ * The one read-only explanation, shared by the view and every server
+ * backstop (#61): which authored fields are absent, and — for a Connector —
+ * why: its geometry derives from its targets.
+ */
+function geometryNote(tree: SceneLayer, absent: string[]): string {
+  const fields = absent.length === 1 ? absent[0]! : `${absent[0]} or ${absent[1]}`;
+  const reason =
+    tree.type === "connector"
+      ? " — a Connector's geometry derives from its \"from\"/\"to\" target Layers; move those instead"
+      : "";
+  return `layer "${tree.id}" has no authored ${fields}${reason}`;
+}
+
+/**
+ * The view's Layer facts: the render pass's own layers plus, for every Layer
+ * with authored geometry, the persisted-vs-unsaved pairs (position and size,
+ * independently), the coordinate space the authored values live in, the
+ * DOM-measured corner anchors for visible fully-capable Layers, and the
+ * read-only note for Layers missing an authored field. Persisted facts come
+ * only from the frozen clone of the loaded Scene; current facts only from
+ * the mutable home — one home per fact, never a fallback between them.
  */
 function viewLayers(state: SessionState): ViewLayer[] {
   return state.layers.map((l) => {
-    if (l.type === "connector") return l;
     const persisted = findLayer(state.persistedRaw.layers, l.id);
     const current = findLayer(state.raw.layers, l.id);
     if (!persisted || !current)
       throw new Error(`layer "${l.id}" is missing from the session Scene trees`);
-    return {
-      ...l,
-      position: {
-        persisted: positionedPosition(persisted.layer, l.id),
-        current: positionedPosition(current.layer, l.id),
-      },
-    };
+    const persistedGeo = authoredGeometry(persisted.layer);
+    const currentGeo = authoredGeometry(current.layer);
+    // The two trees must agree on what the Layer can author — no edit ever
+    // adds or removes an authored field, so a divergence is a contract bug.
+    if (!!persistedGeo.position !== !!currentGeo.position || !!persistedGeo.size !== !!currentGeo.size)
+      throw new Error(`layer "${l.id}" has different authored geometry in the persisted and current Scene trees`);
+    const space = current.parentId ? `${current.parentId} local px` : "canvas px";
+    const absent = [
+      ...(currentGeo.position ? [] : ["position"]),
+      ...(currentGeo.size ? [] : ["size"]),
+    ];
+    if (!l.visible) {
+      const hidden: HiddenViewLayer = { id: l.id, type: l.type, visible: false, bounds: null, space };
+      if (absent.length > 0) hidden.geometryNote = geometryNote(current.layer, absent);
+      return hidden;
+    }
+    const out: VisibleViewLayer = { id: l.id, type: l.type, visible: true, bounds: l.bounds, space };
+    if (currentGeo.position && persistedGeo.position)
+      out.position = { persisted: persistedGeo.position, current: currentGeo.position };
+    if (currentGeo.size && persistedGeo.size)
+      out.size = { persisted: persistedGeo.size, current: currentGeo.size };
+    if (absent.length > 0) {
+      out.geometryNote = geometryNote(current.layer, absent);
+      return out;
+    }
+    // A fully capable visible Layer carries the DOM-measured corner anchors
+    // once — the bases stay behind in the session's rendered state.
+    if (!l.corners) throw new Error(`layer "${l.id}" paints but has no measured corner points`);
+    out.handles = l.corners;
+    return out;
   });
 }
 
@@ -714,65 +1085,132 @@ function applyBasis({ a, b, c, d }: Basis, dx: number, dy: number): { x: number;
  * render — and commit only after both succeed. Any rejection leaves the
  * raw state, revision, preview bytes, and layers exactly as they were.
  */
+/** The shared unknown-id rejection: every geometry route names the id. */
+function unknownLayerError(id: string): { status: number; body: Record<string, unknown> } {
+  return {
+    status: 400,
+    body: {
+      errors: [
+        {
+          path: "id",
+          message: `unknown layer id "${id}" — select a Layer from the listing or the canvas; every Layer in the scene tree is addressable by its stable id`,
+        },
+      ],
+    },
+  };
+}
+
+/** The shared read-only rejection: the addressed Layer lacks authored geometry. */
+function geometryReadonlyError(
+  tree: SceneLayer,
+  path: string,
+  absent: string[],
+): { status: number; body: Record<string, unknown> } {
+  return {
+    status: 400,
+    body: { errors: [{ path, message: geometryNote(tree, absent) }] },
+  };
+}
+
+/** The shared no-canvas-target rejection: the addressed Layer paints nothing. */
+function paintsNothingError(
+  id: string,
+  path: string,
+): { status: number; body: Record<string, unknown> } {
+  return {
+    status: 400,
+    body: {
+      errors: [
+        {
+          path,
+          message: `layer "${id}" paints nothing in the current preview (hidden or fully transparent) — it has no draggable canvas target`,
+        },
+      ],
+    },
+  };
+}
+
+/** The shared degenerate-transform rejection: a basis with no inverse. */
+function degenerateError(id: string, path: string): { status: number; body: Record<string, unknown> } {
+  return {
+    status: 400,
+    body: {
+      errors: [
+        {
+          path,
+          message: `layer "${id}" sits under a degenerate Group transform — its geometry cannot follow a drag`,
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * The one candidate-commit path (#61): every geometry change — movement,
+ * resize, numeric edit — arrives here as a fully-mutated candidate raw
+ * document. The complete canonical gate (schema, semantics, theme,
+ * resolution — ordinary Scene changes, DEC-022; local asset/library rereads
+ * accepted) and the canonical validation + render path run — never a
+ * CSS-only approximation — and only after both succeed does any session
+ * state change. Any rejection leaves the raw state, revision, preview
+ * bytes, and layers exactly as they were.
+ */
+async function commitCandidate(
+  state: SessionState,
+  candidate: Scene,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const loaded = await loadScene(state.projectRoot, state.library, candidate);
+  if (!loaded.ok) return { status: 400, body: { errors: loaded.errors } };
+  const fresh = await renderSceneInspection(loaded.resolved);
+  // The complete next state and its full response are built against the
+  // prospective state before any live state is touched: viewLayers runs on
+  // the candidate's view, so a contract failure throws while nothing has
+  // changed, and no work follows the commit — the assignment below is the
+  // last statement before the response leaves.
+  const next: SessionState = {
+    ...state,
+    raw: candidate,
+    rev: state.rev + 1,
+    png: fresh.png,
+    layers: fresh.layers,
+    warnings: fresh.warnings,
+  };
+  const body = {
+    rev: next.rev,
+    png: next.png.toString("base64"),
+    warnings: next.warnings,
+    layers: viewLayers(next),
+  };
+  // Commit: five synchronous assignments, nothing awaited or thrown after.
+  state.raw = next.raw;
+  state.rev = next.rev;
+  state.png = next.png;
+  state.layers = next.layers;
+  state.warnings = next.warnings;
+  return { status: 200, body };
+}
+
+/**
+ * One movement, candidate-first: clone the current raw state, apply the
+ * delta (top-level: identity; nested: the inverse of the Layer's measured
+ * ancestor basis), and commit through the one candidate-commit path.
+ */
 async function applyMovement(
   state: SessionState,
   req: Movement,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const found = findLayer(state.raw.layers, req.id);
-  if (!found)
-    return {
-      status: 400,
-      body: {
-        errors: [
-          {
-            path: "id",
-            message: `unknown layer id "${req.id}" — select a Layer from the listing or the canvas; every Layer in the scene tree is addressable by its stable id`,
-          },
-        ],
-      },
-    };
+  if (!found) return unknownLayerError(req.id);
   const { layer, path } = found;
-  if (layer.type === "connector")
-    return {
-      status: 400,
-      body: {
-        errors: [
-          {
-            path,
-            message: `layer "${req.id}" is a Connector — it has no authored position of its own; move its "from"/"to" target Layers instead`,
-          },
-        ],
-      },
-    };
+  const geo = authoredGeometry(layer);
+  if (!geo.position) return geometryReadonlyError(layer, path, ["position"]);
   const rendered = state.layers.find((l) => l.id === req.id);
-  if (!rendered || !rendered.visible)
-    return {
-      status: 400,
-      body: {
-        errors: [
-          {
-            path,
-            message: `layer "${req.id}" paints nothing in the current preview (hidden or fully transparent) — it has no draggable canvas target`,
-          },
-        ],
-      },
-    };
+  if (!rendered || !rendered.visible) return paintsNothingError(req.id, path);
   const inverse = invertBasis((rendered as VisibleRenderedLayer).basis);
-  if (!inverse)
-    return {
-      status: 400,
-      body: {
-        errors: [
-          {
-            path,
-            message: `layer "${req.id}" sits under a degenerate Group transform — its position cannot follow a drag`,
-          },
-        ],
-      },
-    };
+  if (!inverse) return degenerateError(req.id, path);
   const local = applyBasis(inverse, req.dx, req.dy);
   const candidate = structuredClone(state.raw);
-  const target = positionedPosition(findLayer(candidate.layers, req.id)!.layer, req.id);
+  const target = authoredGeometry(findLayer(candidate.layers, req.id)!.layer).position!;
   const nextX = target.x + local.x;
   const nextY = target.y + local.y;
   if (!Number.isFinite(nextX) || !Number.isFinite(nextY))
@@ -789,22 +1227,302 @@ async function applyMovement(
     };
   target.x = n(nextX);
   target.y = n(nextY);
-  // The complete canonical gate: schema, semantics, theme, resolution —
-  // ordinary Scene changes (DEC-022); local asset/library rereads accepted.
-  const loaded = await loadScene(state.projectRoot, state.library, candidate);
-  if (!loaded.ok) return { status: 400, body: { errors: loaded.errors } };
-  // The canonical validation + render path — never a CSS-only approximation.
-  const fresh = await renderSceneInspection(loaded.resolved);
-  // Commit: only here does any state change.
-  state.raw = candidate;
-  state.rev += 1;
-  state.png = fresh.png;
-  state.layers = fresh.layers;
-  state.warnings = fresh.warnings;
-  return {
-    status: 200,
-    body: { rev: state.rev, png: state.png.toString("base64"), warnings: state.warnings, layers: viewLayers(state) },
+  return commitCandidate(state, candidate);
+}
+
+/** One completed handle drag: the addressed Layer's stable id, which authored
+ * corner was grabbed, and the frame-px displacement of that corner. */
+interface ResizeRequest {
+  id: string;
+  handle: "nw" | "ne" | "se" | "sw";
+  dx: number;
+  dy: number;
+}
+
+/** The signed box-axis each authored-corner handle drags: (+1,+1) is se. */
+const HANDLE_SIGNS = {
+  nw: [-1, -1],
+  ne: [1, -1],
+  se: [1, 1],
+  sw: [-1, 1],
+} as const;
+
+/**
+ * Parse a JSON body at the boundary into a plain object carrying exactly the
+ * expected fields: unknown fields are rejected, never ignored, and missing
+ * ones are named — a typo can never silently change a request's meaning.
+ */
+function parseJsonObject(
+  text: string,
+  fields: readonly string[],
+): Record<string, unknown> | SceneError[] {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return [{ path: "body", message: "the request body is not valid JSON" }];
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return [{ path: "body", message: "the request body must be a JSON object" }];
+  const b = body as Record<string, unknown>;
+  const unknown = Object.keys(b).filter((k) => !fields.includes(k));
+  if (unknown.length)
+    return [
+      {
+        path: "body",
+        message: `unexpected field(s) ${unknown.map((k) => `"${k}"`).join(", ")} — expected exactly ${fields.map((k) => `"${k}"`).join(", ")}`,
+      },
+    ];
+  const missing = fields.filter((k) => !Object.hasOwn(b, k));
+  if (missing.length)
+    return [
+      {
+        path: "body",
+        message: `missing field(s) ${missing.map((k) => `"${k}"`).join(", ")} — expected exactly ${fields.map((k) => `"${k}"`).join(", ")}`,
+      },
+    ];
+  return b;
+}
+
+/**
+ * Parse a resize body at the boundary: a JSON object carrying exactly the
+ * stable Layer id, one authored-corner handle, and finite frame-px deltas.
+ */
+function parseResize(text: string): ResizeRequest | SceneError[] {
+  const b = parseJsonObject(text, ["id", "handle", "dx", "dy"]);
+  if (Array.isArray(b)) return b;
+  if (typeof b.id !== "string" || b.id.length === 0)
+    return [{ path: "id", message: "resize needs the Layer's stable id as a non-empty string" }];
+  if (typeof b.handle !== "string" || !Object.hasOwn(HANDLE_SIGNS, b.handle))
+    return [{ path: "handle", message: `resize needs a corner handle: one of "nw", "ne", "se", "sw"` }];
+  if (
+    typeof b.dx !== "number" ||
+    !Number.isFinite(b.dx) ||
+    typeof b.dy !== "number" ||
+    !Number.isFinite(b.dy)
+  )
+    return [{ path: "dx,dy", message: "resize needs finite frame-px deltas as numbers for both dx and dy" }];
+  return { id: b.id, handle: b.handle as ResizeRequest["handle"], dx: b.dx, dy: b.dy };
+}
+
+/** The geometry fields a resize request would write, as their Scene paths. */
+const resizeFieldPaths = (path: string) => ({
+  x: `${path}.position.x`,
+  y: `${path}.position.y`,
+  width: `${path}.size.width`,
+  height: `${path}.size.height`,
+});
+
+/**
+ * One completed handle drag, candidate-first (#61). The drag displaces the
+ * grabbed authored corner by (dx, dy) frame px while the opposite transformed
+ * authored corner stays exactly fixed: the size delta is the drag mapped
+ * through the measured full basis F (the Layer's own box axes — exact for any
+ * rotation, mirror, and scale), the center moves by P⁻¹·d/2 through the
+ * measured ancestor basis P, and position follows as Δposition = P⁻¹·d/2 −
+ * Δsize/2. Only a singular basis or a non-finite/non-positive result is
+ * rejected; a valid rotation — including ±45° — never is.
+ */
+async function applyResize(
+  state: SessionState,
+  req: ResizeRequest,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const found = findLayer(state.raw.layers, req.id);
+  if (!found) return unknownLayerError(req.id);
+  const { layer, path } = found;
+  const geo = authoredGeometry(layer);
+  const absent = [!geo.position && "position", !geo.size && "size"].filter(
+    (v): v is string => Boolean(v),
+  );
+  if (absent.length > 0) return geometryReadonlyError(layer, path, absent);
+  const rendered = state.layers.find((l) => l.id === req.id);
+  if (!rendered || !rendered.visible) return paintsNothingError(req.id, path);
+  const visible = rendered as VisibleRenderedLayer;
+  const fullInverse = invertBasis(visible.fullBasis);
+  if (!fullInverse) return degenerateError(req.id, path);
+  const ancestorInverse = invertBasis(visible.basis);
+  if (!ancestorInverse) return degenerateError(req.id, path);
+  const [sx, sy] = HANDLE_SIGNS[req.handle];
+  // The frame drag expressed in the Layer's own box axes — the signed size
+  // delta, with the handle's corner choosing which axis grows.
+  const drag = applyBasis(fullInverse, req.dx, req.dy);
+  const dw = sx * drag.x;
+  const dh = sy * drag.y;
+  // The transformed box center moves by half the grabbed corner's frame
+  // displacement (the opposite corner is fixed): back through the ancestors.
+  const center = applyBasis(ancestorInverse, req.dx / 2, req.dy / 2);
+  const candidate = structuredClone(state.raw);
+  const targetGeo = authoredGeometry(findLayer(candidate.layers, req.id)!.layer);
+  const pos = targetGeo.position!;
+  const size = targetGeo.size!;
+  const next = {
+    x: pos.x + center.x - dw / 2,
+    y: pos.y + center.y - dh / 2,
+    width: size.width + dw,
+    height: size.height + dh,
   };
+  const fieldPaths = resizeFieldPaths(path);
+  const finite = (v: number) => Number.isFinite(v);
+  if (!finite(next.x) || !finite(next.y) || !finite(next.width) || !finite(next.height))
+    return {
+      status: 400,
+      body: {
+        errors: [
+          {
+            path: !finite(next.width)
+              ? fieldPaths.width
+              : !finite(next.height)
+                ? fieldPaths.height
+                : `${path}.position`,
+            message: `resizing layer "${req.id}" from the "${req.handle}" handle by (${req.dx}, ${req.dy}) frame px would leave its geometry at position (${next.x}, ${next.y}) and size ${next.width}×${next.height} — outside the finite canvas coordinate space`,
+          },
+        ],
+      },
+    };
+  if (next.width <= 0 || next.height <= 0)
+    return {
+      status: 400,
+      body: {
+        errors: [
+          {
+            path: next.width <= 0 ? fieldPaths.width : fieldPaths.height,
+            message: `resizing layer "${req.id}" from the "${req.handle}" handle by (${req.dx}, ${req.dy}) frame px would leave its size at ${next.width}×${next.height} — width and height must stay positive`,
+          },
+        ],
+      },
+    };
+  const target = findLayer(candidate.layers, req.id)!.layer as Extract<
+    SceneLayer,
+    { position: { x: number; y: number }; size: { width: number; height: number } }
+  >;
+  target.position = { x: n(next.x), y: n(next.y) };
+  target.size = { width: n(next.width), height: n(next.height) };
+  return commitCandidate(state, candidate);
+}
+
+/** One exact numeric geometry edit: the addressed Layer's stable id and the
+ * authored fields to replace — at least one of x/y/width/height. */
+interface GeometrySetRequest {
+  id: string;
+  set: { x?: number; y?: number; width?: number; height?: number };
+}
+
+const GEOMETRY_FIELDS = ["x", "y", "width", "height"] as const;
+
+/**
+ * Parse a numeric geometry body at the boundary: a JSON object carrying
+ * exactly the stable Layer id and a "set" object with at least one of the
+ * four authored fields, every value a finite number.
+ */
+function parseGeometry(text: string): GeometrySetRequest | SceneError[] {
+  const b = parseJsonObject(text, ["id", "set"]);
+  if (Array.isArray(b)) return b;
+  if (typeof b.id !== "string" || b.id.length === 0)
+    return [{ path: "id", message: "the geometry edit needs the Layer's stable id as a non-empty string" }];
+  const rawSet = b.set;
+  if (typeof rawSet !== "object" || rawSet === null || Array.isArray(rawSet))
+    return [
+      {
+        path: "set",
+        message: "the geometry edit needs a \"set\" object with at least one of x, y, width, height",
+      },
+    ];
+  const s = rawSet as Record<string, unknown>;
+  const unknown = Object.keys(s).filter(
+    (k) => !(GEOMETRY_FIELDS as readonly string[]).includes(k),
+  );
+  if (unknown.length)
+    return [
+      {
+        path: "set",
+        message: `unexpected set field(s) ${unknown.map((k) => `"${k}"`).join(", ")} — set accepts only x, y, width, height`,
+      },
+    ];
+  if (Object.keys(s).length === 0)
+    return [{ path: "set", message: "the geometry edit needs at least one of x, y, width, height" }];
+  const set: GeometrySetRequest["set"] = {};
+  for (const k of GEOMETRY_FIELDS) {
+    const v = s[k];
+    if (v === undefined) continue;
+    if (typeof v !== "number" || !Number.isFinite(v))
+      return [{ path: `set.${k}`, message: `set.${k} must be a finite number` }];
+    set[k] = v;
+  }
+  return { id: b.id, set };
+}
+
+/**
+ * One exact numeric geometry edit, candidate-first (#61): the requested
+ * authored fields are replaced exactly — in the coordinate space they live
+ * in (canvas px top-level, the parent Group's local px nested). Per-field
+ * capability: editing x/y needs an authored position, width/height an
+ * authored size; a Layer missing either is read-only for exactly that field.
+ * The size floor (positive, finite) and position finiteness are enforced at
+ * this boundary before the one candidate-commit path runs.
+ */
+async function applyGeometrySet(
+  state: SessionState,
+  req: GeometrySetRequest,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const found = findLayer(state.raw.layers, req.id);
+  if (!found) return unknownLayerError(req.id);
+  const { layer, path } = found;
+  const geo = authoredGeometry(layer);
+  const wantsPosition = req.set.x !== undefined || req.set.y !== undefined;
+  const wantsSize = req.set.width !== undefined || req.set.height !== undefined;
+  const absent = [
+    ...(!geo.position && wantsPosition ? ["position"] : []),
+    ...(!geo.size && wantsSize ? ["size"] : []),
+  ];
+  if (absent.length > 0) return geometryReadonlyError(layer, path, absent);
+  const rendered = state.layers.find((l) => l.id === req.id);
+  if (!rendered || !rendered.visible) return paintsNothingError(req.id, path);
+  const candidate = structuredClone(state.raw);
+  const targetGeo = authoredGeometry(findLayer(candidate.layers, req.id)!.layer);
+  // Numeric edits apply the submitted numbers exactly — no gesture rounding:
+  // the panel is the exactness control (#61).
+  if (req.set.x !== undefined) targetGeo.position!.x = req.set.x;
+  if (req.set.y !== undefined) targetGeo.position!.y = req.set.y;
+  if (req.set.width !== undefined) targetGeo.size!.width = req.set.width;
+  if (req.set.height !== undefined) targetGeo.size!.height = req.set.height;
+  const fieldPaths = resizeFieldPaths(path);
+  // Boundary backstop: every authored value must land in its schema domain —
+  // sizes positive and finite, positions finite (off-canvas is legitimate).
+  const sizeChecks: [number, string, string][] = [
+    [targetGeo.size!.width, fieldPaths.width, "width"],
+    [targetGeo.size!.height, fieldPaths.height, "height"],
+  ];
+  for (const [value, fieldPath, name] of sizeChecks)
+    if (!Number.isFinite(value) || value <= 0)
+      return {
+        status: 400,
+        body: {
+          errors: [
+            {
+              path: fieldPath,
+              message: `layer "${req.id}" would have ${name} ${value} — width and height must be positive finite numbers`,
+            },
+          ],
+        },
+      };
+  const positionChecks: [number, string][] = [
+    [targetGeo.position!.x, fieldPaths.x],
+    [targetGeo.position!.y, fieldPaths.y],
+  ];
+  for (const [value, fieldPath] of positionChecks)
+    if (!Number.isFinite(value))
+      return {
+        status: 400,
+        body: {
+          errors: [
+            {
+              path: fieldPath,
+              message: `layer "${req.id}" would have position ${value} — position must be a finite number`,
+            },
+          ],
+        },
+      };
+  return commitCandidate(state, candidate);
 }
 
 /**
@@ -855,6 +1573,42 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
     return run;
   };
 
+  /**
+   * One POST pipeline shared by every geometry route (#61): the exact
+   * application/json media type, the streamed byte budget, strict boundary
+   * parsing, and arrival-order serialization — then the route's own apply.
+   * Arrival order is commit order: the pipeline enqueues at handler arrival —
+   * before the first body read — so a slowly streamed earlier request can
+   * never commit after a later complete one.
+   */
+  const jsonGeometryPost = <P>(
+    req: Request,
+    parse: (text: string) => P | SceneError[],
+    apply: (parsed: P) => Promise<{ status: number; body: Record<string, unknown> }>,
+  ): Promise<Response> => {
+    if (!isApplicationJson(req.headers.get("content-type")))
+      return Promise.resolve(
+        json(400, {
+          errors: [{ path: "content-type", message: "geometry requests must send application/json" }],
+        }),
+      );
+    return serialize(async () => {
+      const body = await readJsonBody(req);
+      if (!body.ok)
+        return json(body.status, { errors: [{ path: "body", message: body.message }] });
+      const parsed = parse(body.text);
+      if (Array.isArray(parsed)) return json(400, { errors: parsed });
+      try {
+        const result = await apply(parsed);
+        return json(result.status, result.body);
+      } catch (err) {
+        // A render failure changes nothing — the raw state, revision, and
+        // last valid preview stand — and the error is actionable.
+        return json(500, { errors: [{ path: "render", message: (err as Error).message }] });
+      }
+    });
+  };
+
   const server = Bun.serve({
     // Loopback only, ephemeral port: the session never exposes an interface
     // and never races a well-known port.
@@ -892,39 +1646,15 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
             return new Response(CLIENT_SCRIPT, {
               headers: securityHeaders({ "content-type": "text/javascript; charset=utf-8" }),
             });
-          case "/move": {
+          case "/move":
             if (req.method !== "POST") return empty(405);
-            if (!isApplicationJson(req.headers.get("content-type")))
-              return json(400, {
-                errors: [{ path: "content-type", message: "movement requests must send application/json" }],
-              });
-            // Arrival order is commit order: the whole read/parse/apply
-            // pipeline enqueues at handler arrival — before the first body
-            // read — so a slowly streamed earlier request can never commit
-            // after a later complete one.
-            try {
-              const result = await serialize(
-                async (): Promise<{ status: number; body: Record<string, unknown> }> => {
-                  const body = await readMovementBody(req);
-                  if (!body.ok)
-                    return {
-                      status: body.status,
-                      body: { errors: [{ path: "body", message: body.message }] },
-                    };
-                  const parsed = parseMovement(body.text);
-                  if (Array.isArray(parsed)) return { status: 400, body: { errors: parsed } };
-                  return applyMovement(state, parsed);
-                },
-              );
-              return json(result.status, result.body);
-            } catch (err) {
-              // A render failure changes nothing — the raw state, revision,
-              // and last valid preview stand — and the error is actionable.
-              return json(500, {
-                errors: [{ path: "render", message: (err as Error).message }],
-              });
-            }
-          }
+            return jsonGeometryPost(req, parseMovement, (parsed) => applyMovement(state, parsed));
+          case "/resize":
+            if (req.method !== "POST") return empty(405);
+            return jsonGeometryPost(req, parseResize, (parsed) => applyResize(state, parsed));
+          case "/geometry":
+            if (req.method !== "POST") return empty(405);
+            return jsonGeometryPost(req, parseGeometry, (parsed) => applyGeometrySet(state, parsed));
           default:
             return empty(404);
         }
