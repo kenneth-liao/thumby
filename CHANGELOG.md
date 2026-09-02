@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Scene author session: the side-by-side view keeps the Render and Reference Thumbnail on one horizontal row at common viewports, capability checks are constant-time, and a failed session shutdown reports a structured terminal failure with a nonzero exit instead of a silent success (#58)
 - A recorded matte that fails the true-alpha gate is labeled "invalid matte — not adoptable" with its refusal reason instead of "no matte", and the review sheet is published atomically so a failed write can never truncate the prior sheet (#57)
 - Review sheets embed every figure from the verified bytes, so a saved review remains stable when source files later change, and the full-size view renders at natural size (#57)
 - A successful rerun re-persists a legacy job record at the current schema version together with its new lineage (Plate/Object → v4, the role-aware prompt contract; Creator stays v3), so role-aware lineage never hides under a v1/v2 version an older binary would rerun with weaker, path-only prompt behavior; failed reruns leave the legacy record untouched (#68 review, #56)

@@ -192,7 +192,14 @@ describe("diffPng", () => {
       1,
       Buffer.from([255, 0, 0, 255, 10, 20, 30, 255]),
     );
-    const ref = { path: "/x/ref.png", width: 2, height: 1, rgba: Buffer.from([0, 100, 0, 255, 10, 0, 30, 40]) };
+    const refRgba = Buffer.from([0, 100, 0, 255, 10, 0, 30, 40]);
+    const ref = {
+      path: "/x/ref.png",
+      width: 2,
+      height: 1,
+      rgba: refRgba,
+      bytes: encodePngRgba(2, 1, refRgba),
+    };
     const diff = decodePng(diffPng(a, ref));
     expect(diff.width).toBe(2);
     expect([...diff.rgba.subarray(0, 8)]).toEqual([255, 100, 0, 255, 0, 20, 0, 255]);
@@ -201,7 +208,7 @@ describe("diffPng", () => {
   it("identical inputs produce an all-zero diff", () => {
     const rgba = halfReference();
     const png = encodePngRgba(1280, 720, rgba);
-    const ref = { path: "/x/ref.png", width: 1280, height: 720, rgba };
+    const ref = { path: "/x/ref.png", width: 1280, height: 720, rgba, bytes: png };
     const diff = decodePng(diffPng(png, ref));
     // Every pixel channel except alpha is zero.
     for (let i = 0; i < diff.rgba.length; i += 4) {

@@ -27,6 +27,7 @@ import { promisify } from "node:util";
 import { request as httpRequest } from "node:http";
 import type { Page } from "playwright";
 import { getBrowser } from "../src/browser.js";
+import { shutdownSession } from "../src/scene-author.js";
 import { encodePngRgba } from "../src/png.js";
 
 const execFileP = promisify(execFile);
@@ -391,6 +392,7 @@ describe("scene author — live session", () => {
         `/${"0".repeat(64)}/view`,
         `/${token}0/view`,
         `/${token}`,
+        `/${token.slice(0, 63)}${token.charAt(63) === "a" ? "b" : "a"}/view`,
         `/${token}/render.png/`,
         `/${token}/package.json`,
         "/",
@@ -490,6 +492,19 @@ describe("scene author — live session", () => {
         // Script-free by construction — and the CSP would have blocked it anyway.
         expect(await page.locator("script").count()).toBe(0);
 
+        // Side by side is a true horizontal row at this viewport: the two
+        // figures share one vertical position and sit at distinct horizontal
+        // positions — never a vertical stack.
+        const boxes = await page.evaluate(() =>
+          [...document.querySelectorAll(".side figure")].map((f) => {
+            const r = f.getBoundingClientRect();
+            return { top: r.top, left: r.left };
+          }),
+        );
+        expect(boxes).toHaveLength(2);
+        expect(boxes[0]!.top).toBe(boxes[1]!.top);
+        expect(boxes[0]!.left).not.toBe(boxes[1]!.left);
+
         const side = page.locator(".side");
         const overlay = page.locator(".overlay");
         expect(await side.evaluate((el) => getComputedStyle(el).display)).not.toBe("none");
@@ -550,7 +565,7 @@ describe("scene author — live session", () => {
       expect(await session.exited).toBe(0);
 
       const closedEvt = await closed;
-      expect(closedEvt).toEqual({ event: "closed" });
+      expect(closedEvt).toEqual({ event: "closed", ok: true });
       // Exactly two events for a live session: started, then closed.
       expect(events.events.map((e) => e.event)).toEqual(["started", "closed"]);
 
@@ -569,5 +584,67 @@ describe("scene author — live session", () => {
       await session.exited;
     }
     if (fix) await rm(fix.root, { recursive: true, force: true });
+  });
+});
+
+// --- shutdown path (fault injection) ---------------------------------------
+
+describe("scene author — the one shutdown path (fault injection)", () => {
+  test("emits closed ok:true and exits 0 when every cleanup step succeeds", async () => {
+    const events: Record<string, unknown>[] = [];
+    const order: string[] = [];
+    let code: number | undefined;
+    await expect(
+      shutdownSession({
+        stopListener: () => void order.push("listener"),
+        closeBrowser: async () => void order.push("browser"),
+        emit: async (e) => void events.push(e),
+        exit: (c) => {
+          code = c;
+          throw new Error(`exit ${c}`);
+        },
+      }),
+    ).rejects.toThrow("exit 0");
+    expect(order).toEqual(["listener", "browser"]);
+    expect(events).toEqual([{ event: "closed", ok: true }]);
+    expect(code).toBe(0);
+  });
+
+  test("attempts every resource after an earlier failure and ends with a structured terminal failure and nonzero status", async () => {
+    const events: Record<string, unknown>[] = [];
+    const order: string[] = [];
+    let code: number | undefined;
+    await expect(
+      shutdownSession({
+        stopListener: () => {
+          order.push("listener");
+          throw new Error("listener refused to stop");
+        },
+        closeBrowser: async () => {
+          order.push("browser");
+          throw new Error("browser close failed");
+        },
+        emit: async (e) => void events.push(e),
+        exit: (c) => {
+          code = c;
+          throw new Error(`exit ${c}`);
+        },
+      }),
+    ).rejects.toThrow("exit 1");
+    // Both resources were attempted despite the first failure — never a
+    // silent success: the terminal event names every cleanup failure and
+    // the status is nonzero (ADR-0010 fail-loud).
+    expect(order).toEqual(["listener", "browser"]);
+    expect(events).toEqual([
+      {
+        event: "closed",
+        ok: false,
+        errors: [
+          { message: "listener: listener refused to stop" },
+          { message: "browser: browser close failed" },
+        ],
+      },
+    ]);
+    expect(code).toBe(1);
   });
 });
