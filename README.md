@@ -870,7 +870,9 @@ identity no longer matches and `scene rerender` refuses — re-render with
 Scene and its Reference Thumbnail and renders once in memory before anything
 listens. Stdout then carries exactly two one-line JSON events —
 `{"event":"started","url":"http://127.0.0.1:<port>/<capability>/view"}` and,
-on shutdown, `{"event":"closed"}`. The URL is the whole capability: the
+on shutdown, `{"event":"closed","ok":true}` (exit 0) when cleanup succeeded, or
+`{"event":"closed","ok":false,"errors":[…]}` (exit 1) when any resource failed
+to release. The URL is the whole capability: the
 session binds only to 127.0.0.1 on an ephemeral port, and 32 random bytes in
 the path are the unguessable capability — every request must present the
 exact Host and capability or it gets an empty 403/404/405; there is no

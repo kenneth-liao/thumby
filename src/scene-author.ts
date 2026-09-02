@@ -24,7 +24,9 @@
  *
  * Lifecycle: one shutdown path. SIGTERM and SIGINT run the same shutdown —
  * stop the listener, release the held browser (page, context, browser,
- * ADR-0010), emit the one-line "closed" event, and exit 0. A live session's
+ * ADR-0010), and emit the one-line terminal event: successful cleanup writes
+ * {"event":"closed","ok":true} and exits 0; failed cleanup writes
+ * {"event":"closed","ok":false,"errors":[…]} and exits 1. A live session's
  * stdout carries exactly two one-line JSON events: "started" and "closed".
  */
 import crypto, { timingSafeEqual } from "node:crypto";
