@@ -9,15 +9,24 @@ export type TextZone = "left" | "right" | "bottom" | "none";
 /**
  * The plate prompt: the agent's subject is authoritative for visual content
  * (DEC-010, ADR-0011) — UI, products, devices, and complex background elements
- * are requested content, never banned. Construction adds format, zone, and
- * cross-cutting invariant guidance only: the hard text/logo ban stays because
- * final editorial text is rendered locally (ADR-0001) and exact logos are
- * sourced Assets.
+ * are requested content, never banned. Construction adds format, zone,
+ * reference-role, and cross-cutting invariant guidance only: the hard
+ * text/logo ban stays because final editorial text is rendered locally
+ * (ADR-0001) and exact logos are sourced Assets.
  *
- * The text layer is rendered locally in CSS, so the model must also leave
- * deliberate empty space where our headline will land.
+ * Typed references are role-assigned in the effective prompt (US-020/021,
+ * DEC-014/DEC-016): an edit reference is an authentic interface to simplify —
+ * macrostructure kept, thumbnail-scale detail dropped — so a Plate can carry
+ * intentionally flattened simplified UI. The text layer is rendered locally
+ * in CSS, so the model must also leave deliberate empty space where our
+ * headline will land.
  */
-function buildPrompt(subject: string, zone: TextZone, subjectless = false): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
+function buildPrompt(
+  subject: string,
+  zone: TextZone,
+  subjectless = false,
+  refs: TypedRefInput[] = [],
+): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
   // asking for a subject here produces something that fights the cutout.
   // Legacy `thumb --cutout` mode only; Plate Jobs never set it.
   const backdrop: Record<TextZone, string> = {
@@ -38,6 +47,7 @@ function buildPrompt(subject: string, zone: TextZone, subjectless = false): stri
   return [
     subject,
     "",
+    ...(refs.length ? [...roleManifest(refs, PLATE_OBJECT_ROLE_INSTRUCTIONS), ""] : []),
     "Format: a 16:9 YouTube thumbnail background plate.",
     subjectless ? backdrop[zone] : composition[zone],
     ...(subjectless
@@ -57,26 +67,36 @@ function buildPrompt(subject: string, zone: TextZone, subjectless = false): stri
 
 /**
  * An object request (REQ-015) is one isolated non-text object: a standalone
- * asset for local compositing, never a scene or a composite (OOS-009).
- * Transparency is requested in the prompt; whether the model actually returns
- * a true-alpha PNG is verified at adoption — an opaque candidate is refused
- * there, so nothing hinges on the model's compliance.
+ * asset for local compositing, never a scene or a composite (OOS-009). A UI
+ * panel is permitted object content (US-024) — simplified from an edit
+ * reference when one is supplied; final text, exact official-logo subjects,
+ * scenes, and final composites stay banned. Transparency is requested in the
+ * prompt; whether the model actually returns a true-alpha PNG is verified at
+ * adoption — an opaque candidate is refused there, so nothing hinges on the
+ * model's compliance.
  */
-function buildObjectPrompt(subject: string): string {
+function buildObjectPrompt(subject: string, refs: TypedRefInput[] = []): string {
   return [
     subject,
     "",
+    ...(refs.length ? [...roleManifest(refs, PLATE_OBJECT_ROLE_INSTRUCTIONS), ""] : []),
     "Format: exactly one single isolated object, centered, with the entire object fully inside the frame and clear margins around it on all sides.",
     "The object must be a standalone asset on a plain uniform background: no environment, no scene, no room, no surface it stands on, no hands or people holding or touching it.",
     "Style: clean readable silhouette at small sizes, even studio-like lighting, crisp well-defined edges suitable for cutout isolation, true transparency around the object.",
-    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, no UI elements, and no composite thumbnail layout — this object will be composited into a design by local tooling.",
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, and no composite thumbnail layout — this object will be composited into a design by local tooling.",
   ].join("\n");
 }
 
 // --- creator generation (REQ-017) --------------------------------------------
 
-/** A creator reference as the prompt sees it: a role plus its image. */
-export interface CreatorRefInput {
+/**
+ * A typed reference as generation receives it: its declared role and the path
+ * whose bytes are sent. `contentHash` is present when the caller holds a
+ * recorded identity to verify against before anything reaches the model
+ * (creator generation does; plate/object runs verify at the job request and
+ * rerun boundaries instead).
+ */
+export interface TypedRefInput {
   role: string;
   path: string;
   /** Recorded content identity — when present, the bytes sent to the model are verified against it. */
@@ -106,12 +126,43 @@ const CREATOR_ROLE_INSTRUCTIONS: Record<string, string> = {
  * is built from this same order, so the recorded fullPrompt always describes
  * how the images were actually attached, whatever the model's call shape.
  */
-export function creatorRefOrder(refs: CreatorRefInput[]): CreatorRefInput[] {
+export function creatorRefOrder(refs: TypedRefInput[]): TypedRefInput[] {
   const identity = refs.filter((r) => r.role === "identity");
   const pose = refs.filter((r) => r.role === "pose");
   const middle = refs.filter((r) => r.role !== "identity" && r.role !== "pose");
   return [...identity, ...middle, ...pose];
 }
+
+/**
+ * The one shape of an effective prompt's reference manifest: every attached
+ * image is numbered and role-labeled — by ordinal and role only, so the
+ * recorded fullPrompt describes how the images were actually attached without
+ * sending any machine-local path off-box — with a per-role instruction when
+ * the workflow prescribes one. A role with no instruction is identified by
+ * label alone, so the prompt never claims semantics it was not given.
+ */
+function roleManifest(refs: TypedRefInput[], instructions: Record<string, string>): string[] {
+  return [
+    "Reference images are attached in this exact order — role-assign every one:",
+    ...refs.map((r, i) => {
+      const what = instructions[r.role];
+      return `image ${i + 1} — ${r.role}${what ? ` (${what})` : ""}`;
+    }),
+  ];
+}
+
+/**
+ * Per-role instructions for Plate and Object references (US-020/021/024,
+ * DEC-014, DEC-016). "edit" is the UI-abstraction contract: the reference is
+ * an authentic interface whose macrostructure is kept — major regions,
+ * proportions, visual language — simplified into a few large regions, with
+ * everything that fails at thumbnail size dropped. "style" keeps its distinct
+ * semantics; anything else is identified by label only.
+ */
+const PLATE_OBJECT_ROLE_INSTRUCTIONS: Record<string, string> = {
+  edit: "source-to-edit — keep this interface's macrostructure: its major regions, proportions, and visual language, simplified into a few large flat regions; omit incidental controls, small labels, dense text, and any detail that would be illegible at thumbnail size",
+  style: "style reference — palette, lighting, and visual style only; never take layout, structure, or content from it",
+};
 
 /**
  * The creator prompt: the subject, a numbered role manifest of the attached
@@ -124,18 +175,11 @@ export function creatorRefOrder(refs: CreatorRefInput[]): CreatorRefInput[] {
  * are machine details and never leave the box (they live in the Job's typed
  * request record).
  */
-export function buildCreatorPrompt(subject: string, orderedRefs: CreatorRefInput[]): string {
-  const manifest = orderedRefs
-    .map((r, i) => {
-      const what = CREATOR_ROLE_INSTRUCTIONS[r.role];
-      return `image ${i + 1} — ${r.role}${what ? ` (${what})` : ""}`;
-    })
-    .join("\n");
+export function buildCreatorPrompt(subject: string, orderedRefs: TypedRefInput[]): string {
   return [
     subject,
     "",
-    "Reference images are attached in this exact order — role-assign every one:",
-    manifest,
+    ...roleManifest(orderedRefs, CREATOR_ROLE_INSTRUCTIONS),
     "",
     "Copy the face from the identity anchors exactly — do not widen, round, or blend. Do not average the references into a different person.",
     "",
@@ -154,29 +198,39 @@ function describeWarning(model: string, w: unknown): string {
 }
 
 /** A generation reference: a path to read, or already-verified bytes. */
-type GenRef = string | { bytes: Uint8Array };
+type GenRef = string | { path: string } | { bytes: Uint8Array };
+
+/**
+ * The bytes for one reference: already-verified bytes when the caller holds
+ * them (creators — never re-read), otherwise the path's file (plates,
+ * objects, and the legacy path — re-read at the call boundary).
+ */
+function genRefBytes(r: GenRef): Promise<Buffer> {
+  if (typeof r === "string") return readFile(path.resolve(r));
+  if ("bytes" in r) return Promise.resolve(Buffer.from(r.bytes));
+  return readFile(path.resolve(r.path));
+}
 
 async function refParts(refs: GenRef[]) {
   return Promise.all(
     refs.map(async (r) => ({
       type: "image" as const,
-      image: typeof r === "string" ? await readFile(path.resolve(r)) : r.bytes,
+      image: await genRefBytes(r),
     })),
   );
 }
 
 /** Image models take raw bytes in GenerateImagePrompt.images, not file parts. */
 function refBytes(refs: GenRef[]) {
-  return Promise.all(
-    refs.map((r) => (typeof r === "string" ? readFile(path.resolve(r)) : Promise.resolve(r.bytes))),
-  );
+  return Promise.all(refs.map((r) => genRefBytes(r)));
 }
 
 export interface GenerateOptions {
   subject: string;
   model: string;
   zone: TextZone;
-  refs: string[];
+  /** Typed references — role-assigned in the effective prompt, never path-named. */
+  refs: TypedRefInput[];
   count: number;
   /**
    * Legacy `thumb --cutout` mode only: the cutout supplies the subject, so the
@@ -195,7 +249,8 @@ export interface GenerateOptions {
 export interface GenerateObjectOptions {
   subject: string;
   model: string;
-  refs: string[];
+  /** Typed references — role-assigned in the effective prompt, never path-named. */
+  refs: TypedRefInput[];
   count: number;
   temperature?: number;
 }
@@ -204,7 +259,7 @@ export interface GenerateObjectOptions {
 export interface GenerateCreatorOptions {
   subject: string;
   model: string;
-  refs: CreatorRefInput[];
+  refs: TypedRefInput[];
   count: number;
   temperature?: number;
 }
@@ -351,7 +406,7 @@ async function runGeneration(
 export async function generatePlates(
   opts: GenerateOptions,
 ): Promise<GenerateResult> {
-  const prompt = buildPrompt(opts.subject, opts.zone, opts.subjectless);
+  const prompt = buildPrompt(opts.subject, opts.zone, opts.subjectless, opts.refs);
   const { plates, warnings } = await runGeneration(
     resolveModel(opts.model),
     prompt,
@@ -372,7 +427,7 @@ export async function generateObjects(
   opts: GenerateObjectOptions,
 ): Promise<GenerateResult> {
   const spec = resolveModel(opts.model);
-  const prompt = buildObjectPrompt(opts.subject);
+  const prompt = buildObjectPrompt(opts.subject, opts.refs);
   const { plates, warnings } = await runGeneration(
     spec,
     prompt,
@@ -405,7 +460,7 @@ const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes)
  * receive different content than the Job records (INT: request-to-generation
  * drift is refused, not sent).
  */
-export async function loadCreatorRefs(ordered: CreatorRefInput[]): Promise<LoadedRef[]> {
+export async function loadCreatorRefs(ordered: TypedRefInput[]): Promise<LoadedRef[]> {
   return Promise.all(
     ordered.map(async (r): Promise<LoadedRef> => {
       let bytes: Buffer;

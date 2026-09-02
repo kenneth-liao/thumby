@@ -258,6 +258,22 @@ policy, not a validation rule:
   provenance, or Variants (Variants target layers by id, so a flattened
   element cannot be varied independently).
 
+**Simplified UI from typed References.** An authentic screenshot is a typed
+Reference, not raw output: attach it with `--ref edit:screenshot.png` and the
+run's guidance asks the model to keep the interface's macrostructure — major
+regions, proportions, visual language — while simplifying it into a few large,
+legible regions with no incidental controls, small labels, or dense text.
+Thumbnail scale is the target: prefer the fewest, largest regions the
+interface's identity allows, and review candidates at real thumbnail size
+before adopting. Choose the output kind by editability, the same
+flatten-versus-decompose policy as above — a **Plate** when the simplified
+interface is environmental background content (intentionally flattened), an
+**Object Asset** when the panel should be moved, resized, reused, or replaced
+on its own. `--ref style:palette.png` carries look only; it never supplies
+layout. The recorded effective prompt role-assigns every reference — with no
+machine-local paths — so the job's provenance preserves the declared roles,
+and reruns reproduce them.
+
 **Creator Assets** (REQ-017) are isolated creator candidates generated from
 typed identity anchors — never from text alone. Reference roles are typed
 (`identity`, `pose`, `expression`, `outfit`, `style`, `edit` = source-to-edit);
