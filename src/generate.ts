@@ -90,11 +90,12 @@ function buildObjectPrompt(subject: string, refs: TypedRefInput[] = []): string 
 // --- creator generation (REQ-017) --------------------------------------------
 
 /**
- * A typed reference as generation receives it: its declared role and the path
- * whose bytes are sent. `contentHash` is present when the caller holds a
- * recorded identity to verify against before anything reaches the model
- * (creator generation does; plate/object runs verify at the job request and
- * rerun boundaries instead).
+ * A typed reference as generation receives it: its declared role, the path
+ * whose bytes are sent, and the recorded content identity those bytes are
+ * verified against — exactly once, at the generation boundary
+ * (loadVerifiedRefs), before any candidate runs. The legacy thumb path
+ * supplies no recorded identity, so its references are loaded without
+ * verification.
  */
 export interface TypedRefInput {
   role: string;
