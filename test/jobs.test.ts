@@ -89,10 +89,15 @@ describe("runPlateJob", () => {
     const run = job.runs[0]!;
     expect(run.fullPrompt).toBe("PROMPT<neon server room zone=left>");
     expect(run.model).toBe("openai/gpt-image-2");
-    // gpt-image: approxCost 0.0045, measured — 2 plates.
-    expect(run.costUsd).toBeCloseTo(0.009, 6);
-    expect(run.costMeasured).toBe(true);
-    expect(run.warnings).toEqual(["gpt-image: unsupported setting"]);
+    // A reference call on gpt-image's text-only measured rate records unknown:
+    // the rate does not describe the call shape, and no per-generation billing
+    // lookup succeeded for reference calls (TEST-012).
+    expect(run.costUsd).toBeNull();
+    expect(run.costMeasured).toBe(false);
+    expect(run.warnings).toEqual([
+      "gpt-image: unsupported setting",
+      expect.stringMatching(/reference-call cost recorded as unknown/),
+    ]);
     expect(run.candidates).toHaveLength(2);
 
     // Candidates are content-addressed on disk with matching identities.

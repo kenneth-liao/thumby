@@ -2,7 +2,7 @@ import { generateText, generateImage } from "ai";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { resolveModel, type ModelSpec } from "./models.js";
+import { resolveModel, referenceIncompatibilityError, type ModelSpec } from "./models.js";
 
 export type TextZone = "left" | "right" | "bottom" | "none";
 
@@ -279,9 +279,11 @@ async function runGeneration(
   const warnings: string[] = [];
 
   if (refs.length && !spec.supportsRef) {
-    throw new Error(
-      `Model "${spec.id}" does not accept reference images. Use nano-pro or nano-2 for likeness.`,
-    );
+    // Last gate before the provider call — defense in depth behind the job
+    // request boundary, which normally refuses first. The message is the
+    // canonical builder's, so no second compatibility list can drift here
+    // (DEC-018).
+    throw new Error(referenceIncompatibilityError(spec));
   }
 
   if (temperature != null && spec.kind !== "multimodal") {

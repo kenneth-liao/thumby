@@ -68,7 +68,8 @@ Look
 Generation
   --model    <name>  ${Object.keys(MODELS).join(" | ")}   (default: ${DEFAULT_MODEL})
   --plates   <n>     Background variations to generate (default: 1)
-  --ref      <path>  Reference image for likeness. Repeatable. nano-* only.
+  --ref      <path>  Reference image for likeness. Repeatable. Requires a
+                     reference-capable model — --list marks them.
   --out      <dir>   Output directory (default: ./out)
 
 Other

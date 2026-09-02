@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Model selection for typed-Reference Jobs reads one registry capability source (#53, #65): gpt-image is qualified reference-capable; an explicitly incompatible selection (registry key or raw gateway id) is refused before any spend and lists every qualified choice; recorded raw gateway ids that name a registered model rerun qualified; a reference run on a text-only rate records its run cost as unknown with a basis warning
+
 - The image-kind Generation Job request shape has one home: `buildImageRequestArgs` in `src/generate.ts`, used by both production generation and the TEST-012 qualification harness (#52, #64). The harness now takes only image-kind models, publishes evidence through a single redacting and field-whitelisting serializer, roots its artifacts at the repo's gitignored `out/`, bounds every billing lookup with partial evidence persisted once the paid call settles, and records only per-generation billing as an exact per-call cost
 - **Plates are flexible: the Plate Job subject is authoritative** (US-025–US-027, #51, ADR-0011): `jobs plates` no longer forces the bare-backdrop prompt — a requested UI surface, product, device, or complex background element survives in the recorded effective prompt with no contradictory prohibition, while the final-text and exact-logo bans stay (ADR-0001). The glossary now defines a Plate as a full-canvas generated background whose contents are intentionally flattened, and agent guidance (README, `jobs` help) documents composability as an authoring policy — prefer independent Assets and Layers when separate control (movement, resizing, recoloring, replacement, reuse, provenance, Variants) has practical value; never a validation rule. The legacy `thumb --cutout` backdrop mode is unchanged
 
