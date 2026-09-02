@@ -22,7 +22,9 @@
  * - Object jobs get an isolation section read through the same canonical
  *   reader adoption uses (`resolveAdoptionEvidence`): the matte adoption
  *   would write, or a natively isolated candidate marked adoptable as-is, or
- *   a plain "no matte — not adoptable" marker.
+ *   a plain "no matte — not adoptable" marker — while a recorded matte that
+ *   fails the true-alpha gate is labeled "invalid matte — not adoptable"
+ *   with its escaped refusal reason, never as missing.
  * - Creator jobs keep their identity-anchor, face-detail, and matte evidence:
  *   the face-detail section applies the *same* deterministic center-crop
  *   geometry to every candidate and every identity anchor, so crops are
@@ -44,11 +46,26 @@
  * is context-escaped and a restrictive CSP forbids script/remote loading
  * outright; the only image sources are data URLs of verified bytes.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { loadJob, resolveAdoptionEvidence, type JobCandidate, type JobKind } from "./jobs.js";
+import { atomicReplace } from "./reference-import.js";
 import { dataUrl, escapeHtml } from "./html.js";
+
+/** Options for one review run; every field is a test-only injection seam. */
+export interface ReviewOptions {
+  /**
+   * Fault-injection seam for the sheet's publication: when set, the review
+   * write goes through here. Production always performs the real atomic
+   * replace — temp + rename inside the sheet's own directory, the one
+   * canonical implementation shared with the Scene writers — so an
+   * interrupted or failed write can never truncate the prior sheet;
+   * injecting a failing replacement is the deterministic way to prove that
+   * branch (the reference-import writeScene precedent).
+   */
+  replaceArtifact?: (file: string, bytes: Buffer) => Promise<void>;
+}
 
 export interface ReviewCandidate {
   contentHash: string;
@@ -67,7 +84,7 @@ export interface ReviewCandidate {
   adoption:
     | { from: "matte"; file: string; engine: string }
     | { from: "candidate"; file: string }
-    | { from: "none"; reason: string };
+    | { from: "none"; cause: "no-matte" | "invalid-matte"; reason: string };
 }
 
 export interface ReviewAnchor {
@@ -93,7 +110,7 @@ const FACE_CROP = { width: 200, left: -50, top: -32 } as const;
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
-export async function reviewJob(jobRoot: string, jobId: string): Promise<JobReview> {
+export async function reviewJob(jobRoot: string, jobId: string, opts: ReviewOptions = {}): Promise<JobReview> {
   const job = await loadJob(jobRoot, jobId);
   const jobDirectory = path.join(jobRoot, jobId);
 
@@ -127,7 +144,7 @@ export async function reviewJob(jobRoot: string, jobId: string): Promise<JobRevi
             ? { from: "matte", file: evidence.file, engine: evidence.engine }
             : evidence.from === "candidate"
               ? { from: "candidate", file: evidence.file }
-              : { from: "none", reason: evidence.reason },
+              : { from: "none", cause: evidence.cause, reason: evidence.reason },
       },
       candidateBytes: candidate.bytes,
       ...(evidence.from === "matte" ? { evidenceBytes: evidence.bytes } : {}),
@@ -163,7 +180,10 @@ export async function reviewJob(jobRoot: string, jobId: string): Promise<JobRevi
 
   const html = renderReviewSheet(job.jobId, job.kind, job.request.subject, rendered, anchors, anchorBytes);
   const reviewPath = path.join(jobDirectory, "review.html");
-  await writeFile(reviewPath, html);
+  // Published atomically — temp + rename in the sheet's own directory — so a
+  // failed or interrupted write can never truncate the prior sheet. The
+  // single write still happens only after every verification above.
+  await (opts.replaceArtifact ?? atomicReplace)(reviewPath, Buffer.from(html));
   return {
     jobId: job.jobId,
     kind: job.kind,
@@ -206,7 +226,14 @@ function renderReviewSheet(
         return `<figure><div class="fullwrap"><img class="full" src="${escapeHtml(dataUrl(evidenceBytes!))}"></div><figcaption>${tag} · matte via ${escapeHtml(cand.adoption.engine)}</figcaption></figure>`;
       if (cand.adoption.from === "candidate")
         return `<figure><div class="fullwrap"><img class="full" src="${escapeHtml(dataUrl(candidateBytes))}"></div><figcaption>${tag} · natively isolated — adoption writes these bytes as-is</figcaption></figure>`;
-      return `<figure><div class="empty"></div><figcaption>${tag} · no matte — not adoptable</figcaption></figure>`;
+      // A genuinely absent matte says "no matte"; a recorded, hash-matching
+      // matte that fails the true-alpha gate is present but invalid — the
+      // escaped refusal reason travels with the label, as evidence.
+      const refused =
+        cand.adoption.cause === "invalid-matte"
+          ? `invalid matte — not adoptable<br>${escapeHtml(cand.adoption.reason).replaceAll("\n", "<br>")}`
+          : "no matte — not adoptable";
+      return `<figure><div class="empty"></div><figcaption>${tag} · ${refused}</figcaption></figure>`;
     })
     .join("\n");
 

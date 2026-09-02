@@ -664,14 +664,16 @@ export interface VerifiedCandidateBytes {
  * - `"candidate"` — the candidate's own verified bytes, adopted as-is: every
  *   plate (ADR-0011), and an object candidate with no recorded matte whose
  *   bytes pass the true-alpha gate (the defensive native-alpha route).
- * - `"none"` — recorded, legitimate non-adoptability: a creator with no
- *   matte, or an object with neither matte nor native alpha. `reason` is the
- *   refusal adoption raises.
+ * - `"none"` — recorded, legitimate non-adoptability, with the reason
+ *   adoption raises and its precise cause: `"no-matte"` when no matte was
+ *   recorded (a creator without one, or an object whose own bytes fail the
+ *   gate), `"invalid-matte"` when a hash-matching recorded matte fails the
+ *   true-alpha gate — present, but not an adoptable matte.
  */
 export type AdoptionEvidence =
   | { from: "matte"; file: string; bytes: Buffer; contentHash: string; engine: string }
   | { from: "candidate"; file: string; bytes: Buffer; contentHash: string }
-  | { from: "none"; reason: string };
+  | { from: "none"; cause: "no-matte" | "invalid-matte"; reason: string };
 
 export interface ResolvedCandidateEvidence {
   /** The candidate's own bytes — read once, verified, never re-read. */
@@ -734,7 +736,7 @@ export async function resolveAdoptionEvidence(
     try {
       verifyTrueAlpha(matteBytes, record.file);
     } catch (err) {
-      return { candidate, evidence: { from: "none", reason: (err as Error).message } };
+      return { candidate, evidence: { from: "none", cause: "invalid-matte", reason: (err as Error).message } };
     }
     return {
       candidate,
@@ -755,6 +757,7 @@ export async function resolveAdoptionEvidence(
       candidate,
       evidence: {
         from: "none",
+        cause: "no-matte",
         reason:
           `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
           `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
@@ -766,7 +769,7 @@ export async function resolveAdoptionEvidence(
   try {
     verifyTrueAlpha(bytes, cand.file);
   } catch (err) {
-    return { candidate, evidence: { from: "none", reason: (err as Error).message } };
+    return { candidate, evidence: { from: "none", cause: "no-matte", reason: (err as Error).message } };
   }
   return {
     candidate,

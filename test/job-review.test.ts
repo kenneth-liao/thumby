@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile, readFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -169,6 +169,27 @@ describe("reviewJob — plate", () => {
     expect(Buffer.compare(sheetBefore, await readFile(result.reviewPath))).toBe(0);
   });
 
+  test("a failed sheet replacement leaves the prior sheet intact and no temp files behind", async () => {
+    await runPlateJob(jobRoot, "plate-atomic", plateRequest(1), plateGen);
+    const first = await reviewJob(jobRoot, "plate-atomic");
+    const sheetBefore = await readFile(first.reviewPath);
+
+    // The fault-injection seam (the reference-import writeScene precedent):
+    // production always performs the real atomic replace; a rejecting seam is
+    // the deterministic way to prove the failure branch.
+    await expect(
+      reviewJob(jobRoot, "plate-atomic", {
+        replaceArtifact: () => Promise.reject(new Error("injected replacement failure")),
+      }),
+    ).rejects.toThrow(/injected replacement failure/);
+    // The prior sheet is byte-identical — never truncated or partially replaced.
+    expect(Buffer.compare(sheetBefore, await readFile(first.reviewPath))).toBe(0);
+    // The replacement left no temp files in the job directory.
+    const entries = await readdir(path.join(jobRoot, "plate-atomic"));
+    expect(entries.some((e) => e.includes(".tmp-"))).toBe(false);
+    expect(entries).toContain("review.html");
+  });
+
   test("fails loudly on a tampered candidate and writes no partial review", async () => {
     await runPlateJob(jobRoot, "plate-tampered", plateRequest(1), plateGen);
     const job = await loadJob(jobRoot, "plate-tampered");
@@ -217,10 +238,70 @@ describe("reviewJob — object", () => {
   test("clearly marks an object candidate without an adoptable matte", async () => {
     await runObjectJob(jobRoot, "obj-opaque-rev", objectRequest(1), distinctOpaqueGen, brokenMatte);
     const result = await reviewJob(jobRoot, "obj-opaque-rev");
-    expect(result.candidates[0]!.adoption.from).toBe("none");
+    const adoption = result.candidates[0]!.adoption;
+    expect(adoption.from).toBe("none");
+    if (adoption.from !== "none") throw new Error("unreachable");
+    expect(adoption.cause).toBe("no-matte");
 
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toContain("no matte — not adoptable");
+  });
+
+  test("labels a matching-hash recorded matte that fails the true-alpha gate as invalid — with its refusal reason — never as missing", async () => {
+    await runObjectJob(jobRoot, "obj-invalid-matte", objectRequest(1), distinctOpaqueGen, fakeMatte);
+    const cand = (await loadJob(jobRoot, "obj-invalid-matte")).runs[0]!.candidates[0]!;
+    // Point the recorded matte at the candidate's own opaque bytes: the hash
+    // matches the record, so this is not tampering — the matte is present but
+    // invalid, and the sheet must say precisely that.
+    const file = path.join(jobRoot, "obj-invalid-matte", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.runs[0].candidates[0].matte = { file: cand.file, contentHash: cand.contentHash, engine: "forged" };
+    await writeFile(file, JSON.stringify(rec, null, 2));
+
+    const result = await reviewJob(jobRoot, "obj-invalid-matte");
+    const adoption = result.candidates[0]!.adoption;
+    expect(adoption.from).toBe("none");
+    if (adoption.from !== "none") throw new Error("unreachable");
+    expect(adoption.cause).toBe("invalid-matte");
+    expect(adoption.reason).toMatch(/cannot qualify/);
+
+    const html = await readFile(result.reviewPath, "utf8");
+    expect(html).toContain("invalid matte — not adoptable");
+    expect(html).not.toContain("no matte — not adoptable");
+    expect(html).toContain("cannot qualify");
+
+    // No drift: adoption of the same record refuses with the same recorded
+    // gate reason.
+    await expect(
+      adoptCandidate(jobRoot, "obj-invalid-matte", cand.contentHash, "forged-lamp", {
+        libraryRoot: path.join(root, "library"),
+      }),
+    ).rejects.toThrow(/chroma-key|alpha/i);
+  });
+
+  test("a hostile matte path inside the invalid-matte refusal renders as inert escaped HTML", async () => {
+    await runObjectJob(jobRoot, "obj-hostile-matte", objectRequest(1), distinctOpaqueGen, fakeMatte);
+    const cand = (await loadJob(jobRoot, "obj-hostile-matte")).runs[0]!.candidates[0]!;
+    const evil = `mattes/evil"\u003cimg src=x onerror=alert(1)\u003e.png`;
+    await writeFile(path.join(jobRoot, "obj-hostile-matte", evil), OPAQUE_PNG);
+    const file = path.join(jobRoot, "obj-hostile-matte", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.runs[0].candidates[0].matte = { file: evil, contentHash: sha256(OPAQUE_PNG), engine: "forged" };
+    await writeFile(file, JSON.stringify(rec, null, 2));
+
+    const result = await reviewJob(jobRoot, "obj-hostile-matte");
+    const adoption = result.candidates[0]!.adoption;
+    expect(adoption.from).toBe("none");
+    if (adoption.from !== "none") throw new Error("unreachable");
+    expect(adoption.cause).toBe("invalid-matte");
+
+    const html = await readFile(result.reviewPath, "utf8");
+    // The refusal reason (which names the hostile path) is text, not markup:
+    // nothing executable survives, and the escaped form is what renders.
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("onerror=alert(1)>");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("invalid matte — not adoptable");
   });
 
   test("marks a natively isolated object candidate as adoptable as-is — the same bytes adoption writes", async () => {
