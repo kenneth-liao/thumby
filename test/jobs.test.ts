@@ -10,6 +10,9 @@ import {
   listJobs,
   adoptCandidate,
   parseTypedRef,
+  PLATE_JOB_SCHEMA_VERSION,
+  OBJECT_JOB_SCHEMA_VERSION,
+  CREATOR_JOB_SCHEMA_VERSION,
   type PlateGenerator,
   type PlateJobRequest,
 } from "../src/jobs.js";
@@ -80,7 +83,7 @@ describe("runPlateJob", () => {
     const request = { ...baseRequest(), refs: [ref] };
     const job = await runPlateJob(jobRoot, "plate-test-1", request, fakeGen);
 
-    expect(job.schemaVersion).toBe(1);
+    expect(job.schemaVersion).toBe(4); // the role-aware-Reference prompt contract (#56, PROD-1)
     expect(job.jobId).toBe("plate-test-1");
     expect(job.kind).toBe("plate");
     expect(job.request).toEqual(request);
@@ -311,6 +314,82 @@ describe("loadJob and listJobs", () => {
     expect(a).toMatchObject({ kind: "plate", subject: "neon server room", runs: 2, candidates: 4 });
     const b = jobs.find((j) => j.jobId === "plate-b")!;
     expect(b).toMatchObject({ runs: 1, candidates: 1 });
+  });
+});
+
+/** Rewrite a recorded job file at a chosen schemaVersion — a record as another binary would have written it. */
+async function reversion(jobId: string, schemaVersion: number): Promise<void> {
+  const file = path.join(jobRoot, jobId, "job.json");
+  const rec = JSON.parse(await readFile(file, "utf8"));
+  rec.schemaVersion = schemaVersion;
+  await writeFile(file, JSON.stringify(rec, null, 2) + "\n");
+}
+
+describe("the job schema-version matrix is the rollback boundary (PROD-1, #56)", () => {
+  test("new Plate/Object records ride schemaVersion 4 — a value no released binary accepts", () => {
+    // Released binaries (≤ 0.29.2) accept any of {1,2,3} with a plate or
+    // object kind — reusing those numbers would let an older binary silently
+    // rerun a role-aware job with path-only prompt behavior. The role-aware
+    // prompt contract therefore rides v4: an older binary rejects it outright
+    // as an unknown version, and the current binary keeps reading legacy
+    // v1 plate, v2 object, and v3 creator records with unchanged behavior.
+    expect(PLATE_JOB_SCHEMA_VERSION).toBe(4);
+    expect(OBJECT_JOB_SCHEMA_VERSION).toBe(4);
+    expect(CREATOR_JOB_SCHEMA_VERSION).toBe(3);
+  });
+
+  test("a legacy v1 plate record reruns into the role-aware contract — re-persisted as v4 with the new lineage", async () => {
+    await runPlateJob(jobRoot, "plate-legacy-v1", baseRequest(), fakeGen);
+    await reversion("plate-legacy-v1", 1); // what a pre-role-aware binary wrote
+
+    // Pure legacy read: the record loads as v1 before any new lineage.
+    expect((await loadJob(jobRoot, "plate-legacy-v1")).schemaVersion).toBe(1);
+
+    const rerun = await rerunPlateJob(jobRoot, "plate-legacy-v1", fakeGen);
+    expect(rerun.runs).toHaveLength(2);
+    // The new lineage was produced under the role-aware prompt contract, so
+    // the record is persisted as v4 with the lineage — never left under v1,
+    // where an older binary would append weaker path-only lineage to it.
+    const record = JSON.parse(await readFile(path.join(jobRoot, "plate-legacy-v1", "job.json"), "utf8"));
+    expect(record.schemaVersion).toBe(PLATE_JOB_SCHEMA_VERSION);
+    expect(record.schemaVersion).toBe(4);
+    expect(record.runs).toHaveLength(2);
+
+    // The upgraded record loads under the v4 matrix and adopts unchanged.
+    await loadJob(jobRoot, "plate-legacy-v1");
+    const hash = record.runs[0]!.candidates[0]!.contentHash;
+    const out = await adoptCandidate(jobRoot, "plate-legacy-v1", hash, "legacy-plate", { libraryRoot });
+    expect(out.adoptedFrom).toBe(`job:plate-legacy-v1#${hash}`);
+  });
+
+  test("a failed rerun leaves a legacy v1 plate record untouched — still rollback-readable as v1", async () => {
+    await runPlateJob(jobRoot, "plate-legacy-fail", baseRequest(), fakeGen);
+    await reversion("plate-legacy-fail", 1);
+    const failingGen: PlateGenerator = async () => {
+      throw new Error("provider down");
+    };
+    await expect(rerunPlateJob(jobRoot, "plate-legacy-fail", failingGen)).rejects.toThrow(/provider down/);
+    const record = JSON.parse(await readFile(path.join(jobRoot, "plate-legacy-fail", "job.json"), "utf8"));
+    expect(record.schemaVersion).toBe(1);
+    expect(record.runs).toHaveLength(1); // only the original run — no new lineage, no version change
+  });
+
+  test("refuses a v2 record claiming kind plate — an older binary would misread it", async () => {
+    await runPlateJob(jobRoot, "plate-forged-v2", baseRequest(), fakeGen);
+    await reversion("plate-forged-v2", 2);
+    await expect(loadJob(jobRoot, "plate-forged-v2")).rejects.toThrow(/schemaVersion 2/);
+  });
+
+  test("refuses a v3 record claiming kind plate — creator is v3 alone", async () => {
+    await runPlateJob(jobRoot, "plate-forged-v3", baseRequest(), fakeGen);
+    await reversion("plate-forged-v3", 3);
+    await expect(loadJob(jobRoot, "plate-forged-v3")).rejects.toThrow(/schemaVersion 3/);
+  });
+
+  test("refuses an unknown schemaVersion outright — the fail-closed default", async () => {
+    await runPlateJob(jobRoot, "plate-forged-v9", baseRequest(), fakeGen);
+    await reversion("plate-forged-v9", 9);
+    await expect(loadJob(jobRoot, "plate-forged-v9")).rejects.toThrow(/unsupported job schemaVersion/);
   });
 });
 

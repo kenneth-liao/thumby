@@ -337,7 +337,11 @@ if (values.bg) {
       subject: values.prompt!,
       model: values.model!,
       zone,
-      refs: values.ref as string[],
+      // The legacy --ref flag is documented as likeness input, so its bare
+      // paths normalize once here to the typed identity role (#56) — the
+      // shared manifest then role-assigns them in the effective prompt. The
+      // legacy backdrop/content contract is otherwise unchanged.
+      refs: (values.ref as string[]).map((p) => ({ role: "identity", path: p })),
       count: plateCount,
       subjectless: Boolean(values.cutout),
       ...(values.temperature != null

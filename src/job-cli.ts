@@ -78,7 +78,14 @@ plates options
   --count <n>           Candidates to generate (default 1)
   --temperature <t>     Multimodal models only
   --ref <role:path>     Typed reference with its content identity recorded, e.g.
-                        --ref style:refs/palette.png (repeatable). A Job with
+                        --ref edit:refs/screenshot.png (repeatable). Roles are
+                        semantic: edit marks a source-to-edit screenshot — an
+                        authentic interface simplified to thumbnail-scale UI
+                        (major panels, proportions, and key colors kept as a
+                        few large high-contrast regions; incidental detail
+                        dropped) — while style is palette/lighting only. The
+                        run's recorded prompt role-assigns every reference, so
+                        the provenance preserves each declared role. A Job with
                         typed References requires a reference-capable model:
                         an incompatible selection — registry key or raw id —
                         is refused before any spend, listing every qualified
@@ -88,12 +95,14 @@ plates options
 objects options
   Same as plates minus --zone. The subject must name an isolated non-text
   object — official logos and final text are rejected as targets (logos come
-  from sourced Assets, text is rendered locally; ADR-0001). Every object
-  candidate goes through the matting pass — the same local BiRefNet
-  segmenter as creators (ADR-0006), local and unbilled — and adoption adopts
-  that matte, since the models return opaque RGB. A natively isolated
-  candidate is kept as-is. Adopted Object Assets carry a verified true-alpha
-  matte; an opaque candidate with no matte is refused.
+  from sourced Assets, text is rendered locally; ADR-0001). A UI panel is
+  permitted object content — one isolated non-text panel, simplified from an
+  edit reference when one is supplied; scenes and final composites stay
+  banned. Every object candidate goes through the matting pass — the same
+  local BiRefNet segmenter as creators (ADR-0006), local and unbilled — and
+  adoption adopts that matte, since the models return opaque RGB. A natively
+  isolated candidate is kept as-is. Adopted Object Assets carry a verified
+  true-alpha matte; an opaque candidate with no matte is refused.
 
 creators options
   Same as plates minus --zone. Requires at least one identity reference —
@@ -154,16 +163,18 @@ const failure = (message: string, path = "jobs"): CliResult => ({
 /**
  * The request→generatePlates mapping — the load-bearing wiring lives here:
  * the agent's subject is authoritative for the plate's visual content
- * (DEC-010, ADR-0011) and passes through untouched. Prompt construction adds
- * only format, zone, and invariant guidance — never a backdrop or content
- * ban. Final editorial text and exact logos stay local (ADR-0001).
+ * (DEC-010, ADR-0011) and passes through untouched, and typed references
+ * keep role and recorded identity — generation hash-verifies and loads each
+ * Reference exactly once (CRAFT-1, #56). Prompt construction adds only
+ * format, zone, reference-role, and invariant guidance — never a backdrop or
+ * content ban. Final editorial text and exact logos stay local (ADR-0001).
  */
 export function generateOptionsFor(request: PlateJobRequest): GenerateOptions {
   return {
     subject: request.subject,
     model: request.model,
     zone: request.zone,
-    refs: request.refs.map((r) => r.path),
+    refs: request.refs.map(({ role, path, contentHash }) => ({ role, path, contentHash })),
     count: request.count,
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
   };
@@ -179,12 +190,12 @@ export const PRODUCTION_GENERATOR: PlateGenerator = async (request: PlateJobRequ
   };
 };
 
-/** The object request→generateObjects mapping (REQ-015). */
+/** The object request→generateObjects mapping (REQ-015, #56). */
 export const PRODUCTION_OBJECT_GENERATOR: ObjectGenerator = async (request: ObjectJobRequest) => {
   const result = await generateObjects({
     subject: request.subject,
     model: request.model,
-    refs: request.refs.map((r) => r.path),
+    refs: request.refs.map(({ role, path, contentHash }) => ({ role, path, contentHash })),
     count: request.count,
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
   });

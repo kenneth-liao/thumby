@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { buildCreatorPrompt, creatorRefOrder, loadCreatorRefs } from "../src/generate.js";
+import { buildCreatorPrompt, creatorRefOrder, loadVerifiedRefs } from "../src/generate.js";
 import type { TypedRef } from "../src/jobs.js";
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -108,7 +108,7 @@ describe("buildCreatorPrompt", () => {
   });
 });
 
-describe("loadCreatorRefs", () => {
+describe("loadVerifiedRefs", () => {
   let root: string;
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "thumby-creator-refs-"));
@@ -121,7 +121,7 @@ describe("loadCreatorRefs", () => {
     const file = path.join(root, "anchor.png");
     const bytes = Buffer.from("anchor-bytes");
     await writeFile(file, bytes);
-    const loaded = await loadCreatorRefs([{ role: "identity", path: file, contentHash: sha256(bytes) }]);
+    const loaded = await loadVerifiedRefs([{ role: "identity", path: file, contentHash: sha256(bytes) }]);
     expect(loaded).toHaveLength(1);
     expect(Buffer.from(loaded[0]!.bytes).equals(bytes)).toBe(true);
     expect(loaded[0]!.path).toBe(file);
@@ -131,13 +131,13 @@ describe("loadCreatorRefs", () => {
     const file = path.join(root, "anchor.png");
     await writeFile(file, "new-bytes");
     await expect(
-      loadCreatorRefs([{ role: "identity", path: file, contentHash: "a".repeat(64) }]),
+      loadVerifiedRefs([{ role: "identity", path: file, contentHash: "a".repeat(64) }]),
     ).rejects.toThrow(/changed content identity/);
   });
 
   test("refuses a missing reference before any generation call", async () => {
     await expect(
-      loadCreatorRefs([{ role: "pose", path: path.join(root, "gone.png") }]),
+      loadVerifiedRefs([{ role: "pose", path: path.join(root, "gone.png") }]),
     ).rejects.toThrow(/gone\.png.*missing/i);
   });
 });

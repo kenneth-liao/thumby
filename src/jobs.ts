@@ -22,18 +22,40 @@ import { verifyTrueAlpha } from "./alpha.js";
 import { matteCandidate, type MatteEngine } from "./matte.js";
 
 /**
- * Job record schema versions. v1 is plate-only; object-capable jobs are v2;
- * creator-capable jobs are v3. Each bump is the rollback boundary: an older
+ * Job record schema versions. v1 is the legacy plate-only record; v2 the
+ * legacy object-capable record; v3 the creator-capable record; v4 — shared by
+ * plate and object — the role-aware-Reference prompt contract (#56): the
+ * effective-prompt semantics changed without a record-shape change, so the
+ * bump exists purely as the rollback boundary. Released binaries accept any
+ * of {1,2,3} with a plate or object kind, so v4 is a value they reject
+ * outright as unknown, and this binary still reads v1/v2/v3 records with
+ * their previous behavior. Each bump is the rollback boundary: an older
  * binary rejects a record outright instead of rerunning or adopting a newer
  * job kind through an older path (where its gate does not exist — a creator
  * candidate adopted through the plate path would skip the true-alpha check).
  */
-export const PLATE_JOB_SCHEMA_VERSION = 1 as const;
-export const OBJECT_JOB_SCHEMA_VERSION = 2 as const;
+const LEGACY_PLATE_JOB_SCHEMA_VERSION = 1 as const;
+const LEGACY_OBJECT_JOB_SCHEMA_VERSION = 2 as const;
 export const CREATOR_JOB_SCHEMA_VERSION = 3 as const;
+export const PLATE_JOB_SCHEMA_VERSION = 4 as const;
+export const OBJECT_JOB_SCHEMA_VERSION = 4 as const;
 
 /** The three Generation Job kinds. */
 export type JobKind = "plate" | "object" | "creator";
+
+/**
+ * The schema version the current binary writes for a job kind — the single
+ * source of truth for both record writers. Plate and Object records carry the
+ * role-aware-Reference prompt contract (v4); creator semantics are unchanged
+ * and stay at v3.
+ */
+function currentSchemaVersion(kind: JobKind): GenerationJob["schemaVersion"] {
+  return kind === "object"
+    ? OBJECT_JOB_SCHEMA_VERSION
+    : kind === "creator"
+      ? CREATOR_JOB_SCHEMA_VERSION
+      : PLATE_JOB_SCHEMA_VERSION;
+}
 
 /** A generation reference with an explicit role and exact content identity. */
 export interface TypedRef {
@@ -143,9 +165,10 @@ export interface JobRun {
 
 export interface GenerationJob {
   schemaVersion:
-    | typeof PLATE_JOB_SCHEMA_VERSION
-    | typeof OBJECT_JOB_SCHEMA_VERSION
-    | typeof CREATOR_JOB_SCHEMA_VERSION;
+    | typeof LEGACY_PLATE_JOB_SCHEMA_VERSION
+    | typeof LEGACY_OBJECT_JOB_SCHEMA_VERSION
+    | typeof CREATOR_JOB_SCHEMA_VERSION
+    | typeof PLATE_JOB_SCHEMA_VERSION;
   jobId: string;
   kind: JobKind;
   createdAt: string;
@@ -301,12 +324,7 @@ async function runJob(
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
-    schemaVersion:
-      request.kind === "object"
-        ? OBJECT_JOB_SCHEMA_VERSION
-        : request.kind === "creator"
-          ? CREATOR_JOB_SCHEMA_VERSION
-          : PLATE_JOB_SCHEMA_VERSION,
+    schemaVersion: currentSchemaVersion(request.kind),
     jobId,
     kind: request.kind,
     createdAt: now,
@@ -393,6 +411,13 @@ export async function rerunJob(
   const batch = await generate(job.request);
   const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString(), matte);
   job.runs.push(run);
+  // The new lineage was produced under the CURRENT prompt contract, so the
+  // record is re-persisted at the current schema version with the lineage —
+  // one write, version and runs together. Role-aware lineage must never hide
+  // under a legacy version (v1/v2) that an older binary would rerun with
+  // weaker, path-only prompt behavior (PROD-1 follow-up). A failed rerun
+  // throws above and leaves the legacy record untouched.
+  job.schemaVersion = currentSchemaVersion(job.kind);
   await writeJobRecord(jobRoot, job);
   return job;
 }
@@ -534,25 +559,44 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
   }
   try {
     const job = JSON.parse(raw) as GenerationJob;
-    if (
-      job.schemaVersion !== PLATE_JOB_SCHEMA_VERSION &&
-      job.schemaVersion !== OBJECT_JOB_SCHEMA_VERSION &&
-      job.schemaVersion !== CREATOR_JOB_SCHEMA_VERSION
-    )
+    // The (schemaVersion, kind) matrix is the rollback boundary (PROD-1):
+    // legacy records keep their versions and kinds on read, and a successful
+    // rerun re-persists the record at the current version with its new
+    // lineage — so role-aware runs never hide under a legacy version. New
+    // Plate/Object records ride v4, which released binaries reject as
+    // unknown, and no record may claim a version/kind pairing this binary
+    // would never write — an older binary would misread such a pairing
+    // (e.g. run a role-aware plate job with path-only prompt behavior under
+    // its v1/v2 contract).
+    const knownSchemaVersions = [
+      LEGACY_PLATE_JOB_SCHEMA_VERSION,
+      LEGACY_OBJECT_JOB_SCHEMA_VERSION,
+      CREATOR_JOB_SCHEMA_VERSION,
+      PLATE_JOB_SCHEMA_VERSION,
+    ];
+    if (!knownSchemaVersions.includes(job.schemaVersion))
       throw new Error(
-        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${PLATE_JOB_SCHEMA_VERSION}, ${OBJECT_JOB_SCHEMA_VERSION}, and ${CREATOR_JOB_SCHEMA_VERSION} only`,
+        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${LEGACY_PLATE_JOB_SCHEMA_VERSION} (legacy plate), ${LEGACY_OBJECT_JOB_SCHEMA_VERSION} (legacy object), ${CREATOR_JOB_SCHEMA_VERSION} (creator), and ${PLATE_JOB_SCHEMA_VERSION} (role-aware-Reference plate/object) only`,
       );
     if (job.kind !== job.request.kind)
       throw new Error(
         `Job "${jobId}" is contradictory: record kind ${JSON.stringify(job.kind)} does not match request kind ${JSON.stringify(job.request?.kind)} — it cannot be trusted and will not run`,
       );
-    if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate")
+    if (job.schemaVersion === LEGACY_PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate")
       throw new Error(
-        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, which is plate-only, but its kind is ${JSON.stringify(job.kind)} — object jobs require schemaVersion ${OBJECT_JOB_SCHEMA_VERSION} and creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}`,
+        `Job "${jobId}" claims schemaVersion ${LEGACY_PLATE_JOB_SCHEMA_VERSION}, which is plate-only (a legacy record cannot carry kind ${JSON.stringify(job.kind)}) — it cannot be trusted and will not run`,
       );
-    if (job.schemaVersion === OBJECT_JOB_SCHEMA_VERSION && job.kind === "creator")
+    if (job.schemaVersion === LEGACY_OBJECT_JOB_SCHEMA_VERSION && job.kind !== "object")
       throw new Error(
-        `Job "${jobId}" claims schemaVersion ${OBJECT_JOB_SCHEMA_VERSION}, which cannot carry a creator job (creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}) — an older binary must reject this record, not adopt it through a path without the creator alpha gate`,
+        `Job "${jobId}" claims schemaVersion ${LEGACY_OBJECT_JOB_SCHEMA_VERSION}, which is the legacy object-job version, but its kind is ${JSON.stringify(job.kind)} — creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION} and role-aware plate jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
+      );
+    if (job.schemaVersion === CREATOR_JOB_SCHEMA_VERSION && job.kind !== "creator")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}, which is the creator-job version, but its kind is ${JSON.stringify(job.kind)} — plate and object jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
+      );
+    if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate" && job.kind !== "object")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${PLATE_JOB_SCHEMA_VERSION}, the role-aware-Reference prompt contract for plate and object jobs, but its kind is ${JSON.stringify(job.kind)} — creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}`,
       );
     return job;
   } catch (err) {
