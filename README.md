@@ -417,6 +417,7 @@ bun run scene inspect scene.json           # layer summary + resolved asset hash
 bun run scene render scene.json [--out p] [--experimental]  # render to PNG (1280×720, YouTube 2 MB-compliant)
 bun run scene guidelines scene.json [--out p] # the safe-area guideline view (review only)
 bun run scene compare scene.json            # compare the Render with its Reference Thumbnail (review only)
+bun run scene author scene.json             # open the live authoring session (loopback, capability-scoped)
 bun run scene rerender out/scene.manifest.json  # re-render from its Render manifest
 ```
 
@@ -862,6 +863,27 @@ Scene edit. One consequence to expect: attaching `reference` to an
 already-rendered Scene changes the scene file's bytes, so its manifest's scene
 identity no longer matches and `scene rerender` refuses — re-render with
 `scene render` instead.
+
+### Scene author session
+
+`scene author scene.json` opens the live authoring session: it validates the
+Scene and its Reference Thumbnail and renders once in memory before anything
+listens. Stdout then carries exactly two one-line JSON events —
+`{"event":"started","url":"http://127.0.0.1:<port>/<capability>/view"}` and,
+on shutdown, `{"event":"closed"}`. The URL is the whole capability: the
+session binds only to 127.0.0.1 on an ephemeral port, and 32 random bytes in
+the path are the unguessable capability — every request must present the
+exact Host and capability or it gets an empty 403/404/405; there is no
+path-based file serving. The view shows the current Render and the Reference
+Thumbnail side by side plus an adjustable overlay — pure CSS, no script —
+under a strict CSP (default/script/connect/object 'none', images same-origin
+only, inline style only) with `no-store`/`nosniff`/`no-referrer`; the session
+and its view make no remote requests, and `/reference.png` serves the exact
+bytes validation read (never reread). Ctrl-C or SIGTERM ends the session and
+releases its listener and browser cleanly. A missing or invalid Reference
+fails before any session exists, naming the field to fix. Layer inspection,
+mutation, saving, and generation are out of scope — the session is a review
+view; edit the Scene file itself.
 
 ## Overlay cards
 
