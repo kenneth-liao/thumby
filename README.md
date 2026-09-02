@@ -168,7 +168,7 @@ a Generation Job — never from text alone, and never as part of the composite:
 bun run jobs creators "arms crossed, explaining to camera" \
   --ref identity:assets/identity/kenny-headshots/k1.png \
   --ref identity:assets/identity/kenny-headshots/k2.png --count 4
-bun run jobs review <jobId>              # contact sheet + face detail vs anchors
+bun run jobs review <jobId>              # full-size + 168px evidence, mattes, face detail
 bun run jobs adopt <jobId> <hash> --id kenny-crossed
 bun run library approve kenny-crossed     # the human likeness gate (DEC-004)
 ```
@@ -286,7 +286,7 @@ bun run jobs creators "arms crossed, explaining to camera" \
   --ref identity:assets/identity/kenny-headshots/k1.png \
   --ref identity:assets/identity/kenny-headshots/k2.png \
   --ref pose:pose.png --count 4
-bun run jobs review <jobId>                   # contact sheet, mattes, face detail
+bun run jobs review <jobId>                   # full-size + 168px, mattes, face detail
 bun run jobs adopt <jobId> <hash> --id kenny-crossed --tags arms-crossed
 ```
 
@@ -317,8 +317,16 @@ cyclic shifts into standard ops so CoreML can compile them), verifies the
 result numerically against the PyTorch reference, and prints the sha-256 that
 `src/segment.ts` pins.
 
-`jobs review` shows each matte on a checkerboard beside the candidate it came
-from, and says plainly when a candidate has none. `jobs adopt` writes the
+`jobs review` works for every job kind: each distinct candidate is verified
+against its recorded content identity and shown at full size and at exactly
+168 px — the row size that decides legibility — so detail that disappears at
+realistic thumbnail size is rejected before adoption. The isolation section
+shows exactly what adoption would write, read through the same code path
+adoption uses: the matte on a checkerboard (with the engine that produced it),
+a natively isolated candidate marked adoptable as-is, or a plain **no matte —
+not adoptable** marker. Creator review keeps the face-detail view against the
+identity anchors. Tampered or missing recorded evidence fails the whole
+review instead of rendering partially. `jobs adopt` writes the
 **matte** — the same true-alpha gate as objects, applied to the bytes that
 actually enter the library — always as a `trial` Cutout Asset; approval is the
 human likeness gate, never automatic (DEC-004). Promotion from trial to
