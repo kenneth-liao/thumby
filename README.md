@@ -869,12 +869,16 @@ jq -r '.ranAt + "  " + .outDir + "  " + (.subject // "-")' out/history.jsonl
 ## Picking a model
 
 `gpt-image` (GPT Image 2) is the default: it is both the cheapest option and
-the best at honoring the `--zone` brief. It is slower, around 15s a plate.
+the best at honoring the `--zone` brief. It is slower, around 15s a plate. It
+is also qualified for typed References through the Gateway (a reference call
+bills the image as extra input tokens on top of the plate rate).
 
-Reach for the Gemini models when a Generation Job needs a likeness: creator
-jobs take typed references (`jobs creators … --ref identity:…`), which
-gpt-image cannot take — they cost 8–30x more per plate. `nano-lite` is the
-cheap fast one at ~3s; `nano-pro` has the strongest likeness.
+Creator jobs still default to the Gemini models for likeness: creator jobs
+take typed references (`jobs creators … --ref identity:…`), and while
+gpt-image now accepts them too, its likeness strength is not qualified —
+the Gemini models are the measured likeness workhorses, at 8–30x the plate
+cost. `nano-lite` is the cheap fast one at ~3s; `nano-pro` has the strongest
+likeness.
 
 Cost figures come from real AI Gateway billing where marked. Published price
 tables were misleading here: GPT Image 2 bills by token and emits only ~130

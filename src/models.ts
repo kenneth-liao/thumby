@@ -35,12 +35,19 @@ export const MODELS: Record<string, ModelSpec> = {
     sizing: "size",
     approxCost: 0.0045,
     costMeasured: true,
-    supportsRef: false,
-    note: "GPT Image 2 — cheapest and best at following the zone brief. Slower (~15s)",
+    // Qualified through a real Gateway request with a typed Reference on the
+    // exact production call shape (#52, TEST-012): SUPPORTED.
+    supportsRef: true,
+    note:
+      "GPT Image 2 — cheapest and best at following the zone brief; qualified for typed References (#52). " +
+      "The rate is the measured text-only plate cost — a reference call bills the image as extra input tokens " +
+      "(measured once: $0.016 account-window delta with a ~1 MB reference; the per-generation billing lookup " +
+      "was unavailable), not a per-image rate. Slower (~15s)",
   },
 
-  // The Gemini models cost 8-30x more per plate. Reach for them when you need
-  // a reference image for likeness, which gpt-image cannot take.
+  // The Gemini models cost 8-30x more per plate. gpt-image also takes typed
+  // References now (qualified through the Gateway, #52), but likeness work
+  // remains Nano Banana territory until separately qualified (TEST-012).
   "nano-lite": {
     id: "google/gemini-3.1-flash-lite-image",
     kind: "multimodal",
@@ -95,6 +102,58 @@ export const MODELS: Record<string, ModelSpec> = {
 
 export const DEFAULT_MODEL = "gpt-image";
 
+/**
+ * The creator-job default — a kind-specific likeness preference, not a
+ * capability derivation: the measured likeness workhorse
+ * (docs/asset-requirements.md). It flows through the same
+ * reference-capability gate as every other selection, so a drift in its
+ * qualification fails loudly instead of spending on a refused call.
+ */
+export const CREATOR_DEFAULT_MODEL = "nano-2";
+
+/**
+ * The canonical qualified reference-capable list (DEC-018): every registry
+ * model the recorded evidence marks as accepting typed References. Default
+ * selection, explicit validation, help, and recovery messages all read this
+ * one reader — there is no second compatibility list.
+ */
+export function referenceCapableModels(): { key: string; spec: ModelSpec }[] {
+  return Object.entries(MODELS)
+    .filter(([, spec]) => spec.supportsRef)
+    .map(([key, spec]) => ({ key, spec }));
+}
+
+/**
+ * The one reference-incompatibility refusal (DEC-020): names the rejected
+ * model, states that nothing was sent, and lists every qualified compatible
+ * choice derived from the registry — recovery never requires registry
+ * knowledge (US-032).
+ */
+export function referenceIncompatibilityError(spec: ModelSpec): string {
+  const qualified = referenceCapableModels()
+    .map(({ key, spec: s }) => `${key} (${s.id})`)
+    .join(", ");
+  return (
+    `Model "${spec.id}" is not qualified reference-capable — the registry records no Gateway-proven ` +
+    `typed-Reference support for it, so the Job was refused before any provider call and nothing was spent. ` +
+    `Qualified reference-capable models: ${qualified}. ` +
+    `Raw gateway ids carry no capability claim until they are qualified through a real Gateway request and registered (TEST-012).`
+  );
+}
+
+/**
+ * The reference-capability gate (TEST-011): a model selection for a Job that
+ * carries typed References must be qualified reference-capable, or it is
+ * refused here — before any generator call, and therefore before any spend
+ * (US-031, DEC-020). A selection without References needs no capability
+ * claim: the existing default and raw-id pass-through behavior is preserved.
+ */
+export function validateReferenceCapability(model: string, hasReferences: boolean): void {
+  if (!hasReferences) return;
+  const spec = resolveModel(model);
+  if (!spec.supportsRef) throw new Error(referenceIncompatibilityError(spec));
+}
+
 export function resolveModel(name: string): ModelSpec {
   const spec = MODELS[name];
   if (spec) return spec;
@@ -107,7 +166,11 @@ export function resolveModel(name: string): ModelSpec {
       sizing: name.startsWith("openai/") ? "size" : "aspectRatio",
       approxCost: 0,
       costMeasured: false,
-      supportsRef: name.includes("gemini"),
+      // No capability claim: a raw id is unqualified until a real Gateway
+      // request proves it and it is registered (DEC-019, TEST-012) —
+      // capability is never inferred from the model-name substring. The
+      // call-shape guess stays: it is SDK routing, not a capability fact.
+      supportsRef: false,
       note: "raw gateway id",
     };
   }

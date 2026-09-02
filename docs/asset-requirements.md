@@ -219,7 +219,7 @@ a matte, and green fringe on hair is its known defect.
 | `nano-2` | workhorse — likeness nearly equal to pro at half price | $0.067 |
 | `nano-pro` | hard poses/expressions only — marginal detail edge | $0.134 |
 | `seedream-5.0-pro` | **disqualified** — face drift + baked-in "Generated" watermark on the shirt; flat rate and 2K source don't compensate | $0.035 |
-| `gpt-image-2` | cannot take reference images | — |
+| `gpt-image-2` | qualified reference-capable through the Gateway (#52); likeness strength unqualified — the likeness ranking above stands | — |
 
 Evidence: `out/trial-cutouts/seedream-ab/` (three-way A/B with face crops),
 `out/trial-cutouts/ab/` (original 4-anchor vs 1-ref A/B).

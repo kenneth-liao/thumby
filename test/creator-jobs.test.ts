@@ -537,9 +537,10 @@ describe("jobs creators (CLI)", () => {
     ]);
     expect(res.exitCode).toBe(0);
     const record = JSON.parse(await readFile(path.join(cliJobsRoot, "explicit-model", "job.json"), "utf8"));
-    // An explicit choice is never silently rewritten — the generation call
-    // will refuse it (gpt-image cannot take anchors), which is the honest
-    // failure, not a silent model swap.
+    // An explicit choice is never silently rewritten. gpt-image is qualified
+    // for typed References (#52), so the job runs; its likeness strength is
+    // not qualified, which is guidance, not a gate. A capability-incompatible
+    // model is refused before any spend (see model-selection.test.ts).
     expect(record.request.model).toBe("gpt-image");
   });
 

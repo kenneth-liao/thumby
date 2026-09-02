@@ -40,7 +40,7 @@ import { generatePlates, generateObjects, generateCreators, type GenerateOptions
 import { localSegmentationMatteEngine } from "./segment.js";
 import type { MatteEngine } from "./matte.js";
 import type { TextZone } from "./generate.js";
-import { DEFAULT_MODEL } from "./models.js";
+import { DEFAULT_MODEL, CREATOR_DEFAULT_MODEL, MODELS } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
 import { reviewCreatorJob } from "./review.js";
 
@@ -70,14 +70,19 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
                                             the library as trial.
 
 plates options
-  --model <name>        gpt-image (default) | nano-lite | nano-2 | nano-pro | flux |
-                        seedream | recraft | raw gateway id
+  --model <name>        Registry key or raw gateway id. Keys:
+                        ${Object.keys(MODELS).join(" | ")}
+                        (plates/objects default: ${DEFAULT_MODEL})
   --zone <z>            left (default) | right | bottom | none — the reserved text
                         region the plate must keep empty
   --count <n>           Candidates to generate (default 1)
   --temperature <t>     Multimodal models only
   --ref <role:path>     Typed reference with its content identity recorded, e.g.
-                        --ref style:refs/palette.png (repeatable)
+                        --ref style:refs/palette.png (repeatable). A Job with
+                        typed References requires a reference-capable model:
+                        an incompatible selection — registry key or raw id —
+                        is refused before any spend, listing every qualified
+                        compatible model.
   --job <id>            Explicit job id (default: auto plate-<date>-<suffix>)
 
 objects options
@@ -94,7 +99,7 @@ creators options
   Same as plates minus --zone. Requires at least one identity reference —
   a likeness is never generated from text alone. Accepted reference roles:
   identity (repeatable anchors), pose, expression, outfit, style, and edit
-  (source-to-edit). Defaults to nano-2, the measured likeness workhorse.
+  (source-to-edit). Defaults to ${CREATOR_DEFAULT_MODEL}, the measured likeness workhorse.
   References are attached identity-anchors-first and pose-last; the run's
   fullPrompt role-assigns every reference, so the provenance preserves each
   declared role. Every candidate then goes through the matting pass — a local
@@ -362,12 +367,14 @@ async function creatorsCommand(
     );
   const collected = await collectGenerationFlags(rest, usageError);
   if ("error" in collected) return collected.error;
-  // Creator jobs default to the measured likeness workhorse (gpt-image cannot
-  // take the mandatory identity anchors). An explicit --model is honored as
-  // written — the generation call refusing it is the honest failure, not a
-  // silent model swap.
+  // Creator jobs default to the measured likeness workhorse — gpt-image is
+  // reference-capable now (#52), but its likeness strength is not qualified
+  // (TEST-012), so the default stays a deliberate likeness choice, not a
+  // capability derivation. An explicit --model is honored as written: only
+  // capability is gated (the job request boundary refuses an unqualified
+  // model before any spend); likeness quality is the agent's judgment.
   const fields = collected.fields;
-  if (!fields.extra.has("model")) fields.model = "nano-2";
+  if (!fields.extra.has("model")) fields.model = CREATOR_DEFAULT_MODEL;
   return startJob(deps, "creator", subject, { ...fields });
 }
 

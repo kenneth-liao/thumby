@@ -16,7 +16,7 @@ import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TextZone } from "./generate.js";
-import { resolveModel } from "./models.js";
+import { resolveModel, validateReferenceCapability } from "./models.js";
 import { extensionFor, writePlateAsset, writeObjectAsset, writeCreatorAsset } from "./assets.js";
 import { verifyTrueAlpha } from "./alpha.js";
 import { matteCandidate, type MatteEngine } from "./matte.js";
@@ -282,6 +282,12 @@ async function runJob(
   if (existsSync(path.join(jobRoot, jobId, "job.json")))
     throw new Error(`Job "${jobId}" already exists — use "jobs rerun ${jobId}" to add candidates under its lineage`);
 
+  // Reference-compatibility is a request-boundary fact (DEC-018/DEC-020,
+  // TEST-011): a Job whose request carries typed References must resolve to a
+  // qualified reference-capable model, or it is refused here — before the
+  // matting preflight, before any generator, and therefore before any spend.
+  validateReferenceCapability(request.model, request.refs.length > 0);
+
   // Nothing is paid for until the pass that has to isolate the result says it
   // can run: a job whose matting prerequisites are missing must fail while it
   // is still free, not leave billed candidates that can never be adopted.
@@ -357,6 +363,11 @@ export async function rerunJob(
   matte?: MatteEngine,
 ): Promise<GenerationJob> {
   const job = await loadJob(jobRoot, jobId);
+  // The recorded model is re-checked against the current registry first — a
+  // pure, free check before any reference bytes are read. A qualification
+  // retracted since the job was recorded refuses here instead of spending on
+  // a call the model would not honour (DEC-018/DEC-020).
+  validateReferenceCapability(job.request.model, job.request.refs.length > 0);
   for (const ref of job.request.refs) {
     let bytes: Buffer;
     try {

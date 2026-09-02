@@ -377,16 +377,19 @@ describe("production generator wiring", () => {  test("maps a job request onto g
   });
 
   test("the production generator rejects a model that cannot take references", async () => {
-    // Offline contract check only: the production generator rejects a model
-    // that cannot take references, proving the request is forwarded.
+    // Offline contract check only: the last gate before the provider call
+    // refuses an incompatible model with the canonical, registry-derived
+    // message — proving the request is forwarded and no list is duplicated.
     const refFile = path.join(root, "style.png");
     await writeFile(refFile, "bytes");
     const res = await cliRun(
-      ["plates", "subject", "--model", "gpt-image", "--ref", `style:${refFile}`],
+      ["plates", "subject", "--model", "flux", "--ref", `style:${refFile}`],
       { generate: PRODUCTION_GENERATOR, jobsRoot, libraryRoot },
     );
     expect(res.exitCode).toBe(1);
-    expect(((res.output as Record<string, any>).errors[0].message as string)).toMatch(/does not accept reference images/);
+    expect(((res.output as Record<string, any>).errors[0].message as string)).toMatch(
+      /not qualified reference-capable/,
+    );
   });
 });
 
