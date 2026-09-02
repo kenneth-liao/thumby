@@ -11,6 +11,12 @@ import { encodePng } from "./png.js";
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
+/** sha-256 of every base64 image embedded in an HTML string. */
+const embeddedHashes = (html: string): string[] =>
+  [...html.matchAll(/data:[^;"]+;base64,([A-Za-z0-9+/=]+)/g)].map((m) =>
+    sha256(Buffer.from(m[1]!, "base64")),
+  );
+
 let root: string;
 let jobRoot: string;
 
@@ -103,9 +109,10 @@ describe("reviewJob", () => {
     for (const hash of [...firstRunHashes, ...secondRunHashes]) {
       expect(html).toContain(hash);
     }
-    // Anchors are referenced with their ids for the face-detail comparison.
-    expect(html).toContain("anchor-a.png");
-    expect(html).toContain("anchor-b.png");
+    // Anchors are referenced with their ids for the face-detail comparison —
+    // their verified bytes are embedded, so no file path appears.
+    expect(html).toContain("anchor · anchor-a");
+    expect(html).toContain("anchor · anchor-b");
     // The face-detail section exists and the subject/model provenance is shown.
     expect(html).toMatch(/face detail/i);
     expect(html).toContain("arms crossed, explaining to camera");
@@ -147,7 +154,9 @@ describe("reviewJob", () => {
     expect(adoption.file).toBe(cand.matte!.file);
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toMatch(/isolation/i);
-    expect(html).toContain(path.basename(cand.matte!.file));
+    // The displayed matte is the verified matte — its embedded bytes decode to
+    // the recorded content identity, not a mutable file reference.
+    expect(embeddedHashes(html)).toContain(cand.matte!.contentHash);
     expect(html).toContain("matte via test/segmentation");
   });
 

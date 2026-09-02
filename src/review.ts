@@ -3,16 +3,26 @@
  * for judging a candidate at the sizes that decide. One command writes
  * `<jobDir>/review.html` for any Generation Job kind — Plate, Object, or
  * Creator — showing every distinct candidate across all runs at full
- * resolution (plus a link to the exact local file for guaranteed 1:1
- * inspection) and at exactly 168 px, the row size that decides legibility
- * (DEC-017). Review is evidence for the human/agent gate, never an automated
- * verdict — there is no deterministic quality gate here (OOS-006).
+ * resolution (natural width inside a scrollable container — true 1:1) and at
+ * exactly 168 px, the row size that decides legibility (DEC-017). Review is
+ * evidence for the human/agent gate, never an automated verdict — there is
+ * no deterministic quality gate here (OOS-006).
+ *
+ * Every displayed figure — candidate, chosen matte or native evidence, and
+ * Creator identity anchors — is embedded as a data URL built from the same
+ * buffers the canonical reader verified, so the sheet is self-contained:
+ * after it is written, mutating, moving, or deleting the source files cannot
+ * alter or break it. The CSP forbids anything but embedded evidence
+ * (`default-src 'none'; img-src data:`) — no script, no remote, no file
+ * references. The sheet stamps when its evidence was verified; it is
+ * point-in-time evidence, and a failed later review produces no new output —
+ * the prior sheet stands untouched.
  *
  * Kind-specific evidence rides on the shared base:
  * - Object jobs get an isolation section read through the same canonical
- *   reader adoption uses (`resolveAdoptedBytes`): the matte adoption would
- *   write, or a natively isolated candidate marked adoptable as-is, or a
- *   plain "no matte — not adoptable" marker.
+ *   reader adoption uses (`resolveAdoptionEvidence`): the matte adoption
+ *   would write, or a natively isolated candidate marked adoptable as-is, or
+ *   a plain "no matte — not adoptable" marker.
  * - Creator jobs keep their identity-anchor, face-detail, and matte evidence:
  *   the face-detail section applies the *same* deterministic center-crop
  *   geometry to every candidate and every identity anchor, so crops are
@@ -30,16 +40,15 @@
  * regenerable at any time from the job record.
  *
  * The sheet is an executable-document boundary: job fields (subject, ids)
- * and filesystem-derived values (paths, anchors) are untrusted input to the
- * browser that opens it, so every interpolation is context-escaped, image
- * URLs go through `pathToFileURL`'s percent-encoding, and a restrictive CSP
- * forbids script/remote loading outright.
+ * are untrusted input to the browser that opens it, so every interpolation
+ * is context-escaped and a restrictive CSP forbids script/remote loading
+ * outright; the only image sources are data URLs of verified bytes.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { loadJob, resolveAdoptedBytes, type JobCandidate, type JobKind } from "./jobs.js";
-import { escapeHtml, fileUrl } from "./html.js";
+import { loadJob, resolveAdoptionEvidence, type JobCandidate, type JobKind } from "./jobs.js";
+import { dataUrl, escapeHtml } from "./html.js";
 
 export interface ReviewCandidate {
   contentHash: string;
@@ -98,32 +107,40 @@ export async function reviewJob(jobRoot: string, jobId: string): Promise<JobRevi
     }
   });
 
-  // Every distinct candidate is read, content-identity verified, and resolved
-  // to the evidence adoption would use — through the one canonical reader —
-  // BEFORE anything is rendered. A tampered or missing recorded file throws
-  // here, so no partial sheet is ever written.
-  const candidates: ReviewCandidate[] = [];
+  // Every distinct candidate is read once, content-identity verified, and
+  // resolved to the evidence adoption would use — through the one canonical
+  // reader — BEFORE anything is rendered. The verified buffers travel with
+  // the render input: the sheet embeds them, so it never re-reads (and can
+  // never be altered by) the source files afterwards. A tampered or missing
+  // recorded file throws here, so no partial sheet is ever written.
+  const rendered: { cand: ReviewCandidate; candidateBytes: Buffer; evidenceBytes?: Buffer }[] = [];
   for (const { cand, runIndex, ranAt } of distinct.values()) {
-    const evidence = await resolveAdoptedBytes(jobRoot, jobId, job.kind, cand);
-    candidates.push({
-      contentHash: cand.contentHash,
-      file: cand.file,
-      runIndex,
-      ranAt,
-      adoption:
-        evidence.state === "matte"
-          ? { from: "matte", file: evidence.file, engine: evidence.engine }
-          : evidence.state === "candidate"
-            ? { from: "candidate", file: evidence.file }
-            : { from: "none", reason: evidence.reason },
+    const { candidate, evidence } = await resolveAdoptionEvidence(jobRoot, jobId, job.kind, cand);
+    rendered.push({
+      cand: {
+        contentHash: cand.contentHash,
+        file: cand.file,
+        runIndex,
+        ranAt,
+        adoption:
+          evidence.from === "matte"
+            ? { from: "matte", file: evidence.file, engine: evidence.engine }
+            : evidence.from === "candidate"
+              ? { from: "candidate", file: evidence.file }
+              : { from: "none", reason: evidence.reason },
+      },
+      candidateBytes: candidate.bytes,
+      ...(evidence.from === "matte" ? { evidenceBytes: evidence.bytes } : {}),
     });
   }
 
   // Anchors come from the recorded request; a missing anchor file fails
   // loudly — a review against fewer anchors than were generated with is
   // false evidence. The bytes are also verified against the identity the
-  // request recorded: a swapped or edited anchor is false evidence too.
+  // request recorded: a swapped or edited anchor is false evidence too. The
+  // verified buffers are embedded into the sheet, never referenced by path.
   const anchors: ReviewAnchor[] = [];
+  const anchorBytes: Buffer[] = [];
   if (job.kind === "creator") {
     for (const ref of job.request.refs.filter((r) => r.role === "identity")) {
       let bytes: Buffer;
@@ -140,65 +157,66 @@ export async function reviewJob(jobRoot: string, jobId: string): Promise<JobRevi
           `Identity anchor "${ref.path}" changed content identity — recorded sha-256 ${ref.contentHash}, actual ${actual}. The review would compare against an anchor the job was not generated with.`,
         );
       anchors.push({ id: path.basename(ref.path, path.extname(ref.path)), path: ref.path });
+      anchorBytes.push(bytes);
     }
   }
 
-  const html = renderReviewSheet(job.jobId, job.kind, jobDirectory, job.request.subject, candidates, anchors);
+  const html = renderReviewSheet(job.jobId, job.kind, job.request.subject, rendered, anchors, anchorBytes);
   const reviewPath = path.join(jobDirectory, "review.html");
   await writeFile(reviewPath, html);
-  return { jobId: job.jobId, kind: job.kind, reviewPath, candidates, anchors };
+  return {
+    jobId: job.jobId,
+    kind: job.kind,
+    reviewPath,
+    candidates: rendered.map((r) => r.cand),
+    anchors,
+  };
 }
 
 function renderReviewSheet(
   jobId: string,
   kind: JobKind,
-  jobDirectory: string,
   subject: string,
-  candidates: ReviewCandidate[],
+  rendered: { cand: ReviewCandidate; candidateBytes: Buffer; evidenceBytes?: Buffer }[],
   anchors: ReviewAnchor[],
+  anchorBytes: Buffer[],
 ): string {
-  const jobPath = (file: string) => path.join(jobDirectory, file);
-  const src = (file: string) => escapeHtml(fileUrl(jobPath(file)));
-
-  // Full view: the candidate at its natural resolution — the recorded bytes
-  // rendered as-is — with the exact local file as an explicit target for
-  // guaranteed 1:1 inspection.
-  const candidateFull = candidates
+  // Every image src is a data URL of the exact verified bytes — the sheet is
+  // self-contained evidence, and the CSP forbids anything else.
+  const candidateFull = rendered
     .map(
-      (c) =>
-        `<figure><img class="full" src="${src(c.file)}"><figcaption>run ${escapeHtml(String(c.runIndex))} · ${escapeHtml(c.contentHash.slice(0, 12))} · ${escapeHtml(c.ranAt)} · <a href="${src(c.file)}">open full size</a></figcaption></figure>`,
+      ({ cand, candidateBytes }) =>
+        `<figure><div class="fullwrap"><img class="full" src="${escapeHtml(dataUrl(candidateBytes))}"></div><figcaption>run ${escapeHtml(String(cand.runIndex))} · ${escapeHtml(cand.contentHash.slice(0, 12))} · ${escapeHtml(cand.ranAt)}</figcaption></figure>`,
     )
     .join("\n");
-  // Thumbnail view: the same candidates at exactly 168px — the width that
-  // actually decides legibility in a real thumbnail row (DEC-017).
-  const candidateThumb = candidates
+  const candidateThumb = rendered
     .map(
-      (c) =>
-        `<figure><img class="thumb" src="${src(c.file)}"><figcaption>run ${escapeHtml(String(c.runIndex))} · ${escapeHtml(c.contentHash.slice(0, 12))} · 168px</figcaption></figure>`,
+      ({ cand, candidateBytes }) =>
+        `<figure><img class="thumb" src="${escapeHtml(dataUrl(candidateBytes))}"><figcaption>run ${escapeHtml(String(cand.runIndex))} · ${escapeHtml(cand.contentHash.slice(0, 12))} · 168px</figcaption></figure>`,
     )
     .join("\n");
 
   // Isolation evidence: what adoption would write, per candidate — read
   // through the same resolver adoption uses, so the sheet cannot drift from
   // the adoption decision. The checkerboard shows the alpha.
-  const isolation = candidates
-    .map((c) => {
-      const tag = `run ${escapeHtml(String(c.runIndex))} · ${escapeHtml(c.contentHash.slice(0, 12))}`;
-      if (c.adoption.from === "matte")
-        return `<figure><img class="full" src="${src(c.adoption.file)}"><figcaption>${tag} · matte via ${escapeHtml(c.adoption.engine)}</figcaption></figure>`;
-      if (c.adoption.from === "candidate")
-        return `<figure><img class="full" src="${src(c.adoption.file)}"><figcaption>${tag} · natively isolated — adoption writes these bytes as-is</figcaption></figure>`;
+  const isolation = rendered
+    .map(({ cand, candidateBytes, evidenceBytes }) => {
+      const tag = `run ${escapeHtml(String(cand.runIndex))} · ${escapeHtml(cand.contentHash.slice(0, 12))}`;
+      if (cand.adoption.from === "matte")
+        return `<figure><div class="fullwrap"><img class="full" src="${escapeHtml(dataUrl(evidenceBytes!))}"></div><figcaption>${tag} · matte via ${escapeHtml(cand.adoption.engine)}</figcaption></figure>`;
+      if (cand.adoption.from === "candidate")
+        return `<figure><div class="fullwrap"><img class="full" src="${escapeHtml(dataUrl(candidateBytes))}"></div><figcaption>${tag} · natively isolated — adoption writes these bytes as-is</figcaption></figure>`;
       return `<figure><div class="empty"></div><figcaption>${tag} · no matte — not adoptable</figcaption></figure>`;
     })
     .join("\n");
 
   // Face detail (creator only): anchors first, then every candidate, all
   // through the identical fixed crop — evidence for the human likeness gate.
-  const face = (srcPath: string, caption: string) =>
-    `<figure><div class="face"><img src="${escapeHtml(fileUrl(srcPath))}" style="width:${FACE_CROP.width}%;left:${FACE_CROP.left}%;top:${FACE_CROP.top}%"></div><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
-  const anchorFaces = anchors.map((a) => face(a.path, `anchor · ${a.id}`)).join("\n");
-  const candidateFaces = candidates
-    .map((c) => face(jobPath(c.file), `run ${c.runIndex} · ${c.contentHash.slice(0, 12)}`))
+  const face = (bytes: Buffer, caption: string) =>
+    `<figure><div class="face"><img src="${escapeHtml(dataUrl(bytes))}" style="width:${FACE_CROP.width}%;left:${FACE_CROP.left}%;top:${FACE_CROP.top}%"></div><figcaption>${escapeHtml(caption)}</figcaption></figure>`;
+  const anchorFaces = anchors.map((a, i) => face(anchorBytes[i]!, `anchor · ${a.id}`)).join("\n");
+  const candidateFaces = rendered
+    .map(({ cand, candidateBytes }) => face(candidateBytes, `run ${cand.runIndex} · ${cand.contentHash.slice(0, 12)}`))
     .join("\n");
 
   const isolationSection =
@@ -212,8 +230,9 @@ function renderReviewSheet(
       : `<h2>face detail — identity anchors first, same crop for every image</h2>
 <div class="g">${anchorFaces}${candidateFaces}</div>`;
 
+  const reviewedAt = new Date().toISOString();
   return `<!doctype html><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file:; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
 <title>${escapeHtml(kind)} review — ${escapeHtml(jobId)}</title>
 <style>
 body{background:#0b0b0d;color:#e7e7ea;font:14px/1.5 -apple-system,sans-serif;margin:0;padding:32px}
@@ -224,8 +243,8 @@ h1{font-size:15px}h2{font-size:12px}
 .gfull{display:grid;gap:24px}
 figure{margin:0;background:linear-gradient(160deg,#16181d,#0e1013);border:1px solid #26282e;border-radius:8px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:12px}
 figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-align:center}
-figcaption a{color:#9cc3f7}
-img.full{display:block;width:auto;max-width:100%;height:auto;border-radius:4px;
+.fullwrap{width:100%;overflow-x:auto;border-radius:4px}
+img.full{display:block;width:auto;max-width:none;height:auto;border-radius:4px;
   background:repeating-conic-gradient(#1c1e24 0% 25%, #121419 0% 50%) 50%/24px 24px}
 img.thumb{display:block;width:168px;height:auto;border-radius:4px;
   background:repeating-conic-gradient(#1c1e24 0% 25%, #121419 0% 50%) 50%/24px 24px}
@@ -235,7 +254,7 @@ img.thumb{display:block;width:168px;height:auto;border-radius:4px;
 .face img{position:absolute;max-width:none;display:block}
 </style>
 <h1>${escapeHtml(kind)} review · ${escapeHtml(jobId)}</h1>
-<p class="meta">subject: ${escapeHtml(subject)} · ${candidates.length} candidate(s) · full size and 168px — the row size that decides legibility; quality stays a human/agent judgment, never a pixel gate (DEC-017)${kind === "creator" ? " · face detail uses the same fixed crop on every image — it is not face detection; likeness judgment is human (DEC-004)" : ""}</p>
+<p class="meta">subject: ${escapeHtml(subject)} · ${rendered.length} candidate(s) · reviewed ${escapeHtml(reviewedAt)} · full size and 168px — the row size that decides legibility; quality stays a human/agent judgment, never a pixel gate (DEC-017)${kind === "creator" ? " · face detail uses the same fixed crop on every image — it is not face detection; likeness judgment is human (DEC-004)" : ""}</p>
 <h2>candidates — full view, as the model returned them</h2>
 <div class="gfull">${candidateFull || "<p>no candidates</p>"}</div>
 <h2>candidates — 168px (thumbnail row)</h2>

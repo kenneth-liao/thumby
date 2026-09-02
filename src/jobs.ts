@@ -646,9 +646,17 @@ export interface AdoptionResult {
 }
 
 /**
- * What adoption writes for one recorded candidate — the one canonical reader
- * shared by adoption and review (REQ-015, REQ-017, US-022), so the two can
- * never drift:
+ * The candidate's own bytes, verified against the record. Review displays
+ * these directly; adoption writes them when the evidence says so.
+ */
+export interface VerifiedCandidateBytes {
+  file: string;
+  bytes: Buffer;
+  contentHash: string;
+}
+
+/**
+ * What adoption would write for one recorded candidate — or why it cannot:
  *
  * - `"matte"` — the isolated form the matting pass produced; the bytes
  *   adoption writes for a creator candidate, and for an object candidate
@@ -656,25 +664,38 @@ export interface AdoptionResult {
  * - `"candidate"` — the candidate's own verified bytes, adopted as-is: every
  *   plate (ADR-0011), and an object candidate with no recorded matte whose
  *   bytes pass the true-alpha gate (the defensive native-alpha route).
- * - `"refused"` — recorded, legitimate non-adoptability: a creator with no
+ * - `"none"` — recorded, legitimate non-adoptability: a creator with no
  *   matte, or an object with neither matte nor native alpha. `reason` is the
  *   refusal adoption raises.
- *
- * A tampered or missing recorded file is none of these: reading and identity
- * verification happen here first, and throw — a loud failure for both
- * callers, never a silent downgrade or a partial render.
  */
-export type AdoptedBytes =
-  | { state: "matte"; file: string; bytes: Buffer; contentHash: string; engine: string }
-  | { state: "candidate"; file: string; bytes: Buffer; contentHash: string }
-  | { state: "refused"; reason: string };
+export type AdoptionEvidence =
+  | { from: "matte"; file: string; bytes: Buffer; contentHash: string; engine: string }
+  | { from: "candidate"; file: string; bytes: Buffer; contentHash: string }
+  | { from: "none"; reason: string };
 
-export async function resolveAdoptedBytes(
+export interface ResolvedCandidateEvidence {
+  /** The candidate's own bytes — read once, verified, never re-read. */
+  candidate: VerifiedCandidateBytes;
+  /** What adoption would write for it — or why it cannot. */
+  evidence: AdoptionEvidence;
+}
+
+/**
+ * The one canonical reader shared by adoption and review (REQ-015, REQ-017,
+ * US-022), so the two can never drift. Read-only: it only reads and verifies
+ * recorded bytes, and hands back the verified buffers for both the candidate
+ * and — when one is what adoption writes — its evidence, so callers never
+ * re-read the same bytes. A tampered or missing recorded file is not
+ * evidence of non-adoptability: reading and identity verification happen
+ * here first, and throw — a loud failure for both callers, never a silent
+ * downgrade or a partial render.
+ */
+export async function resolveAdoptionEvidence(
   jobRoot: string,
   jobId: string,
   kind: JobKind,
   cand: JobCandidate,
-): Promise<AdoptedBytes> {
+): Promise<ResolvedCandidateEvidence> {
   const dir = jobDir(jobRoot, jobId);
   const bytes = await readFile(path.join(dir, cand.file)).catch(() => {
     throw new Error(
@@ -686,9 +707,14 @@ export async function resolveAdoptedBytes(
     throw new Error(
       `Candidate file "${cand.file}" no longer matches its recorded identity (sha-256 ${cand.contentHash}, actual ${actual}) — it cannot be adopted or rendered as review evidence`,
     );
+  const candidate: VerifiedCandidateBytes = { file: cand.file, bytes, contentHash: cand.contentHash };
 
   // A plate is adopted as-is, opaque by contract (ADR-0011).
-  if (kind === "plate") return { state: "candidate", file: cand.file, bytes, contentHash: cand.contentHash };
+  if (kind === "plate")
+    return {
+      candidate,
+      evidence: { from: "candidate", file: cand.file, bytes, contentHash: cand.contentHash },
+    };
 
   // Creators and objects are adopted as their matte when one was recorded —
   // re-verified against the identity the run recorded, then the true-alpha
@@ -708,14 +734,17 @@ export async function resolveAdoptedBytes(
     try {
       verifyTrueAlpha(matteBytes, record.file);
     } catch (err) {
-      return { state: "refused", reason: (err as Error).message };
+      return { candidate, evidence: { from: "none", reason: (err as Error).message } };
     }
     return {
-      state: "matte",
-      file: record.file,
-      bytes: matteBytes,
-      contentHash: record.contentHash,
-      engine: record.engine,
+      candidate,
+      evidence: {
+        from: "matte",
+        file: record.file,
+        bytes: matteBytes,
+        contentHash: record.contentHash,
+        engine: record.engine,
+      },
     };
   }
 
@@ -723,10 +752,13 @@ export async function resolveAdoptedBytes(
     // A creator candidate is adopted as its matte — the raw candidate is
     // opaque by measurement, so there is no branch that could adopt it.
     return {
-      state: "refused",
-      reason:
-        `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
-        `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
+      candidate,
+      evidence: {
+        from: "none",
+        reason:
+          `Candidate "${cand.file}" carries no matte — the matting pass did not produce one for it (see the run's warnings). ` +
+          `Rerun the job ("jobs rerun ${jobId}") to matte fresh candidates, or adopt a candidate that has one.`,
+      },
     };
 
   // An object without a matte qualifies only through its own bytes: the same
@@ -734,9 +766,12 @@ export async function resolveAdoptedBytes(
   try {
     verifyTrueAlpha(bytes, cand.file);
   } catch (err) {
-    return { state: "refused", reason: (err as Error).message };
+    return { candidate, evidence: { from: "none", reason: (err as Error).message } };
   }
-  return { state: "candidate", file: cand.file, bytes, contentHash: cand.contentHash };
+  return {
+    candidate,
+    evidence: { from: "candidate", file: cand.file, bytes, contentHash: cand.contentHash },
+  };
 }
 
 /**
@@ -745,8 +780,8 @@ export async function resolveAdoptedBytes(
  * verified matte as a trial Cutout Asset (REQ-017); an object job adopts the
  * candidate's verified matte when its run produced one, or the candidate's
  * own natively isolated bytes otherwise, as an Object Asset (REQ-015). Every
- * route reads through resolveAdoptedBytes — the one canonical reader shared
- * with review — so the identity gates cannot drift apart.
+ * route reads through resolveAdoptionEvidence — the one canonical reader
+ * shared with review — so the identity gates cannot drift apart.
  *
  * The candidate is addressed by exact content hash (a unique prefix is
  * accepted); its bytes are re-derived and verified before adoption, so a
@@ -780,11 +815,11 @@ export async function adoptCandidate(
   // A recurring hash resolves to its first recorded run — the earliest lineage.
   const { cand, run } = byHash.values().next().value!;
 
-  // The one canonical read: the bytes adoption writes, verified — or the
-  // recorded reason this candidate cannot be adopted. Tampered or missing
-  // recorded evidence throws here, before anything is written.
-  const evidence = await resolveAdoptedBytes(jobRoot, jobId, job.kind, cand);
-  if (evidence.state === "refused") throw new Error(evidence.reason);
+  // The one canonical read: the candidate's verified bytes plus the evidence
+  // of what adoption would write — or the recorded reason it cannot. Tampered
+  // or missing recorded evidence throws here, before anything is written.
+  const { evidence } = await resolveAdoptionEvidence(jobRoot, jobId, job.kind, cand);
+  if (evidence.from === "none") throw new Error(evidence.reason);
 
   const adoptedFrom = `job:${jobId}#${cand.contentHash}`;
   const provenance = {
@@ -798,7 +833,7 @@ export async function adoptCandidate(
     // A creator candidate is adopted as its matte — the isolated form the
     // matting pass produced (REQ-017). The resolver never hands back the raw
     // bytes for this kind, so the opaque candidate is unrepresentable here.
-    if (evidence.state !== "matte")
+    if (evidence.from !== "matte")
       throw new Error("a creator candidate is only adoptable as its matte");
     // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
     // only Kenneth promotes a Creator Asset through the library CLI.
@@ -830,7 +865,7 @@ export async function adoptCandidate(
       tags: opts.tags ?? [],
       ...provenance,
       matting: "true-alpha",
-      ...(evidence.state === "matte" ? { matteEngine: evidence.engine } : {}),
+      ...(evidence.from === "matte" ? { matteEngine: evidence.engine } : {}),
     });
     // The identity of what was written is the matte's, not the candidate's —
     // the candidate lineage lives in `adoptedFrom` and nowhere else.

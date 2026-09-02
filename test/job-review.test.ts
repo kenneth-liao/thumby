@@ -93,6 +93,12 @@ const objectRequest = (count = 1): Parameters<typeof runObjectJob>[2] => ({
   refs: [],
 });
 
+/** sha-256 of every base64 image embedded in an HTML string. */
+const embeddedHashes = (html: string): string[] =>
+  [...html.matchAll(/data:[^;"]+;base64,([A-Za-z0-9+/=]+)/g)].map((m) =>
+    sha256(Buffer.from(m[1]!, "base64")),
+  );
+
 describe("reviewJob — plate", () => {
   test("shows every distinct candidate at full size and 168px, with nothing creator-specific", async () => {
     await runPlateJob(jobRoot, "plate-rev", plateRequest(), plateGen);
@@ -104,29 +110,63 @@ describe("reviewJob — plate", () => {
 
     const html = await readFile(result.reviewPath, "utf8");
     for (const cand of result.candidates) expect(html).toContain(cand.contentHash.slice(0, 12));
-    // Full size: one natural-resolution figure per candidate, plus the
-    // explicit local-file target for guaranteed 1:1 inspection.
-    expect(html.match(/class="full"/g)).toHaveLength(2);
-    expect(html.match(/open full size/g)).toHaveLength(2);
+    // Full size: one natural-width figure per candidate in a scrollable
+    // container — true 1:1, never downscaled to fit.
+    expect(html.match(/class="fullwrap"/g)).toHaveLength(2);
     // Thumbnail size: exactly one 168px figure per distinct candidate.
     expect(html.match(/class="thumb"/g)).toHaveLength(2);
     expect(html).toContain("168px");
+    // The displayed bytes are the verified bytes: every embedded image decodes
+    // to a recorded candidate identity.
+    const embedded = embeddedHashes(html);
+    for (const cand of result.candidates) expect(embedded).toContain(cand.contentHash);
     // Nothing creator-specific: plates have no anchors, mattes, or face views.
     expect(html).not.toMatch(/face detail/i);
     expect(html).not.toMatch(/isolation/i);
   });
 
-  test("the artifact stays static and offline: CSP forbids script and remote content, and no Scene, Asset, or job record is touched", async () => {
+  test("the artifact stays static and offline: embedded evidence only, and no Scene, Asset, or job record is touched", async () => {
     await runPlateJob(jobRoot, "plate-static", plateRequest(), plateGen);
     const recordBefore = await readFile(path.join(jobRoot, "plate-static", "job.json"));
 
     const result = await reviewJob(jobRoot, "plate-static");
     const html = await readFile(result.reviewPath, "utf8");
-    expect(html).toContain("Content-Security-Policy");
-    expect(html).not.toContain("<script");
+    // The CSP allows embedded evidence only — no file:, no remote.
+    expect(html).toContain("img-src data:");
     expect(html).not.toMatch(/https?:\/\//);
+    expect(html).not.toContain("file:");
+    expect(html).not.toContain("<script");
     // Review writes one file — the sheet beside the record — and nothing else.
     expect(await readFile(path.join(jobRoot, "plate-static", "job.json"))).toEqual(recordBefore);
+  });
+
+  test("the saved sheet is self-contained: later mutation or deletion of source files cannot alter or break it", async () => {
+    await runPlateJob(jobRoot, "plate-frozen", plateRequest(1), plateGen);
+    const result = await reviewJob(jobRoot, "plate-frozen");
+    const sheetBefore = await readFile(result.reviewPath);
+
+    const cand = result.candidates[0]!;
+    await rm(path.join(jobRoot, "plate-frozen", cand.file));
+
+    const sheetAfter = await readFile(result.reviewPath);
+    expect(Buffer.compare(sheetBefore, sheetAfter)).toBe(0);
+    // The evidence it displays is still the verified bytes, decodable from the
+    // sheet alone.
+    expect(embeddedHashes(sheetAfter.toString("utf8"))).toContain(cand.contentHash);
+  });
+
+  test("a failed later review produces no new output — the prior sheet stands as its point-in-time evidence", async () => {
+    await runPlateJob(jobRoot, "plate-stale", plateRequest(1), plateGen);
+    const result = await reviewJob(jobRoot, "plate-stale");
+    const sheetBefore = await readFile(result.reviewPath);
+    // The sheet stamps when its evidence was verified.
+    expect(sheetBefore.toString("utf8")).toMatch(/reviewed \d{4}-\d{2}-\d{2}/);
+
+    const cand = result.candidates[0]!;
+    await writeFile(path.join(jobRoot, "plate-stale", cand.file), "tampered-after-review");
+    await expect(reviewJob(jobRoot, "plate-stale")).rejects.toThrow(/identity|matches/i);
+    // Nothing new was written; the earlier verified sheet is left untouched.
+    expect(Buffer.compare(sheetBefore, await readFile(result.reviewPath))).toBe(0);
   });
 
   test("fails loudly on a tampered candidate and writes no partial review", async () => {
@@ -166,7 +206,9 @@ describe("reviewJob — object", () => {
 
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toMatch(/isolation/i);
-    expect(html).toContain(path.basename(cand.matte!.file));
+    // The displayed matte is the verified matte: its embedded bytes decode to
+    // the recorded content identity — not merely some file reference.
+    expect(embeddedHashes(html)).toContain(cand.matte!.contentHash);
     expect(html).toContain("matte via test/segmentation");
     // Candidates appear in both evidence sizes as well.
     expect(html.match(/class="thumb"/g)).toHaveLength(1);
@@ -218,6 +260,8 @@ describe("reviewJob — object", () => {
 
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toContain("natively isolated — adoption writes these bytes as-is");
+    // The displayed adoptable bytes are the candidate's own verified bytes.
+    expect(embeddedHashes(html)).toContain(hash);
 
     // No drift: adoption of the same record writes exactly these bytes under
     // the candidate's identity.

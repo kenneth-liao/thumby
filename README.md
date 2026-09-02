@@ -320,13 +320,18 @@ result numerically against the PyTorch reference, and prints the sha-256 that
 `jobs review` works for every job kind: each distinct candidate is verified
 against its recorded content identity and shown at full size and at exactly
 168 px — the row size that decides legibility — so detail that disappears at
-realistic thumbnail size is rejected before adoption. The isolation section
-shows exactly what adoption would write, read through the same code path
-adoption uses: the matte on a checkerboard (with the engine that produced it),
-a natively isolated candidate marked adoptable as-is, or a plain **no matte —
-not adoptable** marker. Creator review keeps the face-detail view against the
+realistic thumbnail size is rejected before adoption. Every figure is
+embedded in the sheet from the verified bytes themselves, so the saved sheet
+is self-contained evidence that does not change if job or anchor files are
+later moved, mutated, or deleted. The isolation section shows exactly what
+adoption would write, read through the same code path adoption uses: the
+matte on a checkerboard (with the engine that produced it), a natively
+isolated candidate marked adoptable as-is, or a plain **no matte — not
+adoptable** marker. Creator review keeps the face-detail view against the
 identity anchors. Tampered or missing recorded evidence fails the whole
-review instead of rendering partially. `jobs adopt` writes the
+review instead of rendering partially — and a failed review leaves the
+previous sheet untouched: each sheet is point-in-time evidence, stamped with
+the moment its bytes were verified. `jobs adopt` writes the
 **matte** — the same true-alpha gate as objects, applied to the bytes that
 actually enter the library — always as a `trial` Cutout Asset; approval is the
 human likeness gate, never automatic (DEC-004). Promotion from trial to
