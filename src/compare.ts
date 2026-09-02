@@ -48,6 +48,10 @@ export interface CheckedReference {
   height: number;
   /** Decoded RGBA pixels — read once here, consumed by the difference pass. */
   rgba: Buffer;
+  /** The exact encoded PNG bytes read once at validation — a consumer that
+   *  re-serves the reference (the author session) uses these, never a reread
+   *  that could pick up drifted file content. */
+  bytes: Buffer;
 }
 
 export type ReferenceCheck =
@@ -115,7 +119,7 @@ export async function checkReference(projectRoot: string, scene: Scene): Promise
         `${REFERENCE_WIDTH}×${REFERENCE_HEIGHT} so overlay and difference views align with the ` +
         `Render canvas. Scale or crop it locally, then update reference.path.`,
     );
-  return { ok: true, reference: { path: absolute, width, height, rgba } };
+  return { ok: true, reference: { path: absolute, width, height, rgba, bytes } };
 }
 
 /**
