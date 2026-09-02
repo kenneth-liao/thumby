@@ -20,8 +20,15 @@ the design spec (#7). Workflow documentation lives in `README.md` (→ Scenes).
   stored). Library Assets live under `assets/`; project-local Assets are
   referenced by scene-relative path. Both scopes use the same resolution
   contract; `@<hash>` pins exact bytes.
-- **Plate** — a background Asset with no editable foreground subject, text,
-  logo, or hero object baked into it. Generated ambience/background only.
+- **Plate** — a full-canvas generated background Asset whose contents are
+  intentionally flattened (ADR-0011). The agent's requested subject is
+  authoritative for its visual content: UI, products, devices, and complex
+  background elements are permitted; only final editorial text (ADR-0001) and
+  exact logos stay local. Composability is an authoring policy, not
+  validation — prefer an independent Asset and Layer when an element benefits
+  from movement, resizing, recoloring, replacement, reuse, provenance, or
+  Variants; keep environmental or tightly integrated detail flattened when
+  separate control adds little.
 - **Cutout Asset** — an isolated true-alpha PNG in the library. Two roles:
   **Object Asset** (a lamp, terminal, device — any isolated non-text object,
   placed as an independent Image layer) and **Creator Asset** (below).

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Plates are flexible: the Plate Job subject is authoritative** (US-025–US-027, #51, ADR-0011): `jobs plates` no longer forces the bare-backdrop prompt — a requested UI surface, product, device, or complex background element survives in the recorded effective prompt with no contradictory prohibition, while the final-text and exact-logo bans stay (ADR-0001). The glossary now defines a Plate as a full-canvas generated background whose contents are intentionally flattened, and agent guidance (README, `jobs` help) documents composability as an authoring policy — prefer independent Assets and Layers when separate control (movement, resizing, recoloring, replacement, reuse, provenance, Variants) has practical value; never a validation rule. The legacy `thumb --cutout` backdrop mode is unchanged
+
 ### Added
 
 - The Creator approval gate now covers the deprecated legacy path (REQ-018, #40): `thumb --cutout <id>` refuses a trial Creator Asset with the same error and remedies as the Scene gate (`library approve`, or the explicit `--experimental` override); under the override every output is named `*.trial.png` and a NON-FINAL warning naming the asset rides stdout and `run.json` — and the gate fires before any generation spend. The gate's language (refusal, non-final marker, `.trial` name hint) now has one home in `src/assets.ts`, shared by both render paths

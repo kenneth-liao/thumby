@@ -446,7 +446,8 @@ async function recordRun(
 
     // Creators and objects both leave the model opaque (measured: gpt-image-2
     // paints even a checkerboard backdrop rather than returning alpha), so
-    // both kinds run the pass; plates are opaque backdrops by contract.
+    // both kinds run the pass; plates are adopted as-is, opaque by contract
+    // (ADR-0011).
     if (matte && request.kind !== "plate") {
       try {
         const result = await matteCandidate(candidate.bytes, file, matte);

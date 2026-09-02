@@ -107,9 +107,17 @@ creators options
   generation is paid for. A candidate the pass could not isolate is refused
   at adoption and the run's warnings say why.
 
-A plate job is a bare backdrop by definition (REQ-014): no person, product,
-device, or independently editable foreground object is baked in — subjects
-enter Scenes as their own layers, never inside the plate.
+A plate is a full-canvas generated background whose contents are
+intentionally flattened (ADR-0011). Your subject is authoritative: request
+UI, products, devices, or any complex background element and the effective
+prompt preserves it. Only final editorial text and exact logos stay local
+(ADR-0001) — the prompt hard-bans text and logos.
+
+Composability is an authoring policy, not a validation rule (DEC-013):
+generate an element as its own Object Asset and Layer when movement,
+resizing, recoloring, replacement, reuse, provenance, or Variants benefit
+from separate control; keep environmental or tightly integrated detail
+flattened in the plate when separate control adds nothing.
 
 adopt options
   --id <assetId>        Library id for the adopted Asset (required)
@@ -117,10 +125,10 @@ adopt options
   --tags <csv>          Comma-separated tags
 
 Every command prints JSON: { "ok": true, ... } or { "ok": false, "errors": [...]}.
-Plate candidates are background ambience only — final text, logos, and
-independently editable foreground elements are excluded by the plate request
-contract and rendered locally (ADR-0001, DEC-005, DEC-006). Object candidates
-are isolated non-text Assets (REQ-015), never the final composite.
+Plate candidates are full-canvas flattened backgrounds (ADR-0011); final
+text and exact logos are never generated — text renders locally and logos
+are sourced Assets (ADR-0001). Object candidates are isolated non-text
+Assets (REQ-015), never the final composite.
 `;
 
 interface CliResult {
@@ -139,9 +147,11 @@ const failure = (message: string, path = "jobs"): CliResult => ({
 });
 
 /**
- * The request→generatePlates mapping — the load-bearing REQ-014 wiring lives
- * here: a Plate Job is a bare backdrop (no person, product, device, or
- * independently editable foreground object baked in), whatever the caller passes.
+ * The request→generatePlates mapping — the load-bearing wiring lives here:
+ * the agent's subject is authoritative for the plate's visual content
+ * (DEC-010, ADR-0011) and passes through untouched. Prompt construction adds
+ * only format, zone, and invariant guidance — never a backdrop or content
+ * ban. Final editorial text and exact logos stay local (ADR-0001).
  */
 export function generateOptionsFor(request: PlateJobRequest): GenerateOptions {
   return {
@@ -150,7 +160,6 @@ export function generateOptionsFor(request: PlateJobRequest): GenerateOptions {
     zone: request.zone,
     refs: request.refs.map((r) => r.path),
     count: request.count,
-    subjectless: true,
     ...(request.temperature != null ? { temperature: request.temperature } : {}),
   };
 }

@@ -7,12 +7,19 @@ import { resolveModel, type ModelSpec } from "./models.js";
 export type TextZone = "left" | "right" | "bottom" | "none";
 
 /**
- * The text layer is rendered locally in CSS, so the model must produce a clean
- * plate: no lettering of its own, and deliberate empty space where our headline
- * will land.
+ * The plate prompt: the agent's subject is authoritative for visual content
+ * (DEC-010, ADR-0011) — UI, products, devices, and complex background elements
+ * are requested content, never banned. Construction adds format, zone, and
+ * cross-cutting invariant guidance only: the hard text/logo ban stays because
+ * final editorial text is rendered locally (ADR-0001) and exact logos are
+ * sourced Assets.
+ *
+ * The text layer is rendered locally in CSS, so the model must also leave
+ * deliberate empty space where our headline will land.
  */
-function buildPrompt(subject: string, zone: TextZone, subjectless: boolean): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
+function buildPrompt(subject: string, zone: TextZone, subjectless = false): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
   // asking for a subject here produces something that fights the cutout.
+  // Legacy `thumb --cutout` mode only; Plate Jobs never set it.
   const backdrop: Record<TextZone, string> = {
     left: "Keep the entire left half AND the centre of the frame completely empty and unobstructed. Confine every visual element to the far right edge.",
     right: "Keep the entire right half AND the centre of the frame completely empty and unobstructed. Confine every visual element to the far left edge.",
@@ -39,7 +46,12 @@ function buildPrompt(subject: string, zone: TextZone, subjectless: boolean): str
         ]
       : []),
     "Style: high contrast, saturated, punchy lighting, strong focal subject, clean readable silhouette at small sizes.",
-    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks, and no UI elements anywhere in the image.",
+    // The UI ban belongs to the legacy cutout backdrop contract (INT-1): a UI
+    // element in the backdrop fights the local cutout like any other subject
+    // would. Flexible Plate Jobs (ADR-0011) may request UI freely.
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks" +
+      (subjectless ? ", and no UI elements" : "") +
+      " anywhere in the image.",
   ].join("\n");
 }
 
@@ -166,8 +178,12 @@ export interface GenerateOptions {
   zone: TextZone;
   refs: string[];
   count: number;
-  /** A cutout supplies the subject, so the plate must stay a bare backdrop. */
-  subjectless: boolean;
+  /**
+   * Legacy `thumb --cutout` mode only: the cutout supplies the subject, so the
+   * plate must stay a bare backdrop that does not fight it. Plate Jobs never
+   * set it — the agent's subject is authoritative (DEC-010, ADR-0011).
+   */
+  subjectless?: boolean;
   /**
    * Multimodal models only — lowers creative drift for likeness work.
    * Image-kind models have no such knob; a value here is rejected loudly.
