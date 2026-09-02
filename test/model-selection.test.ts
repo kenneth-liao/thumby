@@ -20,6 +20,7 @@ import {
   CREATOR_DEFAULT_MODEL,
   referenceCapableModels,
   referenceIncompatibilityError,
+  resolveModel,
 } from "../src/models.js";
 import { run as cliRun } from "../src/job-cli.js";
 import { encodePng } from "./png.js";
@@ -115,6 +116,46 @@ describe("the registry is the one capability source", () => {
     // its basis stated — never presented as a per-image rate or run cost.
     expect(gpt.note).toMatch(/account-window delta/);
     expect(gpt.note).toMatch(/not a per-image rate/);
+  });
+});
+
+describe("persisted run cost states its basis", () => {
+  test("a gpt-image reference run records its cost as unknown/unmeasured in job.json", async () => {
+    const refFile = path.join(root, "style.png");
+    await writeFile(refFile, "ref-bytes");
+    const res = await run(["plates", "simplified ui", "--ref", `edit:${refFile}`]);
+    expect(res.exitCode).toBe(0);
+    const out = res.output as Record<string, any>;
+    const record = JSON.parse(await readFile(path.join(out.jobDir, "job.json"), "utf8"));
+    // The measured $0.0045 rate is text-only: a reference call bills the image
+    // as extra input tokens and no per-generation billing lookup succeeded, so
+    // the persisted run must not present the text-only rate as measured — nor
+    // any account-window figure as an exact per-run cost.
+    expect(record.runs[0].costUsd).toBeNull();
+    expect(record.runs[0].costMeasured).toBe(false);
+    expect(record.runs[0].warnings.join(" ")).toMatch(/reference-call cost recorded as unknown/);
+  });
+
+  test("a reference-free gpt-image run keeps the measured text-only rate", async () => {
+    const res = await run(["plates", "neon room"]);
+    expect(res.exitCode).toBe(0);
+    const out = res.output as Record<string, any>;
+    const record = JSON.parse(await readFile(path.join(out.jobDir, "job.json"), "utf8"));
+    expect(record.runs[0].costUsd).toBeCloseTo(MODELS["gpt-image"].approxCost, 6);
+    expect(record.runs[0].costMeasured).toBe(true);
+  });
+
+  test("a reference run on a rate that covers References stays measured", async () => {
+    const refFile = path.join(root, "style.png");
+    await writeFile(refFile, "ref-bytes");
+    const res = await run(["plates", "simplified ui", "--model", "nano-2", "--ref", `edit:${refFile}`]);
+    expect(res.exitCode).toBe(0);
+    const out = res.output as Record<string, any>;
+    const record = JSON.parse(await readFile(path.join(out.jobDir, "job.json"), "utf8"));
+    // nano-2's measured rate comes from reference-bearing creator trials, so
+    // a reference run on it is exactly what the rate describes.
+    expect(record.runs[0].costUsd).toBeCloseTo(MODELS["nano-2"].approxCost, 6);
+    expect(record.runs[0].costMeasured).toBe(true);
   });
 });
 
@@ -217,13 +258,25 @@ describe("explicit incompatible selections are refused before spend", () => {
 });
 
 describe("raw model identifiers carry no capability claim", () => {
-  test("a raw id that looks reference-capable by name is refused for reference jobs", async () => {
+  test("an unregistered raw id that looks reference-capable by name is refused for reference jobs", async () => {
     const refFile = path.join(root, "style.png");
     await writeFile(refFile, "ref-bytes");
     const res = await run([
-      "plates", "simplified ui", "--model", "google/gemini-3.1-flash-image", "--ref", `edit:${refFile}`,
+      "plates", "simplified ui", "--model", "google/gemini-3.1-flash-image-preview", "--ref", `edit:${refFile}`,
     ]);
     await expectQualifiedRefusal(res);
+  });
+
+  test("an exact gateway id that names a registered model resolves to its canonical qualified spec", () => {
+    // Durable Job records carry gateway ids; exact-identity resolution
+    // requalifies them through the one registry — never a substring guess.
+    expect(resolveModel("google/gemini-3.1-flash-image")).toBe(MODELS["nano-2"]);
+    expect(resolveModel("openai/gpt-image-2")).toBe(MODELS["gpt-image"]);
+    // An id that matches no registry entry stays an unqualified raw.
+    expect(resolveModel("google/gemini-3.1-flash-image-preview").supportsRef).toBe(false);
+    expect(resolveModel("google/gemini-3.1-flash-image-preview").id).toBe(
+      "google/gemini-3.1-flash-image-preview",
+    );
   });
 
   test("a raw id with no gemini substring is refused the same way", async () => {
@@ -267,5 +320,36 @@ describe("rerun re-validates the recorded model against the current registry", (
     // The stale record is untouched — no run was appended, nothing spent.
     const record = JSON.parse(await readFile(path.join(jobsRoot, "stale-job", "job.json"), "utf8"));
     expect(record.runs).toEqual([]);
+  });
+
+  test("a recorded raw gateway id that names a registered model reruns qualified", async () => {
+    const refFile = path.join(root, "style.png");
+    await writeFile(refFile, "ref-bytes");
+    const contentHash = createHash("sha256").update("ref-bytes").digest("hex");
+    // A record from before registry keys existed: the model was recorded under
+    // its gateway id — which the pre-registry substring inference treated as
+    // reference-capable. Exact-identity resolution requalifies the lineage.
+    await mkdir(path.join(jobsRoot, "legacy-raw-job"), { recursive: true });
+    await writeFile(
+      path.join(jobsRoot, "legacy-raw-job", "job.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        jobId: "legacy-raw-job",
+        kind: "plate",
+        createdAt: new Date().toISOString(),
+        request: {
+          kind: "plate", subject: "old", zone: "left", model: "google/gemini-3.1-flash-image", count: 1,
+          refs: [{ role: "style", path: refFile, contentHash }],
+        },
+        runs: [],
+      }, null, 2) + "\n",
+    );
+    const res = await run(["rerun", "legacy-raw-job"]);
+    expect(res.exitCode).toBe(0);
+    expect(reached.plate).toBe(true);
+    // The run records the resolved spec's id — here the same gateway id, so
+    // the lineage's provenance is unchanged.
+    const record = JSON.parse(await readFile(path.join(jobsRoot, "legacy-raw-job", "job.json"), "utf8"));
+    expect(record.runs[0].model).toBe("google/gemini-3.1-flash-image");
   });
 });

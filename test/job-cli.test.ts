@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, readFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -355,6 +355,19 @@ describe("jobs objects", () => {
   });
 });
 
+// AI-SDK tripwire for this file: every other test uses injected generators, so
+// the only legitimate path to the real SDK is through PRODUCTION_GENERATOR's
+// gates — which must refuse before the call. If any test reaches the SDK, the
+// tripwire fails loudly instead of attempting a live provider call.
+mock.module("ai", () => ({
+  generateImage: () => {
+    throw new Error("AI SDK must not be called — a gate must refuse before the provider call");
+  },
+  generateText: () => {
+    throw new Error("AI SDK must not be called — a gate must refuse before the provider call");
+  },
+}));
+
 describe("production generator wiring", () => {  test("maps a job request onto generatePlates options — subject-authoritative contract included", () => {
     // The ADR-0011 load-bearing fact: a Plate Job's subject is authoritative —
     // no subjectless backdrop mode is forced, and the full request (zone,
@@ -376,20 +389,27 @@ describe("production generator wiring", () => {  test("maps a job request onto g
     expect(generateOptionsFor({ ...requestFixture(), temperature: undefined }).temperature).toBeUndefined();
   });
 
-  test("the production generator rejects a model that cannot take references", async () => {
-    // Offline contract check only: the last gate before the provider call
-    // refuses an incompatible model with the canonical, registry-derived
-    // message — proving the request is forwarded and no list is duplicated.
+  test("the production generator's last gate refuses an incompatible referenced request before any AI SDK call", async () => {
+    // PRODUCTION_GENERATOR is exercised directly so the runJob request
+    // boundary — which normally refuses first — cannot intercept: this is the
+    // only test that reaches the generator-level gate in generate.ts
+    // (defense in depth). The mocked AI SDK tripwire above proves rejection
+    // happens before any provider call, and the canonical builder's
+    // registry-derived message proves no compatibility list is duplicated.
     const refFile = path.join(root, "style.png");
     await writeFile(refFile, "bytes");
-    const res = await cliRun(
-      ["plates", "subject", "--model", "flux", "--ref", `style:${refFile}`],
-      { generate: PRODUCTION_GENERATOR, jobsRoot, libraryRoot },
-    );
-    expect(res.exitCode).toBe(1);
-    expect(((res.output as Record<string, any>).errors[0].message as string)).toMatch(
-      /not qualified reference-capable/,
-    );
+    await expect(
+      PRODUCTION_GENERATOR({
+        kind: "plate", subject: "simplified ui", zone: "left", model: "flux", count: 1,
+        refs: [{ role: "style", path: refFile, contentHash: "ab".repeat(32) }],
+      }),
+    ).rejects.toThrow(/not qualified reference-capable/);
+    await expect(
+      PRODUCTION_GENERATOR({
+        kind: "plate", subject: "simplified ui", zone: "left", model: "flux", count: 1,
+        refs: [{ role: "style", path: refFile, contentHash: "ab".repeat(32) }],
+      }),
+    ).rejects.toThrow(/bfl\/flux-2-flex/);
   });
 });
 

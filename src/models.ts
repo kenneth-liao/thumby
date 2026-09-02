@@ -18,6 +18,15 @@ export interface ModelSpec {
    * false — from the Gateway's published pricing table, not yet observed
    */
   costMeasured: boolean;
+  /**
+   * Whether the approxCost figure describes (and was measured or published
+   * for) calls that carry typed References. When a run's call shape is not
+   * what the rate describes — a reference call on a text-only rate — the run
+   * records its cost as unknown instead of claiming the rate as measured
+   * (TEST-012: the only reference-call billing evidence is an account-window
+   * delta, not a per-image rate).
+   */
+  costCoversRefs: boolean;
   /** Accepts reference images for likeness / style transfer. */
   supportsRef: boolean;
   /**
@@ -35,6 +44,9 @@ export const MODELS: Record<string, ModelSpec> = {
     sizing: "size",
     approxCost: 0.0045,
     costMeasured: true,
+    // The measured rate is the text-only plate rate: a reference call bills
+    // the image as extra input tokens (#52, TEST-012).
+    costCoversRefs: false,
     // Qualified through a real Gateway request with a typed Reference on the
     // exact production call shape (#52, TEST-012): SUPPORTED.
     supportsRef: true,
@@ -53,6 +65,9 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "multimodal",
     approxCost: 0.034,
     costMeasured: true,
+    // Measured from reference-bearing creator trials — the rate is the
+    // reference-call rate.
+    costCoversRefs: true,
     supportsRef: true,
     note: "Nano Banana 2 Lite — fastest (~3s) and the cheapest way to use a face ref",
   },
@@ -61,6 +76,9 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "multimodal",
     approxCost: 0.067,
     costMeasured: true,
+    // Measured from reference-bearing creator trials — the rate is the
+    // reference-call rate.
+    costCoversRefs: true,
     supportsRef: true,
     note: "Nano Banana 2 — better plates than lite, same reference-image support",
   },
@@ -69,6 +87,7 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "multimodal",
     approxCost: 0.134,
     costMeasured: false,
+    costCoversRefs: true,
     supportsRef: true,
     note: "Nano Banana Pro — native 2K/4K and the strongest likeness; priciest by far",
   },
@@ -79,6 +98,7 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "image",
     approxCost: 0.03,
     costMeasured: false,
+    costCoversRefs: false,
     supportsRef: false,
     note: "FLUX.2 Flex — the most stylistic control",
   },
@@ -87,6 +107,8 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "image",
     approxCost: 0.035,
     costMeasured: false,
+    // Flat per-image published rate — it covers reference calls too.
+    costCoversRefs: true,
     supportsRef: true,
     note: "Seedream 5.0 Pro — flat per-image rate (no 4K penalty), takes reference images; identity strength unproven here",
   },
@@ -95,6 +117,7 @@ export const MODELS: Record<string, ModelSpec> = {
     kind: "image",
     approxCost: 0.035,
     costMeasured: false,
+    costCoversRefs: false,
     supportsRef: false,
     note: "Recraft V4.1 — clean vector/graphic looks",
   },
@@ -160,16 +183,26 @@ export function resolveModel(name: string): ModelSpec {
   // Allow passing a raw gateway id through; assume image-only call shape
   // unless it looks like a Gemini multimodal model.
   if (name.includes("/")) {
+    // Exact-identity normalization first (DEC-019): a gateway id that names a
+    // registered model IS that model — durable Job records may carry the id
+    // (recorded before registry keys existed), and rerun must requalify them
+    // through the same canonical spec, not strand them as unqualified raws.
+    // This is exact id equality, never a substring guess, and it reads the
+    // one registry — no alias table, no second capability list.
+    const registered = Object.values(MODELS).find((s) => s.id === name);
+    if (registered) return registered;
     return {
       id: name,
       kind: name.includes("gemini") ? "multimodal" : "image",
       sizing: name.startsWith("openai/") ? "size" : "aspectRatio",
       approxCost: 0,
       costMeasured: false,
-      // No capability claim: a raw id is unqualified until a real Gateway
-      // request proves it and it is registered (DEC-019, TEST-012) —
-      // capability is never inferred from the model-name substring. The
-      // call-shape guess stays: it is SDK routing, not a capability fact.
+      // No capability or cost claim: an unregistered raw id is unqualified
+      // until a real Gateway request proves it and it is registered
+      // (DEC-019, TEST-012) — capability is never inferred from the
+      // model-name substring. The call-shape guess stays: it is SDK routing,
+      // not a capability fact.
+      costCoversRefs: false,
       supportsRef: false,
       note: "raw gateway id",
     };

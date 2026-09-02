@@ -129,7 +129,13 @@ export interface JobRun {
   model: string;
   /** The full text sent to the model, composition suffix included. */
   fullPrompt: string;
-  costUsd: number;
+  /**
+   * Generation cost in USD, or null when the recorded basis cannot state one:
+   * an unmeasured rate records its estimate here, but a call shape the rate
+   * does not describe — a reference call on a text-only rate — records null
+   * with a basis warning, never the wrong rate claimed as measured.
+   */
+  costUsd: number | null;
   costMeasured: boolean;
   warnings: string[];
   candidates: JobCandidate[];
@@ -485,9 +491,25 @@ async function recordRun(
     fullPrompt: batch.fullPrompt,
     // Generation is the only billed work in a run: the matting pass runs
     // locally, so it has no cost to add and none to lose when it fails.
-    costUsd: spec.approxCost * batch.candidates.length,
-    costMeasured: spec.costMeasured,
-    warnings: [...new Set(warnings)],
+    // The cost is recorded only when the rate describes the call shape: a
+    // reference call on a text-only rate records unknown with its basis
+    // stated, never the text-only rate claimed as measured (TEST-012).
+    costUsd:
+      request.refs.length === 0 || spec.costCoversRefs
+        ? spec.approxCost * batch.candidates.length
+        : null,
+    costMeasured: spec.costMeasured && (request.refs.length === 0 || spec.costCoversRefs),
+    warnings: [
+      ...new Set([
+        ...warnings,
+        ...(request.refs.length > 0 && !spec.costCoversRefs
+          ? [
+              `cost: reference-call cost recorded as unknown — the measured rate for ${spec.id} covers text-only calls; ` +
+              `a reference call bills the image as extra input tokens (basis in the model note)`,
+            ]
+          : []),
+      ]),
+    ],
     candidates,
   };
 }
