@@ -1712,6 +1712,109 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
           if (w.__origFetch) window.fetch = w.__origFetch;
         });
 
+        // Arrival-order FIFO: the first request's handler enqueues its whole
+        // read/parse/apply pipeline at arrival — before its first body read —
+        // so a slowly streamed body cannot commit after a later complete one.
+        const delayedFirstBody = (): Promise<{ a: Buffer; b: Buffer }> =>
+          new Promise((resolve, reject) => {
+            const bodyA = JSON.stringify({ id: "chip", dx: 10, dy: 0 });
+            const bodyB = JSON.stringify({ id: "chip", dx: 20, dy: 0 });
+            const bodies: { a?: Buffer; b?: Buffer } = {};
+            let done = false;
+            let failTimer: ReturnType<typeof setTimeout> | undefined;
+            const settle = () => {
+              if (done) return;
+              if (bodies.a !== undefined && bodies.b !== undefined) {
+                done = true;
+                if (failTimer) clearTimeout(failTimer);
+                resolve({ a: bodies.a!, b: bodies.b! });
+              }
+            };
+            const fail = (err: Error) => {
+              if (!done) {
+                done = true;
+                if (failTimer) clearTimeout(failTimer);
+                reject(err);
+              }
+            };
+            const reqA = httpRequest(
+              {
+                host: "127.0.0.1",
+                port,
+                path: `/${token}/move`,
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "content-length": String(bodyA.length),
+                  connection: "close",
+                },
+              },
+              (res) => {
+                const chunks: Buffer[] = [];
+                res.on("data", (c: Buffer) => chunks.push(c));
+                res.on("end", () => {
+                  bodies.a = Buffer.concat(chunks);
+                  settle();
+                });
+              },
+            );
+            reqA.on("error", fail);
+            // The write flushes A's headers plus this body prefix in one
+            // segment; the handler enqueues its whole pipeline at arrival.
+            // Wait a controlled interval before B so A's arrival is
+            // unambiguous, and keep A's body incomplete for 1.5s — B fully
+            // arrives while A is still streaming.
+            reqA.write(bodyA.slice(0, 5));
+            setTimeout(() => {
+              const reqB = httpRequest(
+                {
+                  host: "127.0.0.1",
+                  port,
+                  path: `/${token}/move`,
+                  method: "POST",
+                  headers: { "content-type": "application/json", connection: "close" },
+                },
+                (res) => {
+                  const chunks: Buffer[] = [];
+                  res.on("data", (c: Buffer) => chunks.push(c));
+                  res.on("end", () => {
+                    bodies.b = Buffer.concat(chunks);
+                    settle();
+                  });
+                },
+              );
+              reqB.on("error", fail);
+              reqB.end(bodyB);
+              setTimeout(() => {
+                reqA.write(bodyA.slice(5));
+                reqA.end();
+              }, 1400);
+            }, 100);
+            failTimer = setTimeout(
+              () => fail(new Error("delayed-first-body overlap did not settle")),
+              30_000,
+            );
+          });
+        const { a: aRaw, b: bRaw } = await delayedFirstBody();
+        const aMove = JSON.parse(aRaw.toString("utf8")) as MoveResponse;
+        const bMove = JSON.parse(bRaw.toString("utf8")) as MoveResponse;
+        expect(aMove.rev).toBe(16);
+        expect(bMove.rev).toBe(17);
+        // B's cumulative state includes A's movement, committed first.
+        const chipArrivalA = aMove.layers.find((l) => l.id === "chip")!.position!.current.x;
+        const chipArrivalB = bMove.layers.find((l) => l.id === "chip")!.position!.current.x;
+        expect(chipArrivalB).toBeCloseTo(chipArrivalA + 20, 3);
+
+        // Final status/data-rev consistency after the overlap: the next real
+        // drag applies the newest revision to both.
+        await dragHit("1", 5, 0);
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 18,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await statusText()).toBe("rev 18 · unsaved 5 · Scene file unchanged");
+
         // Rapid overlapping movements serialize strictly FIFO: revisions
         // advance one by one and each response carries the cumulative state
         // of every delta so far.
@@ -1721,7 +1824,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         const deltas = [10, 20, 30, 40, 50, 60];
         const burst = await Promise.all(deltas.map((d) => postMove("chip", d, 0)));
         for (let i = 0; i < burst.length; i++) {
-          expect(burst[i]!.rev).toBe(16 + i);
+          expect(burst[i]!.rev).toBe(19 + i);
           const chip = byId(burst[i]!, "chip").position!.current;
           expect(chip.x).toBeCloseTo(
             chipXBefore + deltas.slice(0, i + 1).reduce((a, b) => a + b, 0),
@@ -1744,7 +1847,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         for (let ci = 0; ci < cycles.length; ci++) {
           const c = cycles[ci]!;
           const next = await postMove(c.id, c.dx, c.dy);
-          expect(next.rev).toBe(22 + ci);
+          expect(next.rev).toBe(25 + ci);
           const center = centerOf(byId(next, c.id));
           const centerBefore = centerOf(byId(last, c.id));
           expect(center.x - centerBefore.x).toBeCloseTo(c.dx, 0);
@@ -1762,6 +1865,128 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
       }
     },
     300_000,
+  );
+});
+
+// --- tiny-scale Groups (#60, INT-2) ----------------------------------------
+
+describe("scene author — tiny-scale Groups stay draggable (#60)", () => {
+  /**
+   * A Group scaled 0.00001 — a valid positive Scene scale whose measured
+   * basis coefficients collapse to zero at 4-decimal rounding and whose
+   * determinant (1e-10) sits below any absolute invertibility cutoff.
+   */
+  const tinyScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
+    ...scene,
+    layers: [
+      { id: "bg", type: "image", asset: "./bg.svg", position: { x: 0, y: 0 }, size: { width: 1280, height: 720 } },
+      {
+        id: "tiny",
+        type: "group",
+        position: { x: 60, y: 500 },
+        size: { width: 200, height: 200 },
+        scale: 0.00001,
+        layers: [
+          { id: "tiny-dot", type: "shape", shape: "ellipse", color: "#ffcc00", position: { x: 10, y: 10 }, size: { width: 20, height: 20 } },
+        ],
+      },
+    ],
+  });
+
+  let fix: Fixture;
+  let session: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  let events: SessionEvents;
+  let started: { event: string; url: string };
+  let url: URL;
+  let token: string;
+  let port: number;
+
+  beforeAll(async () => {
+    fix = await makeFixture("tiny", tinyScene);
+    session = Bun.spawn(["bun", CLI, "author", fix.scenePath], {
+      cwd: ROOT,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    events = new SessionEvents(session);
+    const evt = await events.waitForEvent("started", 120_000);
+    started = evt as { event: string; url: string };
+    url = new URL(started.url);
+    port = Number(url.port);
+    token = url.pathname.split("/").filter(Boolean)[0] ?? "";
+  }, 180_000);
+
+  afterAll(async () => {
+    if (session && session.exitCode === null && session.signalCode === null) {
+      session.kill("SIGTERM");
+      await session.exited;
+    }
+    if (fix) await rm(fix.root, { recursive: true, force: true });
+  });
+
+  test(
+    "a Layer inside a tiny-scale Group follows frame-px drags: full basis precision and scale-relative invertibility",
+    async () => {
+      const browser = await getBrowser();
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1000 },
+        deviceScaleFactor: 1,
+      });
+      const origin = url.origin;
+      await ctx.route("**/*", (route) =>
+        route.request().url().startsWith(origin) ? route.continue() : route.abort(),
+      );
+      const page: Page = await ctx.newPage();
+      interface ResponseLayer {
+        id: string;
+        visible: boolean;
+        bounds: { x: number; y: number; width: number; height: number } | null;
+        position?: { persisted: { x: number; y: number }; current: { x: number; y: number } };
+      }
+      interface MoveResponse {
+        rev: number;
+        warnings: string[];
+        layers: ResponseLayer[];
+      }
+      const postMove = async (id: string, dx: number, dy: number): Promise<MoveResponse> => {
+        const res = await page.evaluate(
+          async ({ id, dx, dy }) => {
+            const base = location.pathname.replace(/\/view$/, "/");
+            const r = await fetch(base + "move", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id, dx, dy }),
+            });
+            return { status: r.status, body: await r.json() };
+          },
+          { id, dx, dy },
+        );
+        expect(res.status).toBe(200);
+        return res.body as MoveResponse;
+      };
+      const centerOf = (l: ResponseLayer) => {
+        expect(l.bounds).not.toBeNull();
+        return { x: l.bounds!.x + l.bounds!.width / 2, y: l.bounds!.y + l.bounds!.height / 2 };
+      };
+      try {
+        await page.goto(started.url);
+
+        // Frame (30, 12) through scale 1e-5: the local delta is +3e6, +1.2e6
+        // — huge but finite and valid; the rendered center follows the frame.
+        const respA = await postMove("tiny-dot", 30, 12);
+        const currentA = respA.layers.find((l) => l.id === "tiny-dot")!.position!.current;
+        expect(currentA.x).toBeCloseTo(10 + 3_000_000, 2);
+        expect(currentA.y).toBeCloseTo(10 + 1_200_000, 2);
+        const respB = await postMove("tiny-dot", 10, 5);
+        const centerB = centerOf(respB.layers.find((l) => l.id === "tiny-dot")!);
+        const centerA = centerOf(respA.layers.find((l) => l.id === "tiny-dot")!);
+        expect(centerB.x - centerA.x).toBeCloseTo(10, 0);
+        expect(centerB.y - centerA.y).toBeCloseTo(5, 0);
+      } finally {
+        await ctx.close();
+      }
+    },
+    90_000,
   );
 });
 

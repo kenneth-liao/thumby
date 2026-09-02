@@ -691,7 +691,14 @@ function viewLayers(state: SessionState): ViewLayer[] {
  */
 function invertBasis({ a, b, c, d }: Basis): Basis | null {
   const det = a * d - b * c;
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
+  // Scale-relative conditioning: a matrix is invertible when its determinant
+  // is large relative to its own magnitude — any valid positive Group scale
+  // (det = s² > 0, however small) passes, while a genuinely singular,
+  // near-singular, or non-finite transform does not. An absolute cutoff
+  // would falsely reject small or nested positive scales.
+  const scale = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
+  if (!Number.isFinite(det) || scale === 0 || !(Math.abs(det) > 1e-9 * scale * scale))
+    return null;
   return { a: d / det, b: -b / det, c: -c / det, d: a / det };
 }
 
@@ -891,13 +898,24 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
               return json(400, {
                 errors: [{ path: "content-type", message: "movement requests must send application/json" }],
               });
-            const body = await readMovementBody(req);
-            if (!body.ok)
-              return json(body.status, { errors: [{ path: "body", message: body.message }] });
-            const parsed = parseMovement(body.text);
-            if (Array.isArray(parsed)) return json(400, { errors: parsed });
+            // Arrival order is commit order: the whole read/parse/apply
+            // pipeline enqueues at handler arrival — before the first body
+            // read — so a slowly streamed earlier request can never commit
+            // after a later complete one.
             try {
-              const result = await serialize(() => applyMovement(state, parsed));
+              const result = await serialize(
+                async (): Promise<{ status: number; body: Record<string, unknown> }> => {
+                  const body = await readMovementBody(req);
+                  if (!body.ok)
+                    return {
+                      status: body.status,
+                      body: { errors: [{ path: "body", message: body.message }] },
+                    };
+                  const parsed = parseMovement(body.text);
+                  if (Array.isArray(parsed)) return { status: 400, body: { errors: parsed } };
+                  return applyMovement(state, parsed);
+                },
+              );
               return json(result.status, result.body);
             } catch (err) {
               // A render failure changes nothing — the raw state, revision,

@@ -945,10 +945,12 @@ const collectLayerBounds = async (
       d = nd;
     }
     return {
-      a: round(a),
-      b: round(b),
-      c: round(c),
-      d: round(d),
+      // Full measured precision: the movement consumer inverts this basis, and
+      // rounding here would zero out valid small positive Group scales.
+      a,
+      b,
+      c,
+      d,
     };
   };
   let canvas: HTMLCanvasElement | null = null;
