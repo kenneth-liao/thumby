@@ -4,6 +4,7 @@
 
 ### Added
 
+- Uniform Image-layer tint (US-034–US-035, #55, ADR-0012): `tint` paints one authored color through the resolved Asset's alpha — same semantics for raster and vector Assets — with transparent pixels byte-identical to the untinted render, source bytes and Asset identity untouched (two tinted Layers share one Asset), and fixed composition with crop/fit/opacity/effects; mutually exclusive with the masked `adjust` at the schema boundary, and `scene inspect` surfaces it
 - `scene reference import <scene> <file>` (US-001–US-004, #54): normalize a local PNG, JPEG, or WebP image to the exact 1280×720 PNG profile, store the copy inside the Scene bundle, and associate it atomically — `--source` records provenance as `reference.source`
 - Non-16:9 input is refused before anything is written (an unstated subjective crop or a distortion is never chosen); failed imports leave the previous Scene and its associated files untouched
 
