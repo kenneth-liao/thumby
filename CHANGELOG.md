@@ -14,6 +14,7 @@
 
 ### Changed
 
+- The mask-CSS declarations for the masked `adjust` and `tint` overlays build from one shared `maskCss` helper (#67) — markup bytes unchanged
 - Model selection for typed-Reference Jobs reads one registry capability source (#53, #65): gpt-image is qualified reference-capable; an explicitly incompatible selection (registry key or raw gateway id) is refused before any spend and lists every qualified choice; recorded raw gateway ids that name a registered model rerun qualified; a reference run on a text-only rate records its run cost as unknown with a basis warning
 
 - The image-kind Generation Job request shape has one home: `buildImageRequestArgs` in `src/generate.ts`, used by both production generation and the TEST-012 qualification harness (#52, #64). The harness now takes only image-kind models, publishes evidence through a single redacting and field-whitelisting serializer, roots its artifacts at the repo's gitignored `out/`, bounds every billing lookup with partial evidence persisted once the paid call settles, and records only per-generation billing as an exact per-call cost

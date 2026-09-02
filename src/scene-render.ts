@@ -187,6 +187,7 @@ function imageMarkup(
     `</div>`
   );
 }
+
 /**
  * The CSS mask-size that makes a mask track the same geometry object-fit
  * gives the layer's img — same intrinsic image pair (mask dimensions equal
@@ -194,6 +195,12 @@ function imageMarkup(
  */
 function maskSizeFor(fit: "cover" | "contain" | "fill" | "none"): string {
   return fit === "fill" ? "100% 100%" : fit === "none" ? "auto" : fit;
+}
+
+/** One mask-* declaration, standard then -webkit- — Chromium supports both, and
+ *  the code then says what the schema and README say (`mask-image`). */
+function maskCss(prop: string, value: string): string {
+  return `${prop}:${value};-webkit-${prop}:${value};`;
 }
 
 /**
@@ -217,16 +224,12 @@ function tintMarkup(
   const pos = box
     ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
     : `left:0;top:0;width:100%;height:100%;`;
-  // Standard mask-* first, -webkit- alongside — Chromium supports both, and
-  // the code then says what the schema and README say (`mask-image`).
-  const mask = (prop: string, value: string) =>
-    `${prop}:${value};-webkit-${prop}:${value};`;
   return (
     `<div style="position:absolute;${pos}background:${layer.tint};` +
-    mask("mask-image", `url('${uri}')`) +
-    mask("mask-size", maskSize) +
-    mask("mask-position", "center") +
-    mask("mask-repeat", "no-repeat") +
+    maskCss("mask-image", `url('${uri}')`) +
+    maskCss("mask-size", maskSize) +
+    maskCss("mask-position", "center") +
+    maskCss("mask-repeat", "no-repeat") +
     `"></div>`
   );
 }
@@ -255,16 +258,13 @@ function adjustOverlayMarkup(
   const pos = box
     ? `left:${box.x}px;top:${box.y}px;width:${box.width}px;height:${box.height}px;`
     : `left:0;top:0;width:100%;height:100%;`;
-  // Standard mask-* first, -webkit- alongside — Chromium supports both, and
-  // the code then says what the schema and README say (`mask-image`).
-  const mask = (prop: string, value: string) =>
-    `${prop}:${value};-webkit-${prop}:${value};`;
+  // Standard mask-* first, -webkit- alongside — see maskCss.
   return (
     `<div style="position:absolute;${pos}background:${layer.adjust.color};` +
-    mask("mask-image", `url('${maskUri}')`) +
-    mask("mask-size", maskSize) +
-    mask("mask-position", "center") +
-    mask("mask-repeat", "no-repeat") +
+    maskCss("mask-image", `url('${maskUri}')`) +
+    maskCss("mask-size", maskSize) +
+    maskCss("mask-position", "center") +
+    maskCss("mask-repeat", "no-repeat") +
     `mix-blend-mode:color;"></div>`
   );
 }
