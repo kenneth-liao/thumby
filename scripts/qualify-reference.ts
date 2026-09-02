@@ -4,40 +4,62 @@
  * unit suite — this spends money, so it is run by hand, once, and its
  * evidence is recorded on the qualification ticket.
  *
- * What it exercises: the exact image-kind-with-references call shape
- * Generation Jobs use (src/generate.ts `runGeneration`, image branch) —
+ * What it exercises: the image-kind-with-references call shape Generation
+ * Jobs use, built by the SAME constructor production uses —
+ * `buildImageRequestArgs` (src/generate.ts), so the harness cannot certify a
+ * call shape production no longer takes:
  *
- *     generateImage({ model: <registry id>, prompt: { text, images: [file bytes] }, size: "1536x864" })
+ *     generateImage({ model: <registry id>, prompt: { text, images: [file bytes] }, size })
  *
  * …WITHOUT Thumby's `supportsRef` preflight, which is the claim under test.
  * Any failure below is therefore provider/SDK-side, never a Thumby preflight
  * rejection. (The image-kind call shape has no typed-role channel; the
- * reference travels as raw bytes, exactly as `refBytes` sends it.)
+ * reference travels as raw bytes, exactly as production sends them.)
+ *
+ * Model boundary (INT-1): image-kind models only. Multimodal (Gemini) models
+ * qualify through a different canonical shape — generateText with message
+ * parts — which this harness does not exercise; it refuses them loudly before
+ * any spend rather than produce a false qualification. Both image sizing
+ * variants (explicit size and 16:9 aspectRatio) are covered through the
+ * shared builder.
  *
  * Spend contract: exactly ONE generateImage call — maxRetries 0, one image,
  * no loop, no retry on any later lookup failure. The AbortSignal.timeout is a
  * client-side bound only; it is not part of the provider request shape.
  *
- * Publication contract: the evidence blob contains only the measured billing
- * deltas, non-secret request/generation identifiers, provider warnings,
- * token usage, and error status/body needed for attribution. Absolute
- * Gateway balances, authorization material, full response headers, and
- * unfiltered provider metadata are never emitted. Candidates and evidence
- * are written only under the gitignored out/ tree.
+ * Billing contract (INT-3): the only exact per-call cost is the per-generation
+ * billing record (gateway.getGenerationInfo). Account-wide credit deltas are
+ * recorded only as a labeled, explicitly non-exclusive cross-check —
+ * concurrent Gateway activity can inflate them, so they never become costUsd.
+ *
+ * Publication contract (PROD-1): evidence leaves the box through exactly one
+ * serializer (publishedJson) — every string passes credential redaction for
+ * each supported Gateway auth source (AI_GATEWAY_API_KEY, VERCEL_OIDC_TOKEN)
+ * and a length cap; warnings and errors pass strict field whitelists before
+ * serialization; the local reference path is never recorded. Absolute
+ * Gateway balances are never emitted. Artifacts stay under the repo-rooted,
+ * gitignored out/ tree regardless of the caller's cwd (PROD-2), and a partial
+ * record is persisted the moment the paid call settles, then enriched (PROD-3).
  *
  * Usage: bun scripts/qualify-reference.ts <model-key|gateway-id> <reference-image>
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { generateImage, gateway, type Warning } from "ai";
+import { generateImage, gateway } from "ai";
 import { resolveModel } from "../src/models.js";
+import { buildImageRequestArgs } from "../src/generate.js";
 
 /** Client-side wall-clock bound for the single generation call. */
 const CALL_TIMEOUT_MS = 180_000;
+/** Wall-clock bound for every billing/metadata lookup (PROD-3). */
+const LOOKUP_TIMEOUT_MS = 15_000;
+/** Length cap applied to every published string at the boundary (PROD-1). */
+const MAX_PUBLISHED_STRING = 2000;
 
-/** The one call shape under test — mirrors runGeneration's image branch. */
-const SIZE = "1536x864"; // LANDSCAPE_SIZE in generate.ts; OpenAI requires /16
+/** Repo-rooted artifact home — independent of the caller's cwd (PROD-2). */
+const REPO_ROOT = path.resolve(import.meta.dir, "..");
+const OUT_DIR = path.join(REPO_ROOT, "out", "qualify-reference");
 
 const PROMPT = [
   "Simplified, recognizable representation of the referenced application window:",
@@ -46,28 +68,91 @@ const PROMPT = [
   "Style: high contrast, clean readable silhouette at small sizes.",
 ].join(" ");
 
-/** Response headers safe to publish — non-secret request identifiers only. */
-const HEADER_ID_ALLOWLIST = [/^x-request-id$/i, /^x-vercel-id$/i, /^cf-ray$/i];
+// --- the one publication boundary (PROD-1) -------------------------------------
 
-// --- redaction ---------------------------------------------------------------
-
-const KEY = process.env.AI_GATEWAY_API_KEY;
-
-/** Defense in depth: no emitted string may ever contain the auth material. */
-function redact(value: string): string {
-  return KEY && value.includes(KEY) ? value.replaceAll(KEY, "<redacted>") : value;
+/**
+ * Every supported Gateway credential source. The SDK accepts an API key or a
+ * Vercel OIDC token; both env values are redacted wherever they appear.
+ */
+export function secretValues(): string[] {
+  return [process.env.AI_GATEWAY_API_KEY, process.env.VERCEL_OIDC_TOKEN].filter(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
 }
 
-function redactDeep(value: unknown): unknown {
-  if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map(redactDeep);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v)]));
+function redactAll(value: string): string {
+  let out = value;
+  for (const secret of secretValues()) out = out.replaceAll(secret, "<redacted>");
+  return out;
+}
+
+/**
+ * The single publication boundary: stdout, evidence files — every emitted
+ * byte passes through here exactly once. Every string value in the tree is
+ * credential-redacted then length-capped; nothing can bypass it because this
+ * is the only serializer the harness has.
+ */
+export function publishedJson(value: unknown): string {
+  return JSON.stringify(
+    value,
+    (_key, v) => (typeof v === "string" ? redactAll(v).slice(0, MAX_PUBLISHED_STRING) : v),
+    2,
+  );
+}
+
+/** Strict warning whitelist: the AI SDK warning fields, nothing else. */
+export function publishableWarning(w: unknown): Record<string, string> {
+  const o = w as Record<string, unknown> | undefined;
+  const out: Record<string, string> = {};
+  for (const field of ["type", "feature", "setting", "message", "details"] as const) {
+    const v = o?.[field];
+    if (typeof v === "string") out[field] = v;
   }
-  return value;
+  return out;
 }
 
-// --- emission whitelists ------------------------------------------------------
+/**
+ * Strict error context: the fields needed to attribute a rejection to its
+ * layer (SDK vs gateway vs upstream), plus the gateway error body's four
+ * schema fields. A request echo or any other body content never leaves.
+ */
+export function publishableError(err: unknown): Record<string, unknown> {
+  const e = err as {
+    name?: string;
+    message?: string;
+    type?: string;
+    statusCode?: number | string;
+    generationId?: string;
+    response?: unknown;
+    responseBody?: unknown;
+  };
+  const bodySource = e.response ?? e.responseBody;
+  const rawBody =
+    bodySource && typeof bodySource === "object" && "error" in (bodySource as object)
+      ? ((bodySource as { error: Record<string, unknown> | undefined }).error ?? {})
+      : {};
+  const errorBody: Record<string, unknown> = {};
+  for (const field of ["message", "type", "code", "param"] as const) {
+    const v = rawBody[field];
+    if (typeof v === "string" || typeof v === "number") errorBody[field] = v;
+  }
+  const out: Record<string, unknown> = {
+    name: e?.name,
+    type: e?.type,
+    statusCode: e?.statusCode,
+    generationId: e?.generationId,
+  };
+  if (typeof e?.message === "string") out.message = e.message;
+  if (Object.keys(errorBody).length > 0) out.errorBody = errorBody;
+  return out;
+}
+
+/** AI SDK warnings are objects; flatten to the same one-line form as generate.ts. */
+function describeWarning(model: string, w: unknown): string {
+  const o = w as { type?: string; feature?: string; setting?: string; details?: string; message?: string };
+  const what = o?.feature ?? o?.setting ?? o?.type ?? "setting";
+  return `${model}: ${o?.details ?? o?.message ?? `unsupported ${what}`}`;
+}
 
 /** Only provider-metadata fields that name a generation may pass. */
 function generationIdentifiers(
@@ -82,56 +167,28 @@ function generationIdentifiers(
   );
 }
 
-function safeRequestIds(headers: Record<string, string> | undefined): Record<string, string> {
-  if (!headers) return {};
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => HEADER_ID_ALLOWLIST.some((re) => re.test(name))),
-  );
+function safeRequestIds(headers: Record<string, string> | undefined): string[] {
+  if (!headers) return [];
+  return Object.entries(headers)
+    .filter(([name]) => /^(x-request-id|x-vercel-id|cf-ray)$/i.test(name))
+    .map(([, value]) => value);
 }
 
-/** AI SDK warnings are objects; flatten to the same one-line form as generate.ts. */
-function describeWarning(model: string, w: Warning): string {
-  const o = w as { type?: string; feature?: string; setting?: string; details?: string; message?: string };
-  const what = o?.feature ?? o?.setting ?? o?.type ?? "setting";
-  return redact(`${model}: ${o?.details ?? o?.message ?? `unsupported ${what}`}`);
+// --- bounded lookups (PROD-3) ----------------------------------------------------
+
+/** Bound any billing/metadata lookup; a hang must not strand paid evidence. */
+function bounded<T>(label: string, p: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${LOOKUP_TIMEOUT_MS} ms`)),
+      LOOKUP_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Whitelisted error context: what layer rejected, with attribution ids. */
-function describeError(err: unknown): Record<string, unknown> {
-  const e = err as {
-    name?: string;
-    message?: string;
-    type?: string;
-    statusCode?: number | string;
-    generationId?: string;
-    response?: unknown;
-    responseBody?: unknown;
-  };
-  const bodySource = e.response ?? e.responseBody;
-  // Only the error payload (status/type/message/code) leaves the box — never
-  // a request echo or any other unfiltered body content.
-  let errorBody: unknown;
-  if (bodySource && typeof bodySource === "object" && "error" in (bodySource as object)) {
-    errorBody = (bodySource as { error: unknown }).error;
-  }
-  return {
-    name: e?.name,
-    type: e?.type,
-    statusCode: e?.statusCode,
-    generationId: e?.generationId,
-    message: e?.message == null ? undefined : redact(e.message),
-    errorBody: redactDeep(truncate(errorBody)),
-  };
-}
-
-function truncate(value: unknown, max = 2000): unknown {
-  if (value === undefined) return undefined;
-  const json = JSON.stringify(value);
-  if (json === undefined || json.length <= max) return value;
-  return `${json.slice(0, max)}…(truncated)`;
-}
-
-// --- billing ------------------------------------------------------------------
+// --- billing (INT-3) --------------------------------------------------------------
 
 function parseUsd(v: string | undefined): number | undefined {
   if (v === undefined) return undefined;
@@ -147,6 +204,27 @@ function measuredDelta(after: string | undefined, before: string | undefined): n
   return a === undefined || b === undefined ? undefined : round6(a - b);
 }
 
+// --- durable artifacts (PROD-2) ----------------------------------------------------
+
+/** The settled candidate, persisted beside the evidence exactly once. */
+let settledCandidate: { bytes: Uint8Array; mediaType: string } | undefined;
+
+/**
+ * Write the evidence record through the one publication boundary, under the
+ * repo-rooted gitignored out/ tree regardless of the caller's cwd (PROD-2).
+ * One stem per run: the post-call enrichment overwrites the partial record.
+ */
+async function writeEvidence(evidence: Record<string, unknown>, stem: string): Promise<void> {
+  await mkdir(OUT_DIR, { recursive: true });
+  const file = path.join(OUT_DIR, `${stem}.json`);
+  await writeFile(file, publishedJson(evidence) + "\n");
+  if (settledCandidate) {
+    const ext = settledCandidate.mediaType.split("/")[1] ?? "png";
+    await writeFile(path.join(OUT_DIR, `${stem}.${ext}`), settledCandidate.bytes);
+  }
+  evidence.evidenceFile = path.relative(REPO_ROOT, file);
+}
+
 // --- the harness ----------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -157,8 +235,21 @@ async function main(): Promise<void> {
   }
 
   const spec = resolveModel(modelArg); // registry is the single source of truth
+  if (spec.kind !== "image") {
+    // INT-1 boundary: refuse a shape this harness does not exercise — a
+    // multimodal run here would "qualify" through a path Generation Jobs
+    // never take. Nothing has been sent; no spend.
+    console.error(
+      `Model "${spec.id}" is ${spec.kind}-kind: reference qualification for multimodal models runs ` +
+        `through generateText message parts, a call shape this harness does not exercise. ` +
+        `Nothing was sent; no spend.`,
+    );
+    process.exit(1);
+  }
+
   const refBytes = await readFile(refPath); // throws before any spend if unreadable
   const refHash = createHash("sha256").update(refBytes).digest("hex");
+  const requestArgs = buildImageRequestArgs(spec, PROMPT, [refBytes]);
 
   const evidence: Record<string, unknown> = {
     ranAt: new Date().toISOString(),
@@ -166,11 +257,15 @@ async function main(): Promise<void> {
     requestedModel: modelArg,
     resolvedModelId: spec.id, // the exact gateway model id sent
     callShape:
-      `generateImage({ model: "${spec.id}", prompt: { text, images: [<file bytes>] }, size: "${SIZE}" }) ` +
-      "via the AI SDK default Gateway provider, maxRetries 0, n=1 — the image-kind-with-refs shape of " +
-      "runGeneration (src/generate.ts) WITHOUT Thumby's supportsRef preflight: that flag is the claim under test, " +
-      "so any failure is provider/SDK-side, never a Thumby preflight rejection",
-    reference: { path: refPath, sha256: refHash, bytes: refBytes.length },
+      "generateImage(<buildImageRequestArgs>) — the image-kind-with-refs request constructor shared with " +
+      "production runGeneration (src/generate.ts), via the AI SDK default Gateway provider, maxRetries 0, n=1, " +
+      "WITHOUT Thumby's supportsRef preflight: that flag is the claim under test, so any failure is " +
+      "provider/SDK-side, never a Thumby preflight rejection",
+    callShapeBoundary:
+      spec.sizing === "size"
+        ? "image-kind, explicit size variant (1536x864)"
+        : "image-kind, 16:9 aspectRatio variant",
+    reference: { sha256: refHash, bytes: refBytes.length }, // identity only — the local path never leaves the box
     promptText: PROMPT,
     abortTimeoutMs: CALL_TIMEOUT_MS,
   };
@@ -178,18 +273,17 @@ async function main(): Promise<void> {
   // Credits snapshot BEFORE — never blocks or retries generation on failure.
   let creditsBefore: { balance: string; totalUsed: string } | undefined;
   try {
-    creditsBefore = await gateway.getCredits();
+    creditsBefore = await bounded("pre-call credits lookup", gateway.getCredits());
   } catch (err) {
-    evidence.lookupNotes = [`pre-call credits lookup failed (generation proceeds regardless): ${(err as Error).message}`];
+    evidence.lookupNotes = [
+      `pre-call credits lookup failed (generation proceeds regardless): ${(err as Error).message}`,
+    ];
   }
 
   // The one authorized Gateway request. maxRetries: 0 is what makes it one.
-  let candidate: { bytes: Uint8Array; mediaType: string } | undefined;
   try {
     const result = await generateImage({
-      model: spec.id,
-      prompt: { text: PROMPT, images: [refBytes] },
-      size: SIZE,
+      ...requestArgs,
       maxRetries: 0,
       abortSignal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
@@ -199,54 +293,54 @@ async function main(): Promise<void> {
     const bytes = Buffer.from(image.base64, "base64");
 
     evidence.outcome = "success";
-    evidence.warnings = redactDeep(result.warnings) as Warning[]; // TEST-012: provider warnings, raw shape
+    evidence.warnings = result.warnings.map(publishableWarning); // TEST-012: provider warnings, whitelisted
     evidence.warningsFlat = result.warnings.map((w) => describeWarning(spec.id, w));
-    evidence.usage = result.usage;
+    evidence.usage = {
+      inputTokens: result.usage?.inputTokens,
+      outputTokens: result.usage?.outputTokens,
+      totalTokens: result.usage?.totalTokens,
+    };
     evidence.generationIdentifiers = generationIdentifiers(
       result.providerMetadata as unknown as Record<string, Record<string, unknown>> | undefined,
     );
-    evidence.requestIds = [
-      ...new Set(result.responses.flatMap((r) => Object.values(safeRequestIds(r.headers)))),
-    ];
-    evidence.candidate = { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, mediaType: image.mediaType };
-    candidate = { bytes, mediaType: image.mediaType ?? "image/png" };
+    evidence.requestIds = [...new Set(result.responses.flatMap((r) => safeRequestIds(r.headers)))];
+    evidence.candidate = {
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.length,
+      mediaType: image.mediaType,
+    };
+    settledCandidate = { bytes, mediaType: image.mediaType ?? "image/png" };
   } catch (err) {
     evidence.outcome = "rejected";
     evidence.errorLayer = "provider/gateway (Thumby preflight not in the call path)";
-    evidence.error = describeError(err);
+    evidence.error = publishableError(err);
   }
 
-  // Billing AFTER the settled outcome — lookups never retrigger generation.
-  const lookupNotes: string[] = evidence.lookupNotes as string[] | undefined ?? [];
-  try {
-    const creditsAfter = await gateway.getCredits();
-    const totalUsedDelta = measuredDelta(creditsAfter.totalUsed, creditsBefore?.totalUsed);
-    const balanceDelta = measuredDelta(creditsAfter.balance, creditsBefore?.balance);
-    if (totalUsedDelta !== undefined) {
-      evidence.costUsd = totalUsedDelta; // measured, never estimated
-      evidence.costSource = "AI Gateway billing: delta of total_used across the call";
-    }
-    if (balanceDelta !== undefined) {
-      evidence.costCrossCheckUsd = balanceDelta; // balance delta, same measured basis
-    }
-    if (totalUsedDelta === undefined && balanceDelta === undefined) {
-      evidence.costMeasured = false;
-      lookupNotes.push("credits lookups returned no parseable totals — cost not measured, not invented");
-    }
-  } catch (err) {
-    evidence.costMeasured = false;
-    lookupNotes.push(`post-call credits lookup failed: ${(err as Error).message}`);
-  }
+  // Persist partial evidence the moment the paid call settles (PROD-3): even
+  // if every lookup below hung, the outcome, warnings/error context, and
+  // generation identifiers are already durably on disk under out/.
+  evidence.billingPending = true;
+  const stem = `${spec.id.replace(/[^a-z0-9.-]+/gi, "-")}-${Date.now()}`;
+  await writeEvidence(evidence, stem);
 
-  // Per-generation billing record — primary evidence when an id is available.
+  // Billing AFTER the settled outcome — bounded, and never retriggering
+  // generation (PROD-3 / spend contract).
+  const lookupNotes: string[] = (evidence.lookupNotes as string[] | undefined) ?? [];
+  const billingWindow = {
+    startedAt: creditsBefore ? evidence.ranAt : undefined,
+    endedAt: new Date().toISOString(),
+  };
+
+  // The only exact per-call cost: the per-generation billing record (INT-3).
   const genId = (evidence.generationIdentifiers as Record<string, string> | undefined)?.generationId ??
     (evidence.error as Record<string, unknown> | undefined)?.generationId;
   if (typeof genId === "string" && genId.startsWith("gen_")) {
     try {
-      const info = await gateway.getGenerationInfo({ id: genId });
+      const info = await bounded(`generation-info lookup for ${genId}`, gateway.getGenerationInfo({ id: genId }));
       evidence.costUsd = info.totalCost; // real billed cost for THIS generation
-      evidence.costSource = `AI Gateway billing: generation ${genId} total_cost`;
-      evidence.generationInfo = redactDeep({
+      evidence.costMeasured = true;
+      evidence.costBasis = `per-generation billing record ${genId} (exact, exclusive to this call)`;
+      evidence.generationInfo = {
         id: info.id,
         model: info.model,
         providerName: info.providerName,
@@ -255,32 +349,52 @@ async function main(): Promise<void> {
         completionTokens: info.completionTokens,
         latencyMs: info.latency,
         generationTimeMs: info.generationTime,
-      }) as Record<string, unknown>;
+      };
     } catch (err) {
       lookupNotes.push(`generation-info lookup for ${genId} failed: ${(err as Error).message}`);
     }
   }
-  if (lookupNotes.length) evidence.lookupNotes = lookupNotes;
-  // costUsd is only ever assigned from measured billing records (deltas or a
-  // per-generation total_cost) — its presence therefore marks the cost measured.
-  if (evidence.costUsd !== undefined) evidence.costMeasured = true;
 
-  // Durable artifacts live only under the gitignored out/ tree.
-  const dir = "out/qualify-reference";
-  await mkdir(dir, { recursive: true });
-  const stem = `${spec.id.replace(/[^a-z0-9.-]+/gi, "-")}-${Date.now()}`;
-  const evidenceFile = path.join(dir, `${stem}.json`);
-  await writeFile(evidenceFile, JSON.stringify(evidence, null, 2) + "\n");
-  if (candidate) {
-    await writeFile(path.join(dir, `${stem}.${candidate.mediaType.split("/")[1] ?? "png"}`), candidate.bytes);
+  // Account-wide credit deltas are NOT a per-call cost (INT-3): recorded only
+  // as a labeled, explicitly non-exclusive cross-check window.
+  try {
+    const creditsAfter = await bounded("post-call credits lookup", gateway.getCredits());
+    const totalUsedDelta = measuredDelta(creditsAfter.totalUsed, creditsBefore?.totalUsed);
+    const balanceDelta = measuredDelta(creditsAfter.balance, creditsBefore?.balance);
+    if (totalUsedDelta !== undefined || balanceDelta !== undefined) {
+      evidence.accountDelta = {
+        basis:
+          "account-wide credit deltas across the call window — NOT exclusive; concurrent Gateway activity would inflate them",
+        totalUsedDeltaUsd: totalUsedDelta,
+        balanceDeltaUsd: balanceDelta,
+        window: billingWindow,
+      };
+    } else {
+      lookupNotes.push("credits lookups returned no parseable totals — no cost recorded, none invented");
+    }
+  } catch (err) {
+    lookupNotes.push(`post-call credits lookup failed: ${(err as Error).message}`);
   }
-  evidence.evidenceFile = evidenceFile;
 
-  console.log(JSON.stringify(evidence, null, 2));
+  if (!evidence.costMeasured) {
+    // Per-call cost is unknown without the per-generation record — say so
+    // rather than attribute an account delta to this call (INT-3).
+    evidence.costMeasured = false;
+    evidence.costNote =
+      "no per-generation billing record available — per-call cost not measured, not invented (see accountDelta for the labeled account-window cross-check)";
+  }
+  if (lookupNotes.length) evidence.lookupNotes = lookupNotes;
+
+  delete evidence.billingPending;
+  await writeEvidence(evidence, stem); // enriched final record, same stem
+
+  console.log(publishedJson(evidence));
   process.exit(evidence.outcome === "success" ? 0 : 2);
 }
 
-main().catch((err: Error) => {
-  console.error(redact(err.stack ?? err.message));
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((err: Error) => {
+    console.error(redactAll(err.stack ?? err.message));
+    process.exit(1);
+  });
+}

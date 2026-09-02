@@ -215,6 +215,42 @@ export interface GenerateCreatorOptions {
  */
 const LANDSCAPE_SIZE = "1536x864" as const;
 
+/**
+ * The one home of the image-kind provider request shape: the registry-resolved
+ * model id, reference adaptation (raw bytes in GenerateImagePrompt.images), and
+ * the sizing rule (explicit pixel size for models that reject aspectRatio,
+ * 16:9 otherwise). Production generation and the TEST-012 qualification
+ * harness both build their request through this function, so the harness can
+ * never certify a call shape production no longer takes. Image-branch only by
+ * construction: a multimodal model has no image request to build — it takes
+ * generateText with message parts.
+ */
+export function buildImageRequestArgs(
+  spec: ModelSpec,
+  prompt: string,
+  refBytes: Uint8Array[],
+): {
+  model: string;
+  prompt: string | { text: string; images: Uint8Array[] };
+  size?: `${number}x${number}`;
+  aspectRatio?: "16:9";
+} {
+  if (spec.kind !== "image") {
+    throw new Error(
+      `buildImageRequestArgs is the image-kind call shape — "${spec.id}" is ${spec.kind} and takes generateText with message parts, not generateImage`,
+    );
+  }
+  return {
+    model: spec.id,
+    ...(refBytes.length
+      ? { prompt: { text: prompt, images: refBytes } }
+      : { prompt }),
+    ...(spec.sizing === "size"
+      ? { size: LANDSCAPE_SIZE }
+      : { aspectRatio: "16:9" as const }),
+  };
+}
+
 export interface GenerateResult {
   plates: GeneratedPlate[];
   warnings: string[];
@@ -293,15 +329,9 @@ async function runGeneration(
         };
       }
 
-      const result = await generateImage({
-        model: spec.id,
-        ...(refs.length
-          ? { prompt: { text: prompt, images: await refBytes(refs) } }
-          : { prompt }),
-        ...(spec.sizing === "size"
-          ? { size: LANDSCAPE_SIZE }
-          : { aspectRatio: "16:9" as const }),
-      });
+      const result = await generateImage(
+        buildImageRequestArgs(spec, prompt, await refBytes(refs)),
+      );
       warnings.push(...result.warnings.map((w) => describeWarning(spec.id, w)));
       const image = result.images[0];
       if (!image) throw new Error(`${spec.id} returned no image.`);
