@@ -706,8 +706,12 @@ it is a review artifact, not a reproducible Render.
 
 `scene reference import <scene.json> <file>` is one normalization boundary
 plus one atomic transaction (DEC-001..004), serialized per Scene by a lock
-file (`<scene>.lock` — leave it in place: it relocates with the bundle, and a
-crashed import's lock is recovered automatically). Supported input is
+file (`<scene>.lock` — it relocates with the bundle). On contention a writer
+waits only to a bounded timeout, then fails with the retained lock path
+named: a crashed holder's lock requires explicit operator cleanup — it is
+never stolen automatically. Ownership is a unique token, and release removes
+the lock only when it is still provably ours, so an old holder can never
+remove a successor's lock. Supported input is
 exactly a regular local **PNG, JPEG, or WebP** file — anything else is
 refused with a convert-locally hint, never handed to a decoder blind. The
 input may live anywhere; it is external source material. Ingestion is
@@ -741,11 +745,20 @@ The transaction validates the complete resulting Scene through the same gate
 as `scene validate` before the Scene file is replaced, and every write lands
 through a temp file + rename. Immediately before commit, the Scene's current
 bytes are compared to the bytes the import first read — an intervening edit
-fails closed. Any failure — missing or unreadable input, refused
-normalization, failed validation, a changed Scene, a failed commit — rolls
-the new copy back and leaves the previous Scene and its associated files
-byte-identical and usable; a rollback whose removal fails is reported as a
-second error naming the retained path.
+fails closed (the lock serializes participating writers; the comparison is
+the defense against non-participating external edits). **Every failure after
+the destination is reserved — a partial stored-file write included — flows
+through the owned rollback path**: the reserved copy is removed (only that
+path — the reservation is the ownership proof) and the failure is reported
+structurally, with a composite error naming the retained path when the
+removal itself fails. The previous Scene and its associated files stay
+byte-identical and usable.
+
+Every in-repo writer that can replace an existing Scene shares this same
+lock: `scene reference import` and `scene init --force` (over an existing
+file). A fresh `scene init` publication is an atomic no-replace create — a
+writer that appears between the existence check and publication gets a
+refusal, never a silent overwrite.
 
 The renderer never reads the reference, and the Render manifest never records
 it as a Render input (DEC-009): importing changes neither rendered pixels nor

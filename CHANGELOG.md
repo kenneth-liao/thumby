@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Reference Thumbnail import is race-safe and fail-closed: serialized per-Scene locking, exclusive no-replace storage, bounded PNG/JPEG/WebP intake, and surfaced rollback failures (#54, #66)
+- Reference Thumbnail import is race-safe and fail-closed: per-Scene locking with bounded contention (no automatic stale-lock stealing — operator cleanup), token-gated release that only ever removes its own lock, owned rollback covering everything after reservation including partial writes, shared by every replacing Scene writer (#54, #66)
 
 ### Changed
 

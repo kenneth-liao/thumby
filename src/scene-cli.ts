@@ -15,7 +15,7 @@
  * All operations are offline and local: loading, validating, inspecting, and
  * rendering never touch the network and never start a Generation Job.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "playwright";
@@ -36,7 +36,7 @@ import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { checkReference, diffPng, renderCompareSheet } from "./compare.js";
-import { importReference } from "./reference-import.js";
+import { importReference, acquireSceneLock, atomicReplace, atomicCreate } from "./reference-import.js";
 import {
   buildManifest,
   manifestPathFor,
@@ -181,6 +181,18 @@ Reference Thumbnail import (DEC-001..004)
   Asset identities — the manifest's scene byte identity (its sha256)
   necessarily changes, because the reference metadata is part of the Scene
   bytes.
+
+Scene replacement and the per-Scene lock
+  Every in-repo writer that can replace an existing Scene participates in the
+  same per-Scene transaction lock (<scene>.lock beside the scene's real path):
+  "scene reference import" and "scene init --force" (over an existing file).
+  On contention a writer waits only to the bounded timeout and then fails with
+  the retained lock path named — a crashed holder's lock requires explicit
+  operator cleanup, never automatic stealing. Fresh "scene init" publication
+  is an atomic no-replace create: a writer that appears between the existence
+  check and publication gets a refusal, never a silent overwrite. External
+  (non-participating) edits to the Scene are still caught by the import's
+  Scene-byte comparison immediately before commit.
 `;
 
 interface CliResult {
@@ -469,7 +481,7 @@ async function renderVariants(
 
 async function dispatch(
   args: string[],
-  deps?: { libraryRoot?: string },
+  deps?: { libraryRoot?: string; sceneLockTimeoutMs?: number },
 ): Promise<CliResult> {
   // The library root is a seam for tests (and a portable-library override):
   // every command reads the library through this one provider.
@@ -535,7 +547,54 @@ async function dispatch(
     if (!force && existsSync(output))
       return usageError(`--out "${outArg}" already exists — pass --force to overwrite it`);
     await mkdir(path.dirname(output), { recursive: true });
-    await writeFile(output, JSON.stringify(scene, null, 2) + "\n");
+    const sceneJson = () => Buffer.from(JSON.stringify(scene, null, 2) + "\n", "utf8");
+    if (force && existsSync(output)) {
+      // Replacing an existing Scene participates in the same per-Scene
+      // transaction lock every replacing writer shares: contention waits only
+      // to the bounded timeout and then fails with the retained lock path
+      // named — a crashed holder's lock requires explicit operator cleanup.
+      let real: string;
+      try {
+        real = await realpath(output);
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `cannot replace "${output}": ${(err as Error).message}` },
+        ]);
+      }
+      let lock;
+      try {
+        lock = await acquireSceneLock(`${real}.lock`, {
+          timeoutMs: deps?.sceneLockTimeoutMs,
+        });
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `"${output}" could not be locked for replacement: ${(err as Error).message}` },
+        ]);
+      }
+      try {
+        await atomicReplace(output, sceneJson());
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `could not write "${output}": ${(err as Error).message}` },
+        ]);
+      } finally {
+        await lock.release();
+      }
+    } else {
+      // A fresh Scene is published atomically and never replaces: `link` is
+      // the no-replace create, so a writer that appears between the
+      // existence check and publication gets EEXIST — a post-check write can
+      // never silently overwrite a Scene another writer just created.
+      try {
+        await atomicCreate(output, sceneJson());
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST")
+          return usageError(
+            `--out "${outArg}" was created by another writer just now — refusing to overwrite it`,
+          );
+        throw err;
+      }
+    }
     return ok({
       ok: true,
       output,
@@ -861,7 +920,11 @@ async function dispatch(
           `"scene reference import" takes <scene> <file> and at most one --source <text>`,
         );
     }
-    const result = await importReference(sceneArg, inputArg, { source, library });
+    const result = await importReference(sceneArg, inputArg, {
+      source,
+      library,
+      lockTimeoutMs: deps?.sceneLockTimeoutMs,
+    });
     if (!result.ok) return invalid(result.errors);
     return ok({
       ok: true,
@@ -1092,7 +1155,7 @@ export async function rerenderManifest(
  */
 export async function run(
   args: string[],
-  deps?: { libraryRoot?: string },
+  deps?: { libraryRoot?: string; sceneLockTimeoutMs?: number },
 ): Promise<CliResult> {
   const [cmd] = args;
   try {

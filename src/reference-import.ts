@@ -19,27 +19,36 @@
  *
  * The transaction is serialized per Scene by a filesystem-backed lock — an
  * exclusive-create file beside the scene's real path, so every alias of one
- * Scene file contends on one lock. A crashed holder's lock is stolen only
- * after a staleness deadline; the Scene byte comparison (step 6) is the
- * fail-closed backstop for any residual overlap. Inside the lock:
+ * Scene file contends on one lock. There is no age-based stealing: on
+ * contention the caller waits only to the bounded timeout and then fails with
+ * the retained lock path named for explicit operator cleanup. Ownership is a
+ * unique token, and release removes the lock only when it is still provably
+ * ours (token + held-inode identity), so an old holder can never remove a
+ * successor's lock. Inside the lock:
  *
  *   1. read + parse the Scene          — failures change nothing,
  *   2. ingest + normalize the input    — refusals happen before any write,
  *   3. reserve the stored path         — exclusive no-replace create; the
  *      create IS the free-name check, so a destination that appears after any
  *      earlier scan is skipped, never replaced. The reservation is the
- *      transaction's ownership proof: cleanup removes exactly this path and
+ *      transaction's ownership proof: rollback removes exactly this path and
  *      nothing else,
- *   4. write the normalized PNG        — into the reserved handle,
+ *   4. write the stored copy           — a partial or failed write flows
+ *      through the owned rollback path below,
  *   5. validate the resulting document — a failure unlinks the reservation,
  *   6. compare Scene bytes             — the Scene file's current bytes must
  *      equal the bytes read in step 1; an intervening edit fails closed,
- *   7. commit the Scene JSON           — temp + rename; a commit failure
- *      unlinks the reservation and leaves the previous Scene and its
- *      associated files byte-identical and usable.
+ *   7. commit the Scene JSON           — temp + rename, under the same lock as
+ *      every participating writer, so no participant can interleave between
+ *      the comparison and the replace. A commit failure unlinks the
+ *      reservation and leaves the previous Scene and its associated files
+ *      byte-identical and usable.
  *
- * Rollback is never silent (PROD-3): a failed removal is reported as a second,
- * actionable error naming the retained contained path and the remediation.
+ * Rollback is never silent (PROD-3): every failure after reservation — a
+ * partial stored-file write included — flows through the owned rollback path,
+ * which removes exactly the reserved path and reports a composite error
+ * naming the retained contained path and the remediation when the removal
+ * itself fails. Nothing escapes without the structured cleanup report.
  *
  * Provenance (DEC-003) is user-supplied free text recorded as `reference.source`.
  * It is never resolved as a path — the relocatable bundle gains no external
@@ -54,7 +63,7 @@
  * that is the Scene bytes changing, not the Render.
  */
 import { constants as fsConstants } from "node:fs";
-import { open as fsOpen, lstat, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { open as fsOpen, lstat, link, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type { Page } from "playwright";
@@ -70,22 +79,41 @@ const MAX_NAME_ATTEMPTS = 1000;
 
 /** How long a transaction waits for a contended Scene lock before refusing. */
 const LOCK_TIMEOUT_MS = 30_000;
-/** A lock older than this belongs to a crashed holder and is stolen. */
-const LOCK_STALE_MS = 120_000;
 const LOCK_POLL_MS = 50;
+
+export interface SceneLock {
+  /** The unique ownership token this holder wrote into the lock file. */
+  token: string;
+  /** Drop the lock — only this holder's own lock file is ever removed. */
+  release: () => Promise<void>;
+}
 
 /**
  * Acquire the Scene's transaction lock: an exclusive-create file beside the
- * scene's REAL path, so every alias of one Scene serializes on one lock. A
- * lock held past the staleness deadline belongs to a crashed process and is
- * stolen; the Scene byte comparison before commit is the fail-closed backstop
- * for any residual overlap. The returned release drops the lock — a release
- * that cannot remove the lock file self-heals through the same staleness
- * deadline, and the transaction's data guarantees (exclusive reservation,
- * Scene byte comparison) never depend on the release.
+ * scene's REAL path, so every alias of one Scene serializes on one lock.
+ *
+ * There is no age-based stealing: on contention the caller waits only to the
+ * bounded timeout and then fails, with the retained lock path named for
+ * explicit operator cleanup — a crashed holder's lock is never removed
+ * automatically.
+ *
+ * Ownership is a unique token written into the lock file, and release removes
+ * the lock only when it is still provably ours: the file's content must carry
+ * our token and the path must still resolve to the inode we created (held
+ * open on our handle). An old holder therefore cannot remove a successor's
+ * lock — the only way the lock file changes hands is explicit operator
+ * cleanup, after which the old holder's release is a no-op. The one residual
+ * window — an operator removing the lock inside the inode-check-to-unlink
+ * instant — requires external action concurrent with release, and its
+ * consequence is bounded: the Scene byte comparison and the no-replace
+ * reservation keep the data sound regardless of who holds the lock file.
  */
-async function acquireSceneLock(lockPath: string): Promise<() => Promise<void>> {
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+export async function acquireSceneLock(
+  lockPath: string,
+  opts?: { timeoutMs?: number },
+): Promise<SceneLock> {
+  const deadline = Date.now() + (opts?.timeoutMs ?? LOCK_TIMEOUT_MS);
+  const token = crypto.randomUUID();
   for (;;) {
     let fh: FileHandle;
     try {
@@ -94,26 +122,41 @@ async function acquireSceneLock(lockPath: string): Promise<() => Promise<void>> 
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       if (Date.now() >= deadline)
         throw new Error(
-          `another Reference Thumbnail import holds this Scene's lock ("${lockPath}") — ` +
-            `wait for it to finish, or if that process crashed, remove the lock file and re-run`,
+          `another transaction holds this Scene's lock ("${lockPath}") — it must finish first. ` +
+            `If that process crashed, remove the retained lock file explicitly (operator cleanup), then re-run.`,
         );
-      const holder = await stat(lockPath).catch(() => undefined);
-      if (holder && Date.now() - holder.mtimeMs > LOCK_STALE_MS)
-        await unlink(lockPath).catch(() => {});
       await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
       continue;
     }
-    await fh.write(`${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`);
-    await fh.close();
+    // The lock file carries this holder's unique token — the release proof.
+    await fh.write(`${JSON.stringify({ pid: process.pid, token })}\n`);
+    // The handle stays open: its inode identity is what release verifies.
+    const held = await fh.stat();
     let released = false;
-    return async () => {
-      if (released) return;
-      released = true;
-      await unlink(lockPath).catch(() => {
-        // A retained lock self-heals through the staleness deadline; the
-        // committed Scene is already complete and the next import's data
-        // guarantees hold either way.
-      });
+    return {
+      token,
+      release: async () => {
+        if (released) return;
+        released = true;
+        try {
+          const now = await stat(lockPath);
+          // Release ONLY the lock this transaction owns: the path must still
+          // resolve to the inode we created AND still carry our token — a
+          // successor's lock (possible only after explicit operator cleanup)
+          // is never removed by an old holder's release.
+          if (now.ino !== held.ino || now.dev !== held.dev) return;
+          const content = await readFile(lockPath).catch(() => undefined);
+          if (content === undefined || !content.toString("utf8").includes(token)) return;
+          await unlink(lockPath);
+        } catch {
+          // A retained lock is never silent to the next caller: the bounded
+          // wait's failure names this exact path. The transaction's data
+          // guarantees (exclusive reservation, Scene byte comparison) never
+          // depend on the release.
+        } finally {
+          await fh.close().catch(() => {});
+        }
+      },
     };
   }
 }
@@ -367,14 +410,32 @@ export interface ImportOptions {
    */
   readScene?: (file: string) => Promise<Buffer>;
   /**
+   * Fault-injection seam for the stored copy's write: production always writes
+   * the bounded chunks into the reserved handle. A throwing seam is the
+   * deterministic way to prove a partial stored-file write flows through the
+   * owned rollback path with its composite cleanup report.
+   */
+  writeStored?: (fh: FileHandle, bytes: Buffer) => Promise<void>;
+  /**
+   * How long to wait for a contended Scene lock before failing with the
+   * retained lock path named. Default: 30s. There is no age-based stealing —
+   * a crashed holder's lock requires explicit operator cleanup.
+   */
+  lockTimeoutMs?: number;
+  /**
    * Fault-injection seam for rollback removal: when set, the reserved copy's
    * removal goes through here. Production always unlinks the reservation.
    */
   removeStored?: (file: string) => Promise<void>;
 }
 
-/** Write bytes so an interrupted write can never leave a partial file at the target. */
-async function atomicWrite(file: string, bytes: Buffer): Promise<void> {
+/**
+ * Replace an existing file atomically: temp + rename inside the same
+ * directory, so an interrupted write never leaves partial bytes at the target.
+ * Callers that replace an existing Scene hold the Scene's transaction lock
+ * for the whole read-validate-compare-publish sequence.
+ */
+export async function atomicReplace(file: string, bytes: Buffer): Promise<void> {
   const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
     await writeFile(tmp, bytes);
@@ -383,6 +444,25 @@ async function atomicWrite(file: string, bytes: Buffer): Promise<void> {
     await unlink(tmp).catch(() => {});
     throw err;
   }
+}
+
+/**
+ * Publish a brand-new file with atomic no-replace semantics: the bytes land
+ * at a temp name, then `link` — whose target is created only if absent — is
+ * the publication. A concurrent creator wins the name and this caller gets
+ * EEXIST, so a post-check write can never silently overwrite a file another
+ * writer just created. The temp copy is always cleaned up.
+ */
+export async function atomicCreate(file: string, bytes: Buffer): Promise<void> {
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await writeFile(tmp, bytes);
+    await link(tmp, file);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
+  await unlink(tmp).catch(() => {});
 }
 
 /**
@@ -415,7 +495,8 @@ export async function importReference(
   }
   let releaseLock: () => Promise<void>;
   try {
-    releaseLock = await acquireSceneLock(`${realScene}.lock`);
+    const lock = await acquireSceneLock(`${realScene}.lock`, { timeoutMs: opts?.lockTimeoutMs });
+    releaseLock = lock.release;
   } catch (err) {
     return fail("scene", `the Scene could not be locked for this import: ${(err as Error).message}`);
   }
@@ -482,108 +563,142 @@ async function importTransaction(
     return fail("reference", (err as Error).message);
   }
 
-  // 4 — write the copy into the reserved handle, then release the fd. A write
-  // that cannot complete fails closed below (validation never runs).
-  try {
-    let written = 0;
-    while (written < png.length) {
-      const { bytesWritten } = await reserved.fh.write(png, written, png.length - written, written);
-      if (bytesWritten <= 0)
-        throw new Error(
-          `the stored copy could not be written (${written} of ${png.length} bytes)`,
-        );
-      written += bytesWritten;
-    }
-  } finally {
-    await reserved.fh.close().catch(() => {});
-  }
-
+  // From here to the end, the transaction owns the reservation: EVERY failure
+  // — a partial stored-file write, a rejected validation, a changed Scene, a
+  // failed commit, or anything unexpected — flows through this owned rollback
+  // path, which removes exactly the reserved path and reports a composite
+  // error when the removal itself fails (PROD-3). No exception escapes the
+  // transaction without that structured cleanup report.
   const removeStored = opts?.removeStored ?? ((file: string) => unlink(file));
+  const writeStored =
+    opts?.writeStored ??
+    (async (target: FileHandle, bytes: Buffer) => {
+      let written = 0;
+      while (written < bytes.length) {
+        const { bytesWritten } = await target.write(bytes, written, bytes.length - written, written);
+        if (bytesWritten <= 0)
+          throw new Error(`the stored copy could not be written (${written} of ${bytes.length} bytes)`);
+        written += bytesWritten;
+      }
+    });
   const rollback = async (errors: SceneError[]): Promise<ImportResult> => {
     const cleanup = await rollbackStored(reserved, removeStored);
     return { ok: false, errors: cleanup ? [...errors, cleanup] : errors };
   };
 
-  // 5 — the complete resulting document passes the existing validation gate
-  // before the Scene file changes. The reference is real review metadata at
-  // this point — the gate checks format, dimensions, and containment on disk.
-  const updated = {
-    ...(raw as Record<string, unknown>),
-    reference: {
-      path: reserved.name,
-      ...(opts?.source !== undefined ? { source: opts.source } : {}),
-    },
-  };
-  const gate = await loadScene(sceneDir, opts?.library ?? (() => scanLibrary(LIBRARY_ROOT)), updated);
-  let gateErrors: SceneError[] | undefined;
-  if (!gate.ok) gateErrors = gate.errors;
-  else {
-    const ref = await checkReference(sceneDir, gate.resolved.scene);
-    if (!ref.ok) gateErrors = ref.errors;
-  }
-  if (gateErrors) return rollback(gateErrors);
-
-  // 6 — Scene byte comparison: the file on disk must still be the bytes this
-  // import read in step 1. An intervening edit fails closed — the import
-  // never overwrites it — and the reservation rolls back.
-  let current: Buffer;
   try {
-    current = await readScene(scenePath);
-  } catch (err) {
-    return rollback([
-      {
-        path: "scene",
-        message:
-          `the Scene file could not be re-read before commit: ${(err as Error).message} — ` +
-          `the import fails closed and commits nothing; the previous Scene is unchanged.`,
-      },
-    ]);
-  }
-  if (!current.equals(sceneBytes))
-    return rollback([
-      {
-        path: "scene",
-        message:
-          `the Scene file changed after this import read it (${contentHash(sceneBytes).slice(0, 12)}… → ` +
-          `${contentHash(current).slice(0, 12)}…) — the import refuses to overwrite an intervening edit. ` +
-          `Nothing was committed; the previous Scene and its associated files are unchanged and usable. ` +
-          `Re-run the import on the current Scene.`,
-      },
-    ]);
+    // 4 — write the copy into the reserved handle, then release the fd. A
+    // partial or failed write flows through the owned rollback path below:
+    // the reservation is removed and the failure is reported structurally.
+    try {
+      await writeStored(reserved.fh, png);
+    } catch (err) {
+      return rollback([
+        {
+          path: "reference",
+          message:
+            `the stored copy could not be written: ${(err as Error).message}. ` +
+            `The previous Scene is unchanged and usable.`,
+        },
+      ]);
+    } finally {
+      await reserved.fh.close().catch(() => {});
+    }
 
-  // 7 — commit the Scene atomically. A commit failure rolls the new copy back
-  // and reports loudly: the previous Scene and its associated files are
-  // byte-identical and usable.
-  const json = Buffer.from(JSON.stringify(updated, null, 2) + "\n", "utf8");
-  try {
-    if (opts?.writeScene) await opts.writeScene(scenePath, json);
-    else await atomicWrite(scenePath, json);
-  } catch (err) {
-    return rollback([
-      {
-        path: "scene",
-        message:
-          `the Scene update could not be committed: ${(err as Error).message}. ` +
-          `The previous Scene and its Reference Thumbnail are unchanged and usable.`,
-      },
-    ]);
-  }
-
-  return {
-    ok: true,
-    imported: {
+    // 5 — the complete resulting document passes the existing validation gate
+    // before the Scene file changes. The reference is real review metadata at
+    // this point — the gate checks format, dimensions, and containment on disk.
+    const updated = {
+      ...(raw as Record<string, unknown>),
       reference: {
         path: reserved.name,
         ...(opts?.source !== undefined ? { source: opts.source } : {}),
       },
-      sceneFile: scenePath,
-      storedPath: reserved.path,
-      normalized: {
-        width: REFERENCE_WIDTH,
-        height: REFERENCE_HEIGHT,
-        bytes: png.length,
-        source: { width: outcome.sourceWidth, height: outcome.sourceHeight },
+    };
+    const gate = await loadScene(sceneDir, opts?.library ?? (() => scanLibrary(LIBRARY_ROOT)), updated);
+    let gateErrors: SceneError[] | undefined;
+    if (!gate.ok) gateErrors = gate.errors;
+    else {
+      const ref = await checkReference(sceneDir, gate.resolved.scene);
+      if (!ref.ok) gateErrors = ref.errors;
+    }
+    if (gateErrors) return rollback(gateErrors);
+
+    // 6 — Scene byte comparison: the file on disk must still be the bytes this
+    // import read in step 1. An intervening edit fails closed — the import
+    // never overwrites it — and the reservation rolls back.
+    let current: Buffer;
+    try {
+      current = await readScene(scenePath);
+    } catch (err) {
+      return rollback([
+        {
+          path: "scene",
+          message:
+            `the Scene file could not be re-read before commit: ${(err as Error).message} — ` +
+            `the import fails closed and commits nothing; the previous Scene is unchanged.`,
+        },
+      ]);
+    }
+    if (!current.equals(sceneBytes))
+      return rollback([
+        {
+          path: "scene",
+          message:
+            `the Scene file changed after this import read it (${contentHash(sceneBytes).slice(0, 12)}… → ` +
+            `${contentHash(current).slice(0, 12)}…) — the import refuses to overwrite an intervening edit. ` +
+            `Nothing was committed; the previous Scene and its associated files are unchanged and usable. ` +
+            `Re-run the import on the current Scene.`,
+        },
+      ]);
+
+    // 7 — commit the Scene atomically. A commit failure rolls the new copy
+    // back and reports loudly: the previous Scene and its associated files are
+    // byte-identical and usable.
+    const json = Buffer.from(JSON.stringify(updated, null, 2) + "\n", "utf8");
+    try {
+      if (opts?.writeScene) await opts.writeScene(scenePath, json);
+      else await atomicReplace(scenePath, json);
+    } catch (err) {
+      return rollback([
+        {
+          path: "scene",
+          message:
+            `the Scene update could not be committed: ${(err as Error).message}. ` +
+            `The previous Scene and its Reference Thumbnail are unchanged and usable.`,
+        },
+      ]);
+    }
+
+    return {
+      ok: true,
+      imported: {
+        reference: {
+          path: reserved.name,
+          ...(opts?.source !== undefined ? { source: opts.source } : {}),
+        },
+        sceneFile: scenePath,
+        storedPath: reserved.path,
+        normalized: {
+          width: REFERENCE_WIDTH,
+          height: REFERENCE_HEIGHT,
+          bytes: png.length,
+          source: { width: outcome.sourceWidth, height: outcome.sourceHeight },
+        },
       },
-    },
-  };
+    };
+  } catch (err) {
+    // The safety net of the owned rollback path: an unexpected failure after
+    // reservation (a crashed gate, an I/O surprise) still removes the
+    // reservation and lands in the structured error contract — nothing
+    // escapes without the promised cleanup.
+    return rollback([
+      {
+        path: "scene",
+        message:
+          `the import failed unexpectedly: ${(err as Error).message}. ` +
+          `The previous Scene is unchanged and usable.`,
+      },
+    ]);
+  }
 }

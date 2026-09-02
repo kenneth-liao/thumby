@@ -14,9 +14,10 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { realpath } from "node:fs/promises";
 import { decodePng, encodePngRgba, MAX_ENCODED_BYTES } from "../src/png.js";
 import { run as cliRun } from "../src/scene-cli.js";
-import { importReference } from "../src/reference-import.js";
+import { importReference, atomicReplace } from "../src/reference-import.js";
 import { readRasterMeta } from "../src/raster-meta.js";
 import { withRenderPage } from "../src/browser.js";
 import { chromium } from "playwright";
@@ -743,5 +744,230 @@ describe("scene reference import — serialized transaction", () => {
     expect(
       (await readdir(fix.projectRoot)).filter((f) => f.startsWith("huge-jpeg.reference")),
     ).toEqual([]);
+  }, 20000);
+
+  it("contention waits only to the bounded timeout, then fails with the retained lock path — no stealing", async () => {
+    const file = await sceneFileWith({}, "contended.json");
+    const realScene = await realpath(file);
+    const lockPath = `${realScene}.lock`;
+    // A foreign holder's lock, as another process would leave it.
+    await writeFile(lockPath, `${JSON.stringify({ pid: 999999, token: "foreign-token" })}\n`);
+    const input = path.join(fix.root, "shot-contended.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const sceneBefore = await readFile(file);
+
+    const result = await importReference(file, input, { lockTimeoutMs: 150 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.path).toBe("scene");
+      // The failure is actionable: the retained lock path is named, and
+      // operator cleanup — never automatic stealing — is the remedy.
+      expect(result.errors[0]!.message).toMatch(/holds this Scene's lock/);
+      expect(result.errors[0]!.message).toMatch(/contended\.json\.lock/);
+      expect(result.errors[0]!.message).toMatch(/remove the retained lock file explicitly/);
+    }
+    // The foreign lock was not stolen, and nothing was written.
+    expect(await readFile(lockPath, "utf8")).toMatch(/foreign-token/);
+    expect(await readFile(file)).toEqual(sceneBefore);
+    expect(
+      (await readdir(fix.projectRoot)).filter((f) => f.startsWith("contended.reference")),
+    ).toEqual([]);
+  }, 20000);
+
+  it("release removes only the lock its own token owns — an old holder never removes a successor's", async () => {
+    const file = await sceneFileWith({}, "oldholder.json");
+    const realScene = await realpath(file);
+    const lockPath = `${realScene}.lock`;
+    const input = path.join(fix.root, "shot-oldholder.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+
+    // Simulate explicit operator cleanup handing the lock to a successor
+    // while an old holder is still inside its transaction: the successor's
+    // token replaces the lock file's content mid-flight.
+    let reads = 0;
+    const result = await importReference(file, input, {
+      readScene: async (f) => {
+        if (reads++ === 0)
+          await writeFile(lockPath, `${JSON.stringify({ pid: 424242, token: "successor-token" })}\n`);
+        return readFile(f);
+      },
+    });
+    // The old holder's transaction completes normally.
+    expect(result.ok).toBe(true);
+    // Its release did NOT remove the successor's lock: the file survives,
+    // still carrying the successor's token.
+    const lockAfter = await readFile(lockPath, "utf8");
+    expect(lockAfter).toMatch(/successor-token/);
+  }, 20000);
+
+  it("a partial stored-file write flows through the owned rollback path — nothing escapes unreported", async () => {
+    const input = path.join(fix.root, "shot-partial.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "partial.json");
+    const sceneBefore = await readFile(file);
+
+    // Injectable partial-write failure: the reserved handle receives bytes,
+    // the write aborts mid-way, and the owned rollback path reports it.
+    const result = await importReference(file, input, {
+      writeStored: async (fh) => {
+        await fh.write(Buffer.from("partial bytes"));
+        throw new Error("injected mid-write failure");
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]!.path).toBe("reference");
+      expect(result.errors[0]!.message).toMatch(/injected mid-write failure/);
+      expect(result.errors[0]!.message).toMatch(/The previous Scene is unchanged and usable/);
+    }
+    // The reserved copy was rolled back; the Scene is untouched.
+    await expect(readFile(path.join(fix.projectRoot, "partial.reference.png"))).rejects.toThrow();
+    expect(await readFile(file)).toEqual(sceneBefore);
+  }, 20000);
+
+  it("a partial write whose rollback also fails is one composite error naming the retained path", async () => {
+    const input = path.join(fix.root, "shot-partial2.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "partial2.json");
+    const sceneBefore = await readFile(file);
+
+    const result = await importReference(file, input, {
+      writeStored: async (fh) => {
+        await fh.write(Buffer.from("partial bytes"));
+        throw new Error("injected mid-write failure");
+      },
+      removeStored: () => Promise.reject(new Error("injected removal failure")),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toHaveLength(2);
+      expect(result.errors[0]!.path).toBe("reference");
+      expect(result.errors[0]!.message).toMatch(/injected mid-write failure/);
+      expect(result.errors[1]!.path).toBe("reference");
+      expect(result.errors[1]!.message).toMatch(/partial2\.reference\.png/);
+      expect(result.errors[1]!.message).toMatch(/Delete that file, or re-import/);
+    }
+    // The retained copy is still on disk; the Scene is untouched.
+    expect(
+      (await readFile(path.join(fix.projectRoot, "partial2.reference.png"))).length,
+    ).toBeGreaterThan(0);
+    expect(await readFile(file)).toEqual(sceneBefore);
+  }, 20000);
+
+  it("init's fresh publication is a no-replace create — a post-check writer refuses instead of overwriting", async () => {
+    // init's containment root is the process cwd — scope the test to the
+    // project fixture and restore afterwards.
+    const cwd = process.cwd();
+    process.chdir(fix.projectRoot);
+    try {
+      const output = "fresh-init.json";
+      // Two concurrent inits to one brand-new path: the existence check
+      // passes for both (neither exists yet), and the atomic no-replace
+      // publication decides — exactly one winner, no silent overwrite.
+      const [a, b] = await Promise.all([
+        cliRun(["init", "blank", "--out", output]),
+        cliRun(["init", "blank", "--out", output]),
+      ]);
+      const codes = [a.exitCode, b.exitCode].sort();
+      expect(codes[0]).toBe(0);
+      expect(codes[1]).toBe(2); // the loser refuses — structured usage error
+      // The winner's file is a real Scene, and the loser never left partial
+      // bytes or a duplicate.
+      const { exitCode } = await cliRun(["validate", path.join(fix.projectRoot, output)]);
+      expect(exitCode).toBe(0);
+    } finally {
+      process.chdir(cwd);
+    }
+  }, 20000);
+
+  it("init --force over an existing Scene participates in the same per-Scene lock", async () => {
+    const cwd = process.cwd();
+    process.chdir(fix.projectRoot);
+    try {
+      const target = "init-replace.json";
+      const targetPath = await sceneFileWith({}, target);
+      const sceneBefore = await readFile(targetPath);
+      const realScene = await realpath(targetPath);
+      const lockPath = `${realScene}.lock`;
+      await writeFile(lockPath, `${JSON.stringify({ pid: 999999, token: "foreign-token" })}\n`);
+
+      const { exitCode, output } = await cliRun(["init", "blank", "--out", target, "--force"], {
+        sceneLockTimeoutMs: 150,
+      });
+      expect(exitCode).toBe(1);
+      const errors = (output as { errors: { path: string; message: string }[] }).errors;
+      expect(errors[0]!.message).toMatch(/could not be locked for replacement/);
+      expect(errors[0]!.message).toMatch(/init-replace\.json\.lock/);
+      expect(errors[0]!.message).toMatch(/remove the retained lock file explicitly/);
+      // The foreign lock was not stolen; the Scene bytes are untouched.
+      expect(await readFile(lockPath, "utf8")).toMatch(/foreign-token/);
+      expect(await readFile(targetPath)).toEqual(sceneBefore);
+    } finally {
+      process.chdir(cwd);
+    }
+  }, 20000);
+
+  it("a replacing writer cannot pass the shared lock while an import holds the compare-to-commit window", async () => {
+    const input = path.join(fix.root, "shot-window.png");
+    await writeFile(input, encodePngRgba(1280, 720, quadrants(1280, 720)));
+    const file = await sceneFileWith({}, "window.json");
+    const sceneBefore = await readFile(file);
+    const realScene = await realpath(file);
+    const lockPath = `${realScene}.lock`;
+
+    // Barrier seam (test-only; production never passes writeScene): the
+    // import pauses after its Scene-byte comparison, mid-commit, holding the
+    // lock. A replacing `scene init --force` must not pass the lock until
+    // the import commits and releases.
+    let atCommit!: () => void;
+    const reachedCommit = new Promise<void>((r) => (atCommit = r));
+    let releaseImport!: () => void;
+    const holdOpen = new Promise<void>((r) => (releaseImport = r));
+    const pending = importReference(file, input, {
+      writeScene: async (f, bytes) => {
+        atCommit();
+        await holdOpen;
+        await atomicReplace(f, bytes); // the import's real commit, after the barrier
+      },
+    });
+    await reachedCommit;
+
+    // The writer cannot pass the shared lock while the import holds it.
+    const cwd = process.cwd();
+    process.chdir(fix.projectRoot);
+    let init!: { exitCode: number; output: unknown };
+    try {
+      init = await cliRun(["init", "blank", "--out", "window.json", "--force"], {
+        sceneLockTimeoutMs: 300,
+      });
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(init.exitCode).toBe(1);
+    const errors = (init.output as { errors: { path: string; message: string }[] }).errors;
+    expect(errors[0]!.message).toMatch(/could not be locked for replacement/);
+    expect(errors[0]!.message).toMatch(/window\.json\.lock/);
+
+    // The import commits and releases; the lock file is cleaned up.
+    releaseImport();
+    const done = await pending;
+    expect(done.ok).toBe(true);
+    await expect(readFile(lockPath)).rejects.toThrow();
+    // Both exact outcomes: the import's association is what committed — the
+    // refused writer replaced nothing — and the stored copy is intact.
+    const scene = JSON.parse(await readFile(file, "utf8")) as {
+      reference?: { path: string };
+    };
+    expect(scene.reference).toEqual({ path: "window.reference.png" });
+    const stored = decodePng(await readFile(path.join(fix.projectRoot, "window.reference.png")));
+    expect(stored.width).toBe(1280);
+    expect(stored.height).toBe(720);
+    expect(await readFile(file)).not.toEqual(sceneBefore);
+    // Cleanup: no stray artifacts from the refused writer.
+    expect(
+      (await readdir(fix.projectRoot))
+        .filter((f) => f.startsWith("window"))
+        .sort(),
+    ).toEqual(["window.json", "window.reference.png"]);
   }, 20000);
 });
