@@ -326,8 +326,13 @@ const CLIENT_SCRIPT = `(() => {
       }
       setRow(i, l);
       // The numeric form follows the same geometry state: every accepted
-      // response rewrites each field's value and its data-accepted home, the
-      // persisted-diff marker, and the modified class (#61).
+      // response advances each field's data-accepted baseline and rewrites
+      // the persisted-diff marker and the modified class (#61). A field is
+      // locally dirty exactly when its typed value has drifted from its
+      // baseline — one authoritative DOM representation, no separate edit
+      // home — and a locally dirty, in-progress value is never overwritten
+      // by another request's acceptance; only the field's own accepted
+      // request converges value and baseline (#74).
       const form = document.querySelector('.geometry .geom[data-sel="' + i + '"]');
       if (form) {
         for (const inp of form.querySelectorAll("input[data-field]")) {
@@ -341,8 +346,9 @@ const CLIENT_SCRIPT = `(() => {
                 ? l.size.current[f]
                 : null;
           if (v === null || v === undefined) continue;
-          inp.value = String(v);
+          const dirty = inp.value !== inp.dataset.accepted;
           inp.dataset.accepted = String(v);
+          if (!dirty) inp.value = inp.dataset.accepted;
         }
         const posMoved = l.position && changed(l.position);
         const sizeMoved = l.size && sizeChanged(l.size);
@@ -408,13 +414,13 @@ const CLIENT_SCRIPT = `(() => {
     }
   };
 
-  // The one form-restore home (#61): every input of the form returns to its
-  // data-accepted value — the DOM form is the only home of the last accepted
-  // geometry, updated by accepted responses, consulted by every rejection
-  // and network failure.
-  const restoreForm = (form) => {
-    for (const inp of form.querySelectorAll("input[data-field]"))
-      inp.value = inp.dataset.accepted;
+  // The one field-restore home (#61, #74): a rejected or unreachable request
+  // puts its own field back to its last accepted value — other fields' local,
+  // in-progress edits are never touched, and neither is a newer unsubmitted
+  // edit of the same field (the request's captured edit generation must still
+  // be current).
+  const restoreField = (inp) => {
+    inp.value = inp.dataset.accepted;
   };
 
   // The one unreachable-session fallback text, shared by every geometry
@@ -458,27 +464,33 @@ const CLIENT_SCRIPT = `(() => {
     await settle(res, seq);
   };
 
-  // One exact numeric geometry edit: the changed fields of one form. On a
-  // rejection the form restores every input from its data-accepted values —
-  // the DOM form is the only home of the last accepted geometry (#61).
-  const geometry = async (form, set) => {
+  // One exact numeric geometry edit: one field of one form. The request
+  // captures the field's edit generation (data-edit, bumped on every input);
+  // a current rejection or network failure restores the field's last accepted
+  // value only while that captured generation is still current — a newer
+  // unsubmitted edit of the same field is never clobbered (#61, #74).
+  const geometry = async (form, inp, value) => {
+    const gen = inp.dataset.edit;
     const seq = ++issued;
     let res;
     try {
       res = await fetch(base + "geometry", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: form.dataset.layerId, set: set }),
+        body: JSON.stringify({
+          id: form.dataset.layerId,
+          set: { [inp.dataset.field]: value },
+        }),
       });
     } catch {
-      if (seq === issued) {
-        restoreForm(form);
+      if (seq === issued && inp.dataset.edit === gen) {
+        restoreField(inp);
         status.textContent = unreachable;
       }
       return;
     }
     await settle(res, seq, (current) => {
-      if (current) restoreForm(form);
+      if (current && inp.dataset.edit === gen) restoreField(inp);
     });
   };
 
@@ -544,10 +556,17 @@ const CLIENT_SCRIPT = `(() => {
         inp.value = inp.dataset.accepted;
         return;
       }
-      void geometry(form, { [inp.dataset.field]: v });
+      void geometry(form, inp, v);
     };
-    for (const inp of form.querySelectorAll("input[data-field]"))
+    for (const inp of form.querySelectorAll("input[data-field]")) {
+      // The field's edit generation lives on the input itself and bumps on
+      // every input event — programmatic baseline updates never fire one, so
+      // the generation counts user edits only (#74).
+      inp.addEventListener("input", () => {
+        inp.dataset.edit = String(Number(inp.dataset.edit ?? "0") + 1);
+      });
       inp.addEventListener("change", () => void submit(inp));
+    }
   }
 })();`;
 

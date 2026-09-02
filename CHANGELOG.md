@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Scene author numeric geometry edits preserve in-progress values across other fields' commits, stale rejections, and network failures, and resizing is verified from every corner, including nested and rotated Layers (#61).
 - Scene author geometry edits keep exact numeric position/size values, and stale, rejected, or unreachable geometry requests can no longer desynchronize the numeric form or the last valid preview (#61).
 - Scene author movement keeps Connector bounds and the latest request status current, queues changes by request arrival, and supports valid tiny-scale Groups (#60).
 - Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
