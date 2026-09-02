@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Scene author geometry edits keep reporting an unreachable session even when the failing field carries a newer unsubmitted value (#61).
 - Scene author numeric geometry edits preserve in-progress values across other fields' commits, stale rejections, and network failures, and resizing is verified from every corner, including nested and rotated Layers (#61).
 - Scene author geometry edits keep exact numeric position/size values, and stale, rejected, or unreachable geometry requests can no longer desynchronize the numeric form or the last valid preview (#61).
 - Scene author movement keeps Connector bounds and the latest request status current, queues changes by request arrival, and supports valid tiny-scale Groups (#60).

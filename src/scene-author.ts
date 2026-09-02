@@ -468,7 +468,9 @@ const CLIENT_SCRIPT = `(() => {
   // captures the field's edit generation (data-edit, bumped on every input);
   // a current rejection or network failure restores the field's last accepted
   // value only while that captured generation is still current — a newer
-  // unsubmitted edit of the same field is never clobbered (#61, #74).
+  // unsubmitted edit of the same field is never clobbered, while the
+  // unreachable failure itself is always surfaced for a current request
+  // (#61, #74).
   const geometry = async (form, inp, value) => {
     const gen = inp.dataset.edit;
     const seq = ++issued;
@@ -483,10 +485,11 @@ const CLIENT_SCRIPT = `(() => {
         }),
       });
     } catch {
-      if (seq === issued && inp.dataset.edit === gen) {
-        restoreField(inp);
-        status.textContent = unreachable;
-      }
+      // Status ownership and restore are separate: a globally current request
+      // always surfaces the unreachable failure, while the field restores
+      // only when its captured edit generation is still current (#74 RE-1).
+      if (seq === issued) status.textContent = unreachable;
+      if (seq === issued && inp.dataset.edit === gen) restoreField(inp);
       return;
     }
     await settle(res, seq, (current) => {

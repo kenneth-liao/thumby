@@ -957,6 +957,59 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         expect(await hW.getAttribute("data-accepted")).toBe("650");
         expect(await statusText()).toBe("rev 15 · unsaved 5 · Scene file unchanged");
 
+        // The network-failure counterpart: while a width request's failure is
+        // pending, a newer unsubmitted edit survives it — and because the
+        // request is globally current, the unreachable failure is surfaced
+        // even though the restore itself is skipped by the generation.
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch; __dSettled?: boolean };
+          w.__origFetch = window.fetch;
+          w.__dSettled = false;
+          const orig = w.__origFetch!;
+          let calls = 0;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            if (!String(args[0]).endsWith("/geometry")) return orig.apply(window, args);
+            calls += 1;
+            if (calls !== 1) return orig.apply(window, args);
+            return new Promise<Response>((_, reject) =>
+              setTimeout(() => {
+                w.__dSettled = true;
+                reject(new TypeError("network down"));
+              }, 1200),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await hW.fill("0");
+        await hW.blur(); // request D: network failure after ~1200ms
+        await hW.fill("750"); // a newer unsubmitted edit: bumps the field's edit generation
+        await page.waitForFunction(
+          () => (window as unknown as { __dSettled?: boolean }).__dSettled === true,
+          undefined,
+          { timeout: 10_000 },
+        );
+        await page.waitForTimeout(150); // let the failure handler run
+        // The newer edit survived the network failure…
+        expect(await hW.inputValue()).toBe("750");
+        expect(await hW.getAttribute("data-accepted")).toBe("650");
+        // …and the unreachable failure is shown: status ownership is
+        // independent of the restore-generation condition.
+        expect(await statusText()).toContain("unreachable");
+        expect(await appliedRev()).toBe(15);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+        // The newer edit then submits correctly.
+        await hW.blur();
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 16,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await hW.inputValue()).toBe("750");
+        expect(await hW.getAttribute("data-accepted")).toBe("750");
+        expect(await statusText()).toBe("rev 16 · unsaved 5 · Scene file unchanged");
+
         // --- phase 8d: every corner handle succeeds, mixed signs, transformed
         // nw/ne/sw never traversed the sign-dependent path successfully; each
         // gesture below asserts the authored size/position math for its signed
@@ -1008,7 +1061,7 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         await cornerGesture("1", "nw", -30, -20, IDENTITY, IDENTITY); // photo
         await cornerGesture("2", "ne", 20, -18, IDENTITY, IDENTITY); // chip
         await cornerGesture("5", "sw", -24, 18, cardBasis, cardBasis); // nested, mirrored F
-        expect(await statusText()).toBe("rev 18 · unsaved 6 · Scene file unchanged");
+        expect(await statusText()).toBe("rev 19 · unsaved 6 · Scene file unchanged");
 
         // --- phase 9: nothing was ever saved ---------------------------------
         const sceneBytesAfter = await readFile(fix.scenePath);
