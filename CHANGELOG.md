@@ -4,6 +4,7 @@
 
 ### Added
 
+- The Scene author session moves a selected positioned Layer by dragging (#60): the session updates the Layer's authored position in memory (canvas px at top level, the inverse of the Group's measured render transform when nested), re-runs the complete canonical gate, and renders a fresh preview per accepted movement — revision-stamped responses apply atomically so an overlapping request can never display an older state, the listing distinguishes persisted Scene values from unsaved session values, rejected or unloadable movements report a field-specific error while retaining the last valid preview, a selected Layer's drag surface sits above every unselected hit, and the session never writes the Scene file.
 - The Scene author session lists every resolved Layer once with its rendered bounds and selects Layers from the listing or the canvas through one script-free radio group (#59).
 - Offline Scene author sessions show a validated Scene and Reference Thumbnail side by side and in an adjustable overlay through a capability-scoped loopback URL (#58).
 - Generation Job review for every kind (US-022, #57): `jobs review` shows Plate, Object, and Creator candidates at full size and 168px, with the isolation evidence adoption would use and, for creators, face detail against the identity anchors

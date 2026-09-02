@@ -28,7 +28,7 @@ import {
   type Library,
   type ResolvedAsset,
 } from "./assets.js";
-import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError, type ResolvedScene } from "./scene.js";
+import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type Scene, type SceneError, type ResolvedScene } from "./scene.js";
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
 import { renderScene, renderSceneInspection, renderContactSheet, renderGuidelines, countLayers } from "./scene-render.js";
@@ -941,13 +941,17 @@ async function dispatch(
     // The inspection pass (#59) is the same render — the PNG is identical to
     // renderScene's — plus the canonical layer inspection the view lists and
     // selects: every resolved Layer once, with browser-measured bounds.
-    const { png, layers } = await renderSceneInspection(result.resolved);
+    const { png, layers, warnings } = await renderSceneInspection(result.resolved);
     // Holds the session until SIGTERM/SIGINT drives the one shutdown path.
+    // The gate-validated raw document (authored values, pre-theme) seeds the
+    // session's mutable state and its frozen persisted home (#60).
     return startAuthorSession({
       scene: path.basename(path.resolve(file), ".json"),
-      renderPng: png,
+      raw: read.raw as Scene,
+      projectRoot: sceneDir,
+      library,
+      preview: { png, layers, warnings },
       reference: ref.reference,
-      layers,
     });
   }
 
