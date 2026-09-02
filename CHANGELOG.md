@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- The Scene CLI's generic missing/unknown-command recovery guidance now lists the `author` command among the expected commands (#58, #70)
 - Scene author session: the side-by-side view keeps the Render and Reference Thumbnail on one horizontal row at common viewports, capability checks are constant-time, and a failed session shutdown reports a structured terminal failure with a nonzero exit instead of a silent success (#58)
 - A recorded matte that fails the true-alpha gate is labeled "invalid matte — not adoptable" with its refusal reason instead of "no matte", and the review sheet is published atomically so a failed write can never truncate the prior sheet (#57)
 - Review sheets embed every figure from the verified bytes, so a saved review remains stable when source files later change, and the full-size view renders at natural size (#57)
