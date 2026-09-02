@@ -599,7 +599,8 @@ from one untouched Asset:
 ```
 
 The decision and rationale — full color replacement through the asset's own
-alpha, one content-color treatment per layer, no byte mutation — live in
+alpha, a fixed composition order that leaves the named-mask contract
+untouched, no byte mutation — live in
 `docs/adr/0012-uniform-tint-paints-through-asset-alpha.md`. Rollback notes:
 `tint` is an optional image-layer property — a Scene using it fails to load
 on older binaries with an unknown-property error, before any render.
