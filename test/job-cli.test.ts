@@ -355,9 +355,10 @@ describe("jobs objects", () => {
   });
 });
 
-describe("production generator wiring", () => {  test("maps a job request onto generatePlates options — backdrop contract included", () => {
-    // The REQ-014 load-bearing fact: a Plate Job is always a bare backdrop,
-    // and the full request (zone, count, typed-ref paths, temperature) maps through.
+describe("production generator wiring", () => {  test("maps a job request onto generatePlates options — subject-authoritative contract included", () => {
+    // The ADR-0011 load-bearing fact: a Plate Job's subject is authoritative —
+    // no subjectless backdrop mode is forced, and the full request (zone,
+    // count, typed-ref paths, temperature) maps through.
     expect(
       generateOptionsFor({
         kind: "plate", subject: "neon room", zone: "right", model: "nano-2",
@@ -370,7 +371,6 @@ describe("production generator wiring", () => {  test("maps a job request onto g
       model: "nano-2",
       refs: ["refs/palette.png"],
       count: 3,
-      subjectless: true,
       temperature: 0.4,
     });
     expect(generateOptionsFor({ ...requestFixture(), temperature: undefined }).temperature).toBeUndefined();

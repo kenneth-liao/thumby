@@ -239,6 +239,24 @@ never final text or the final composite — ADR-0004); it enters a Scene as its
 own Image layer, movable, resizable, hideable, and replaceable with no
 regeneration of anything else.
 
+**Plates are full-canvas generated backgrounds whose contents are
+intentionally flattened** (ADR-0011). The subject you pass to `jobs plates`
+is authoritative: request UI, products, devices, or any complex background
+element and the effective prompt preserves it. Only final editorial text and
+exact logos are never generated — text renders locally (ADR-0001) and logos
+are sourced Assets.
+
+Choose deliberately between flattening and decomposition — it is an authoring
+policy, not a validation rule:
+
+- **Flatten it into a Plate** when the content is environmental or tightly
+  integrated — detail that will never be moved, restyled, or replaced on its
+  own. Decomposition would be authoring work with no payoff.
+- **Make it an independent Asset and Layer** when separate control has
+  practical value: movement, resizing, recoloring, replacement, reuse,
+  provenance, or Variants (Variants target layers by id, so a flattened
+  element cannot be varied independently).
+
 **Creator Assets** (REQ-017) are isolated creator candidates generated from
 typed identity anchors — never from text alone. Reference roles are typed
 (`identity`, `pose`, `expression`, `outfit`, `style`, `edit` = source-to-edit);
@@ -876,7 +894,9 @@ a per-dimension table — a 15x difference the list prices do not telegraph.
 - `--zone` does double duty in plate generation: it describes the reserved
   text region *and* tells the model which half of the plate to leave calm.
   Keep them in agreement.
-- The plate prompt hard-bans text in the image, since the headline is ours.
+- The plate prompt hard-bans text in the image, since the headline is ours
+  (and exact logos stay sourced Assets) — but it no longer bans UI, products,
+  or devices: the plate subject is authoritative (ADR-0011).
 - Headlines auto-fit by binary search on font size, so a 4-word and a 12-word
   variant both land without hand-tuning. Words never break mid-syllable.
 - Wrap a word in `*asterisks*` to paint it the accent color. (Legacy `thumb`
