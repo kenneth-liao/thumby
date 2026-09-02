@@ -913,6 +913,23 @@ adjustment lives in session state until an explicit save lands (saving is a
 separate step, not part of this session), so exiting or losing the session
 leaves the Scene bytes unchanged.
 
+Resizing and numeric geometry (#61): a selected positioned Layer shows four
+resize handles anchored at its measured rendered corners (read directly from
+the render DOM, never inferred from the painted bounding box) — dragging a
+corner keeps the opposite transformed corner exactly fixed, mapping the drag
+through the renderer-measured transforms, exact for any rotation, mirror, and
+scale. A geometry panel exposes the exact authored position and size of the
+selected Layer as editable numbers, labeled with their coordinate space
+canvas px at top level, the parent Group's local px when nested. Drag,
+resize, and numeric controls stay synchronized through one session geometry
+state: every accepted change re-anchors the handles, re-renders a canonical
+preview, and updates the listing and form fields atomically, while the Scene
+file stays untouched. Zero, negative, or non-finite geometry is rejected with
+a field-specific error and the form restores its last accepted values; the
+last valid preview never leaves the display. A Layer without an authored
+position or size — a Connector — is read-only for these controls and explains
+why: its geometry derives from its `from`/`to` target Layers.
+
 Ctrl-C or SIGTERM ends the session and
 releases its listener and browser cleanly. A missing or invalid Reference
 fails before any session exists, naming the field to fix. Resizing, numeric
