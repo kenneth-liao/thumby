@@ -36,6 +36,7 @@ import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { checkReference, diffPng, renderCompareSheet } from "./compare.js";
+import { importReference } from "./reference-import.js";
 import {
   buildManifest,
   manifestPathFor,
@@ -63,6 +64,12 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         alpha overlay, and a per-channel difference view) plus
                                         the diff and render PNGs into out/. Review artifacts
                                         only — never a manifest, never the final Render.
+  bun run scene reference import <scene.json> <file>
+                                        Normalize a local raster image (PNG, JPEG, WebP, GIF,
+                                        AVIF, BMP) to the canonical Reference Thumbnail profile
+                                        (exact 1280×720 PNG), store the copy inside the scene's
+                                        directory, and associate it with the Scene atomically.
+                                        --source <text> records user-supplied provenance.
   bun run scene render   <scene.json>   Render to PNG (1280×720). The output must fit
                                         YouTube's 2 MB limit: compliant renders pass
                                         through untouched; oversized ones are optimized
@@ -138,6 +145,29 @@ Safe areas (REQ-012)
   legitimately intersects, and accepting the overlap is the reviewer's call
   (ADR-0005). "scene guidelines" renders the regions for visual review
   without entering the final output.
+
+Reference Thumbnail import (DEC-001..004)
+  "scene reference import <scene> <file>" is one normalization boundary plus
+  one atomic transaction. Input: any local raster image the bundled browser
+  decodes (PNG, JPEG, WebP, GIF first frame, AVIF, BMP); the input may live
+  anywhere — it is external source material. Normalization is non-distorting
+  and non-subjective: a 16:9 input is uniformly rescaled to exactly 1280×720
+  (1:1 when already exact); any other aspect is refused before anything is
+  written, because fitting it would require an unstated subjective crop or a
+  distortion — crop or resize locally with stated intent, then import. The
+  copy is stored inside the scene's directory as <scene>.reference.png (a -2,
+  -3… suffix is used when a name is taken: an existing file, directory, or
+  symlink alias is never overwritten or written through, so the previous
+  association's file always survives). --source records user-supplied
+  provenance as reference.source free text: never resolved as a path — no
+  external file dependency — and never a second stored hash (identity derives
+  from bytes). Before the Scene file is replaced, the complete resulting
+  Scene passes the same validation gate as "scene validate"; any failure —
+  missing or unreadable input, refused normalization, failed validation, or a
+  failed commit — rolls the new copy back and leaves the previous Scene and
+  its associated files byte-identical and usable. The renderer and the Render
+  manifest ignore the reference entirely (DEC-009), so importing never
+  changes rendered pixels or manifest identities.
 `;
 
 interface CliResult {
@@ -803,10 +833,38 @@ async function dispatch(
   }
   if (cmd === "compare") return usageError(`"scene compare" takes exactly one scene file`);
 
+  if (cmd === "reference" && file === "import") {
+    const [sceneArg, inputArg, ...flags] = rest;
+    if (!sceneArg || !inputArg)
+      return usageError(`"scene reference import" takes exactly one scene file and one input image`);
+    let source: string | undefined;
+    for (let i = 0; i < flags.length; i += 2) {
+      if (flags[i] === "--source" && source === undefined) {
+        if (flags[i + 1] === undefined || flags[i + 1].startsWith("--"))
+          return usageError(`missing value after "--source"`);
+        source = flags[i + 1];
+      } else
+        return usageError(
+          `"scene reference import" takes <scene> <file> and at most one --source <text>`,
+        );
+    }
+    const result = await importReference(sceneArg, inputArg, { source, library });
+    if (!result.ok) return invalid(result.errors);
+    return ok({
+      ok: true,
+      scene: result.imported.sceneFile,
+      reference: result.imported.reference,
+      stored: result.imported.storedPath,
+      normalized: result.imported.normalized,
+    });
+  }
+  if (cmd === "reference")
+    return usageError(`unknown reference command "${file ?? ""}" — expected "import <scene> <file>"`);
+
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender`,
   );
 }
 

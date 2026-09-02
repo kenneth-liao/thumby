@@ -85,6 +85,15 @@ export const SCENE_SCHEMA = {
           description:
             "Project-relative PNG path, resolved against the scene file's directory.",
         },
+        source: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Supplied source provenance (DEC-003) — where this Reference Thumbnail came from, as " +
+            "free text recorded verbatim. Never resolved as a path: the relocatable bundle gains no " +
+            "external file dependency. Content identity derives from the PNG's bytes, so no second " +
+            "hash is stored here.",
+        },
       },
     },
     theme: {

@@ -185,11 +185,13 @@ export interface Scene {
   /** Named theme defaults, pinned to an exact revision. */
   theme?: { name: string; revision: string };
   /**
-   * Review metadata (REQ-020): the associated Reference Thumbnail's
-   * project-relative path. Never a layer — the renderer and the manifest
-   * ignore it; `scene validate`/`scene compare` check the file itself.
+   * Review metadata (REQ-020): the associated Reference Thumbnail — its
+   * project-relative path plus optional user-supplied source provenance
+   * (`source`, DEC-003 — free text, never resolved as a path). Never a
+   * layer — the renderer and the manifest ignore it; `scene validate`/
+   * `scene compare` check the file itself. Import (DEC-002) writes both.
    */
-  reference?: { path: string };
+  reference?: { path: string; source?: string };
   /** Named sparse changes over this base Scene (src/variants.ts). */
   variants?: Record<string, SceneVariant>;
   layers: SceneLayer[];

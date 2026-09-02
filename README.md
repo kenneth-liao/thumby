@@ -136,7 +136,8 @@ since serif brackets disappear under an outline that heavy.
 |---|---|
 | `src/scene.ts`, `src/scene-schema.ts` | Scene loading, validation, and the JSON Schema |
 | `src/scene-render.ts` | The local Scene renderer (Chromium, 1280×720) |
-| `src/scene-cli.ts` | The Scene CLI — schema, validate, inspect, render, guidelines, compare, rerender |
+| `src/scene-cli.ts` | The Scene CLI — schema, validate, inspect, render, guidelines, compare, reference import, rerender |
+| `src/reference-import.ts` | Reference Thumbnail import — one normalization boundary (1280×720 PNG) plus one atomic transaction (DEC-002..004) |
 | `src/jobs.ts`, `src/job-cli.ts` | Generation Jobs — plates, objects, creators; the only online path |
 | `src/assets.ts`, `src/library-cli.ts` | The asset library, content identities, adoption, approval |
 | `src/segment.ts`, `src/matte.ts` | The local matting pass (BiRefNet, ADR-0006) |
@@ -700,6 +701,41 @@ filesystem identity, so a symlink alias cannot reach a final Render's bytes
 either). The overlay lives only on the guideline code path, so it can never
 enter a final render's output, and the guideline view writes no manifest —
 it is a review artifact, not a reproducible Render.
+
+### Importing a Reference Thumbnail
+
+`scene reference import <scene.json> <file>` is one normalization boundary
+plus one atomic transaction (DEC-001..004): it takes a local raster image —
+anything the bundled browser decodes (PNG, JPEG, WebP, GIF first frame, AVIF,
+BMP; the input may live anywhere, it is external source material) — and
+normalizes it to the canonical profile: an exact 1280×720 PNG stored inside
+the scene's directory as `<scene>.reference.png`, then associated by writing
+the Scene's `reference.path` to that copy. The stored name is never
+overwritten or written through: when it is taken, the import stores
+`<scene>.reference-2.png`, `-3`… instead — an existing file, directory, or
+symlink alias is skipped, so a previous association's file always survives.
+
+Normalization is deliberately non-distorting and non-subjective: a 16:9 input
+is uniformly rescaled (1:1 when already exact, so identical pixels are stored
+unchanged); any other aspect is refused before anything is written, because
+fitting it would require an unstated subjective crop or a distortion. Crop or
+resize the image to 16:9 yourself (e.g. `sips -z 720 1280 shot.png` to scale,
+`--cropToHeightWidth 720 1280` to crop with stated intent), then import the
+result. SVG is vector, not raster — rasterize it locally first.
+
+`--source "…"` records user-supplied provenance as `reference.source` — free
+text, recorded verbatim, never resolved as a path: the relocatable bundle
+gains no external file dependency, and content identity derives from the
+stored PNG's bytes, never a second hash (ADR-0002).
+
+The transaction validates the complete resulting Scene through the same gate
+as `scene validate` before the Scene file is replaced, and every write lands
+through a temp file + rename. Any failure — missing or unreadable input,
+refused normalization, failed validation, failed commit — rolls the new copy
+back and leaves the previous Scene and its associated files byte-identical
+and usable. The renderer and the Render manifest ignore the reference
+entirely (DEC-009), so importing never changes rendered pixels or manifest
+identities.
 
 ### Reference comparison
 
