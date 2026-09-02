@@ -15,7 +15,7 @@
  * All operations are offline and local: loading, validating, inspecting, and
  * rendering never touch the network and never start a Generation Job.
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "playwright";
@@ -36,6 +36,7 @@ import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
 import { checkReference, diffPng, renderCompareSheet } from "./compare.js";
+import { importReference, acquireSceneLock, atomicReplace, atomicCreate } from "./reference-import.js";
 import {
   buildManifest,
   manifestPathFor,
@@ -63,6 +64,12 @@ thumby scene — versioned, locally rendered thumbnail compositions
                                         alpha overlay, and a per-channel difference view) plus
                                         the diff and render PNGs into out/. Review artifacts
                                         only — never a manifest, never the final Render.
+  bun run scene reference import <scene.json> <file>
+                                        Normalize a local raster image (PNG, JPEG, or
+                                        WebP) to the canonical Reference Thumbnail profile
+                                        (exact 1280×720 PNG), store the copy inside the scene's
+                                        directory, and associate it with the Scene atomically.
+                                        --source <text> records user-supplied provenance.
   bun run scene render   <scene.json>   Render to PNG (1280×720). The output must fit
                                         YouTube's 2 MB limit: compliant renders pass
                                         through untouched; oversized ones are optimized
@@ -138,6 +145,54 @@ Safe areas (REQ-012)
   legitimately intersects, and accepting the overlap is the reviewer's call
   (ADR-0005). "scene guidelines" renders the regions for visual review
   without entering the final output.
+
+Reference Thumbnail import (DEC-001..004)
+  "scene reference import <scene> <file>" is one normalization boundary plus
+  one atomic transaction, serialized per Scene by a lock file (<scene>.lock —
+  leave it in place: it relocates with the bundle, and a crashed import's
+  lock is recovered automatically). Supported input is exactly a regular
+  local PNG, JPEG, or WebP file; it may live anywhere — it is external
+  source material. Ingestion is resource-bounded: the file is opened and the
+  opened handle is measured (regular files only), the 64 MB encoded cap is
+  enforced on that measurement and re-bounded by the read window itself, and
+  the header's declared geometry must fit the decoded-pixel budget before
+  the browser rasterizes anything. Normalization is non-distorting and
+  non-subjective: a 16:9 input is uniformly rescaled to exactly 1280×720
+  (1:1 when already exact); any other aspect is refused before anything is
+  written, because fitting it would require an unstated subjective crop or a
+  distortion — crop or resize locally with stated intent, then import. The
+  copy is stored inside the scene's directory as <scene>.reference.png (a
+  -2, -3… suffix is used when a name is taken — the reservation is an
+  exclusive no-replace create, so an existing file, directory, or symlink
+  alias is never overwritten or written through, and the previous
+  association's file always survives). --source records user-supplied
+  provenance as reference.source free text: never resolved as a path — no
+  external file dependency — and never a second stored hash (identity derives
+  from bytes). Before the Scene file is replaced, the complete resulting
+  Scene passes the same validation gate as "scene validate", and the Scene's
+  current bytes are compared to the bytes this import first read — an
+  intervening edit fails closed. Any failure — missing or unreadable input,
+  refused normalization, failed validation, a changed Scene, or a failed
+  commit — rolls the new copy back and leaves the previous Scene and its
+  associated files byte-identical and usable; a rollback whose removal fails
+  is reported as a second error naming the retained path. The renderer never
+  reads the reference, and the Render manifest never records it as a Render
+  input (DEC-009): importing changes neither rendered pixels nor resolved
+  Asset identities — the manifest's scene byte identity (its sha256)
+  necessarily changes, because the reference metadata is part of the Scene
+  bytes.
+
+Scene replacement and the per-Scene lock
+  Every in-repo writer that can replace an existing Scene participates in the
+  same per-Scene transaction lock (<scene>.lock beside the scene's real path):
+  "scene reference import" and "scene init --force" (over an existing file).
+  On contention a writer waits only to the bounded timeout and then fails with
+  the retained lock path named — a crashed holder's lock requires explicit
+  operator cleanup, never automatic stealing. Fresh "scene init" publication
+  is an atomic no-replace create: a writer that appears between the existence
+  check and publication gets a refusal, never a silent overwrite. External
+  (non-participating) edits to the Scene are still caught by the import's
+  Scene-byte comparison immediately before commit.
 `;
 
 interface CliResult {
@@ -426,7 +481,7 @@ async function renderVariants(
 
 async function dispatch(
   args: string[],
-  deps?: { libraryRoot?: string },
+  deps?: { libraryRoot?: string; sceneLockTimeoutMs?: number },
 ): Promise<CliResult> {
   // The library root is a seam for tests (and a portable-library override):
   // every command reads the library through this one provider.
@@ -492,7 +547,54 @@ async function dispatch(
     if (!force && existsSync(output))
       return usageError(`--out "${outArg}" already exists — pass --force to overwrite it`);
     await mkdir(path.dirname(output), { recursive: true });
-    await writeFile(output, JSON.stringify(scene, null, 2) + "\n");
+    const sceneJson = () => Buffer.from(JSON.stringify(scene, null, 2) + "\n", "utf8");
+    if (force && existsSync(output)) {
+      // Replacing an existing Scene participates in the same per-Scene
+      // transaction lock every replacing writer shares: contention waits only
+      // to the bounded timeout and then fails with the retained lock path
+      // named — a crashed holder's lock requires explicit operator cleanup.
+      let real: string;
+      try {
+        real = await realpath(output);
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `cannot replace "${output}": ${(err as Error).message}` },
+        ]);
+      }
+      let lock;
+      try {
+        lock = await acquireSceneLock(`${real}.lock`, {
+          timeoutMs: deps?.sceneLockTimeoutMs,
+        });
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `"${output}" could not be locked for replacement: ${(err as Error).message}` },
+        ]);
+      }
+      try {
+        await atomicReplace(output, sceneJson());
+      } catch (err) {
+        return invalid([
+          { path: "--out", message: `could not write "${output}": ${(err as Error).message}` },
+        ]);
+      } finally {
+        await lock.release();
+      }
+    } else {
+      // A fresh Scene is published atomically and never replaces: `link` is
+      // the no-replace create, so a writer that appears between the
+      // existence check and publication gets EEXIST — a post-check write can
+      // never silently overwrite a Scene another writer just created.
+      try {
+        await atomicCreate(output, sceneJson());
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST")
+          return usageError(
+            `--out "${outArg}" was created by another writer just now — refusing to overwrite it`,
+          );
+        throw err;
+      }
+    }
     return ok({
       ok: true,
       output,
@@ -803,10 +905,42 @@ async function dispatch(
   }
   if (cmd === "compare") return usageError(`"scene compare" takes exactly one scene file`);
 
+  if (cmd === "reference" && file === "import") {
+    const [sceneArg, inputArg, ...flags] = rest;
+    if (!sceneArg || !inputArg)
+      return usageError(`"scene reference import" takes exactly one scene file and one input image`);
+    let source: string | undefined;
+    for (let i = 0; i < flags.length; i += 2) {
+      if (flags[i] === "--source" && source === undefined) {
+        if (flags[i + 1] === undefined || flags[i + 1].startsWith("--"))
+          return usageError(`missing value after "--source"`);
+        source = flags[i + 1];
+      } else
+        return usageError(
+          `"scene reference import" takes <scene> <file> and at most one --source <text>`,
+        );
+    }
+    const result = await importReference(sceneArg, inputArg, {
+      source,
+      library,
+      lockTimeoutMs: deps?.sceneLockTimeoutMs,
+    });
+    if (!result.ok) return invalid(result.errors);
+    return ok({
+      ok: true,
+      scene: result.imported.sceneFile,
+      reference: result.imported.reference,
+      stored: result.imported.storedPath,
+      normalized: result.imported.normalized,
+    });
+  }
+  if (cmd === "reference")
+    return usageError(`unknown reference command "${file ?? ""}" — expected "import <scene> <file>"`);
+
   return usageError(
     cmd === undefined
-      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender"
-      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, or rerender`,
+      ? "missing command — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender"
+      : `unknown command "${cmd}" — expected schema, themes, templates, init, inspect, validate, compare, render, guidelines, reference import, or rerender`,
   );
 }
 
@@ -1021,7 +1155,7 @@ export async function rerenderManifest(
  */
 export async function run(
   args: string[],
-  deps?: { libraryRoot?: string },
+  deps?: { libraryRoot?: string; sceneLockTimeoutMs?: number },
 ): Promise<CliResult> {
   const [cmd] = args;
   try {

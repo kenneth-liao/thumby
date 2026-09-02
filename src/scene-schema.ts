@@ -76,14 +76,25 @@ export const SCENE_SCHEMA = {
       description:
         "Review metadata only (REQ-020): the associated Reference Thumbnail — a PNG at exactly " +
         "1280×720 used by the agent as a structural and stylistic target (DEC-003). Never a layer: " +
-        "the renderer and the Render manifest ignore it entirely. `scene validate` and `scene compare` " +
-        "read the file itself; render does not.",
+        "the renderer never reads it, and the Render manifest never records it as a Render input — " +
+        "adding it changes neither rendered pixels nor resolved Asset identities. The manifest's " +
+        "scene byte identity (its sha256) does change, because this metadata is part of the Scene " +
+        "bytes. `scene validate` and `scene compare` read the file itself; render does not.",
       properties: {
         path: {
           type: "string",
           minLength: 1,
           description:
             "Project-relative PNG path, resolved against the scene file's directory.",
+        },
+        source: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Supplied source provenance (DEC-003) — where this Reference Thumbnail came from, as " +
+            "free text recorded verbatim. Never resolved as a path: the relocatable bundle gains no " +
+            "external file dependency. Content identity derives from the PNG's bytes, so no second " +
+            "hash is stored here.",
         },
       },
     },
