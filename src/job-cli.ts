@@ -42,7 +42,7 @@ import type { MatteEngine } from "./matte.js";
 import type { TextZone } from "./generate.js";
 import { DEFAULT_MODEL, CREATOR_DEFAULT_MODEL, MODELS } from "./models.js";
 import { LIBRARY_ROOT } from "./assets.js";
-import { reviewCreatorJob } from "./review.js";
+import { reviewJob } from "./review.js";
 
 const HELP = `
 thumby jobs — the Generation Job lifecycle (request → candidates → adoption)
@@ -57,8 +57,11 @@ thumby jobs — the Generation Job lifecycle (request → candidates → adoptio
                                             candidates under the lineage, replaces nothing
   bun run jobs show <jobId>                 Full job record: request, typed references, runs
   bun run jobs list                         Summarize recorded jobs
-  bun run jobs review <jobId>               Creator review: contact sheet + face-detail
-                                            views against the identity anchors
+  bun run jobs review <jobId>               Candidate review for any job kind — every
+                                            distinct candidate at full size and at
+                                            168px, the isolation evidence adoption
+                                            would use, and — for creators — face
+                                            detail against the identity anchors
                                             (writes <jobDir>/review.html, offline)
   bun run jobs adopt <jobId> <hash> --id <assetId>
                                             Adopt a candidate (exact hash or unique prefix)
@@ -515,15 +518,18 @@ async function dispatch(args: string[], deps: JobCliDeps): Promise<CliResult> {
 
   if (cmd === "review") {
     if (!first || second !== undefined) return usageError('"jobs review" takes exactly one <jobId>');
-    const review = await reviewCreatorJob(deps.jobsRoot, first);
+    const review = await reviewJob(deps.jobsRoot, first);
     return ok({
       ok: true,
       jobId: review.jobId,
+      kind: review.kind,
       review: review.reviewPath,
       candidates: review.candidates.map((c) => ({
         contentHash: c.contentHash,
         runIndex: c.runIndex,
         file: c.file,
+        adoptable: c.adoption.from !== "none",
+        ...(c.adoption.from === "matte" ? { engine: c.adoption.engine } : {}),
       })),
       anchors: review.anchors.map((a) => ({ id: a.id, path: a.path })),
     });

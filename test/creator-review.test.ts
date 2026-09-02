@@ -4,12 +4,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { runCreatorJob, loadJob, rerunCreatorJob, type CreatorGenerator, type CreatorJobRequest, type JobGenerator } from "../src/jobs.js";
-import { reviewCreatorJob } from "../src/review.js";
+import { reviewJob } from "../src/review.js";
 import { run as cliRun } from "../src/job-cli.js";
 import { composeMatte, type MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+/** sha-256 of every base64 image embedded in an HTML string. */
+const embeddedHashes = (html: string): string[] =>
+  [...html.matchAll(/data:[^;"]+;base64,([A-Za-z0-9+/=]+)/g)].map((m) =>
+    sha256(Buffer.from(m[1]!, "base64")),
+  );
 
 let root: string;
 let jobRoot: string;
@@ -80,7 +86,7 @@ const baseRequest = (anchors: string[]): CreatorJobRequest => ({
   })),
 });
 
-describe("reviewCreatorJob", () => {
+describe("reviewJob", () => {
   test("writes a review sheet listing every distinct candidate across runs, against the identity anchors", async () => {
     await seedAnchors(["anchor-a.png", "anchor-b.png"]);
     await runCreatorJob(jobRoot, "creator-review", baseRequest(["anchor-a.png", "anchor-b.png"]), distinctGen, fakeMatte);
@@ -89,7 +95,8 @@ describe("reviewCreatorJob", () => {
     const second = await rerunCreatorJob(jobRoot, "creator-review", distinctGen, fakeMatte);
     expect(second.runs).toHaveLength(2);
 
-    const result = await reviewCreatorJob(jobRoot, "creator-review");
+    const result = await reviewJob(jobRoot, "creator-review");
+    expect(result.kind).toBe("creator");
     expect(result.reviewPath).toBe(path.join(jobRoot, "creator-review", "review.html"));
 
     const html = await readFile(result.reviewPath, "utf8");
@@ -102,9 +109,10 @@ describe("reviewCreatorJob", () => {
     for (const hash of [...firstRunHashes, ...secondRunHashes]) {
       expect(html).toContain(hash);
     }
-    // Anchors are referenced with their ids for the face-detail comparison.
-    expect(html).toContain("anchor-a.png");
-    expect(html).toContain("anchor-b.png");
+    // Anchors are referenced with their ids for the face-detail comparison —
+    // their verified bytes are embedded, so no file path appears.
+    expect(html).toContain("anchor · anchor-a");
+    expect(html).toContain("anchor · anchor-b");
     // The face-detail section exists and the subject/model provenance is shown.
     expect(html).toMatch(/face detail/i);
     expect(html).toContain("arms crossed, explaining to camera");
@@ -112,6 +120,10 @@ describe("reviewCreatorJob", () => {
     expect(result.candidates).toHaveLength(4);
     expect(result.candidates.some((c) => c.runIndex === 1)).toBe(true);
     expect(result.anchors.map((a) => a.id)).toEqual(["anchor-a", "anchor-b"]);
+    // The thumbnail-size view: exactly one 168px figure per distinct candidate
+    // (US-022/DEC-017) — detail that disappears at the row size is rejected here.
+    expect(html).toMatch(/168px/);
+    expect(html.match(/class="thumb"/g)).toHaveLength(4);
   });
 
   test("deduplicates a candidate hash recurring across runs to its first run", async () => {
@@ -124,7 +136,7 @@ describe("reviewCreatorJob", () => {
     const job = await runCreatorJob(jobRoot, "creator-dup", baseRequest(["anchor-a.png"]), same, fakeMatte);
     const reran = await rerunCreatorJob(jobRoot, "creator-dup", same, fakeMatte);
     expect(reran.runs[0]!.candidates[0]!.contentHash).toBe(reran.runs[1]!.candidates[0]!.contentHash);
-    const result = await reviewCreatorJob(jobRoot, "creator-dup");
+    const result = await reviewJob(jobRoot, "creator-dup");
     expect(result.candidates).toHaveLength(1);
     expect(result.candidates[0]!.runIndex).toBe(0);
     const html = await readFile(result.reviewPath, "utf8");
@@ -135,11 +147,16 @@ describe("reviewCreatorJob", () => {
     await seedAnchors(["anchor-a.png"]);
     const job = await runCreatorJob(jobRoot, "creator-matte-view", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, fakeMatte);
     const cand = job.runs[0]!.candidates[0]!;
-    const result = await reviewCreatorJob(jobRoot, "creator-matte-view");
-    expect(result.candidates[0]!.matte!.contentHash).toBe(cand.matte!.contentHash);
+    const result = await reviewJob(jobRoot, "creator-matte-view");
+    const adoption = result.candidates[0]!.adoption;
+    if (adoption.from !== "matte") throw new Error("expected the matte adoption would write");
+    expect(adoption.engine).toBe("test/segmentation");
+    expect(adoption.file).toBe(cand.matte!.file);
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toMatch(/isolation/i);
-    expect(html).toContain(path.basename(cand.matte!.file));
+    // The displayed matte is the verified matte — its embedded bytes decode to
+    // the recorded content identity, not a mutable file reference.
+    expect(embeddedHashes(html)).toContain(cand.matte!.contentHash);
     expect(html).toContain("matte via test/segmentation");
   });
 
@@ -149,8 +166,8 @@ describe("reviewCreatorJob", () => {
       throw new Error("mask model returned no image");
     };
     await runCreatorJob(jobRoot, "creator-no-matte", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, brokenMatte);
-    const result = await reviewCreatorJob(jobRoot, "creator-no-matte");
-    expect(result.candidates[0]!.matte).toBeUndefined();
+    const result = await reviewJob(jobRoot, "creator-no-matte");
+    expect(result.candidates[0]!.adoption.from).toBe("none");
     const html = await readFile(result.reviewPath, "utf8");
     expect(html).toContain("no matte — not adoptable");
   });
@@ -160,7 +177,7 @@ describe("reviewCreatorJob", () => {
     const job = await runCreatorJob(jobRoot, "creator-matte-tampered", { ...baseRequest(["anchor-a.png"]), count: 1 }, distinctGen, fakeMatte);
     const cand = job.runs[0]!.candidates[0]!;
     await writeFile(path.join(jobRoot, "creator-matte-tampered", cand.matte!.file), ALPHA_PNG);
-    await expect(reviewCreatorJob(jobRoot, "creator-matte-tampered")).rejects.toThrow(
+    await expect(reviewJob(jobRoot, "creator-matte-tampered")).rejects.toThrow(
       /matte.*(changed|identity)/i,
     );
   });
@@ -169,14 +186,14 @@ describe("reviewCreatorJob", () => {
     await seedAnchors(["anchor-a.png", "gone.png"]);
     await runCreatorJob(jobRoot, "creator-missing", baseRequest(["anchor-a.png", "gone.png"]), distinctGen, fakeMatte);
     await rm(path.join(root, "gone.png"));
-    await expect(reviewCreatorJob(jobRoot, "creator-missing")).rejects.toThrow(/gone\.png/);
+    await expect(reviewJob(jobRoot, "creator-missing")).rejects.toThrow(/gone\.png/);
   });
 
   test("fails loudly when an identity anchor's bytes no longer match the recorded identity", async () => {
     await seedAnchors(["anchor-a.png"]);
     await runCreatorJob(jobRoot, "creator-drift", baseRequest(["anchor-a.png"]), distinctGen, fakeMatte);
     await writeFile(path.join(root, "anchor-a.png"), "tampered-anchor-bytes");
-    await expect(reviewCreatorJob(jobRoot, "creator-drift")).rejects.toThrow(
+    await expect(reviewJob(jobRoot, "creator-drift")).rejects.toThrow(
       /anchor-a\.png.*(changed|identity|drift)/i,
     );
   });
@@ -187,7 +204,7 @@ describe("reviewCreatorJob", () => {
     const job = await loadJob(jobRoot, "creator-tampered");
     const cand = job.runs[0]!.candidates[0]!;
     await writeFile(path.join(jobRoot, "creator-tampered", cand.file), "tampered-candidate-bytes");
-    await expect(reviewCreatorJob(jobRoot, "creator-tampered")).rejects.toThrow(
+    await expect(reviewJob(jobRoot, "creator-tampered")).rejects.toThrow(
       /candidate.*(changed|identity)/i,
     );
   });
@@ -203,7 +220,7 @@ describe("reviewCreatorJob", () => {
       count: 1,
       refs: [await anchorRef(evilName)],
     }, distinctGen, fakeMatte);
-    const review = await reviewCreatorJob(jobRoot, "creator-hostile");
+    const review = await reviewJob(jobRoot, "creator-hostile");
     const html = await readFile(review.reviewPath, "utf8");
     // No executable markup survives: the raw payload never appears verbatim.
     expect(html).not.toContain("<script>");
@@ -213,20 +230,6 @@ describe("reviewCreatorJob", () => {
     expect(html).toContain(escapeHtml(evilSubject));
     // A restrictive CSP ships with the sheet.
     expect(html).toContain("Content-Security-Policy");
-  });
-
-  test("refuses non-creator jobs — anchors only exist on creator requests", async () => {
-    // A plate job shares the lifecycle but has no identity anchors.
-    const { runPlateJob } = await import("../src/jobs.js");
-    await runPlateJob(jobRoot, "plate-review", {
-      kind: "plate",
-      subject: "neon server room",
-      zone: "left",
-      model: "gpt-image",
-      count: 1,
-      refs: [],
-    }, async () => ({ candidates: [{ bytes: ALPHA_PNG, mediaType: "image/png" }], warnings: [], fullPrompt: "p" }));
-    await expect(reviewCreatorJob(jobRoot, "plate-review")).rejects.toThrow(/creator/i);
   });
 
   test("the CLI review command prints structured JSON with the review path", async () => {
@@ -244,6 +247,7 @@ describe("reviewCreatorJob", () => {
     expect(out.ok).toBe(true);
     expect(out.review).toBe(path.join(jobRoot, "creator-cli", "review.html"));
     expect(out.candidates).toHaveLength(2);
+    expect(out.candidates.every((c: { adoptable: boolean }) => c.adoptable)).toBe(true);
     const job = await loadJob(jobRoot, "creator-cli");
     expect(job.runs[0]!.candidates).toHaveLength(2);
   });
