@@ -213,6 +213,21 @@ describe("loadJob record integrity for creator jobs", () => {
       adoptCandidate(jobRoot, "creator-forged-v2", "0", "no-gate", { libraryRoot }),
     ).rejects.toThrow(/schemaVersion 2|creator/i);
   });
+
+  test("rejects a v4 record claiming kind creator — creator keeps schemaVersion 3", async () => {
+    // v4 is the role-aware-Reference prompt contract for plate and object
+    // jobs (#56, PROD-1); a creator record under it has no contract and must
+    // not run.
+    await runCreatorJob(jobRoot, "creator-forged-v4", baseRequest(), fakeGen, fakeMatte);
+    const file = path.join(jobRoot, "creator-forged-v4", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.schemaVersion = 4;
+    await writeFile(file, JSON.stringify(rec, null, 2));
+    await expect(loadJob(jobRoot, "creator-forged-v4")).rejects.toThrow(/schemaVersion 4|creator/i);
+    await expect(
+      adoptCandidate(jobRoot, "creator-forged-v4", "0", "no-gate", { libraryRoot }),
+    ).rejects.toThrow(/schemaVersion 4|creator/i);
+  });
 });
 
 describe("the matting pass (REQ-017)", () => {
