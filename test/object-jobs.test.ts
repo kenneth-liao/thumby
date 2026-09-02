@@ -334,25 +334,42 @@ describe("loadJob record integrity", () => {
     expect(objRecord.schemaVersion).toBe(4);
   });
 
-  test("still runs a legacy v2 object record — reads, reruns, and adopts with unchanged behavior", async () => {
+  test("a legacy v2 object record reruns into the role-aware contract — re-persisted as v4 with the new lineage", async () => {
     await runObjectJob(jobRoot, "obj-legacy-v2", baseRequest(), fakeGen, fakeMatte);
     const file = path.join(jobRoot, "obj-legacy-v2", "job.json");
     const rec = JSON.parse(await readFile(file, "utf8"));
     rec.schemaVersion = 2; // what a pre-role-aware binary wrote
     await writeFile(file, JSON.stringify(rec, null, 2) + "\n");
 
-    const job = await loadJob(jobRoot, "obj-legacy-v2");
-    expect(job.schemaVersion).toBe(2);
+    // Pure legacy read: the record loads as v2 before any new lineage.
+    expect((await loadJob(jobRoot, "obj-legacy-v2")).schemaVersion).toBe(2);
 
     const rerun = await rerunObjectJob(jobRoot, "obj-legacy-v2", fakeGen, fakeMatte);
     expect(rerun.runs).toHaveLength(2);
+    // Role-aware lineage re-persists the record as v4 with the lineage.
     const record = JSON.parse(await readFile(file, "utf8"));
-    expect(record.schemaVersion).toBe(2); // the rerun does not silently upgrade the record
+    expect(record.schemaVersion).toBe(4);
 
-    // Adoption takes the matted-candidate path exactly as before.
+    // The upgraded record loads and adoption takes the matted-candidate path.
+    await loadJob(jobRoot, "obj-legacy-v2");
     const hash = record.runs[0]!.candidates[0]!.contentHash;
     const out = await adoptCandidate(jobRoot, "obj-legacy-v2", hash, "legacy-object", { libraryRoot });
     expect(out.adoptedFrom).toBe(`job:obj-legacy-v2#${hash}`);
+  });
+
+  test("a failed rerun leaves a legacy v2 object record untouched — still rollback-readable as v2", async () => {
+    await runObjectJob(jobRoot, "obj-legacy-fail", baseRequest(), fakeGen, fakeMatte);
+    const file = path.join(jobRoot, "obj-legacy-fail", "job.json");
+    const rec = JSON.parse(await readFile(file, "utf8"));
+    rec.schemaVersion = 2;
+    await writeFile(file, JSON.stringify(rec, null, 2) + "\n");
+    const failingGen: ObjectGenerator = async () => {
+      throw new Error("provider down");
+    };
+    await expect(rerunObjectJob(jobRoot, "obj-legacy-fail", failingGen, fakeMatte)).rejects.toThrow(/provider down/);
+    const record = JSON.parse(await readFile(file, "utf8"));
+    expect(record.schemaVersion).toBe(2);
+    expect(record.runs).toHaveLength(1);
   });
 
   test("refuses a v3 record claiming kind object — an older binary would misread it", async () => {

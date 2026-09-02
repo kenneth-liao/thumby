@@ -43,6 +43,20 @@ export const OBJECT_JOB_SCHEMA_VERSION = 4 as const;
 /** The three Generation Job kinds. */
 export type JobKind = "plate" | "object" | "creator";
 
+/**
+ * The schema version the current binary writes for a job kind — the single
+ * source of truth for both record writers. Plate and Object records carry the
+ * role-aware-Reference prompt contract (v4); creator semantics are unchanged
+ * and stay at v3.
+ */
+function currentSchemaVersion(kind: JobKind): GenerationJob["schemaVersion"] {
+  return kind === "object"
+    ? OBJECT_JOB_SCHEMA_VERSION
+    : kind === "creator"
+      ? CREATOR_JOB_SCHEMA_VERSION
+      : PLATE_JOB_SCHEMA_VERSION;
+}
+
 /** A generation reference with an explicit role and exact content identity. */
 export interface TypedRef {
   role: string;
@@ -310,12 +324,7 @@ async function runJob(
   const batch = await generate(request);
   const now = new Date().toISOString();
   const job: GenerationJob = {
-    schemaVersion:
-      request.kind === "object"
-        ? OBJECT_JOB_SCHEMA_VERSION
-        : request.kind === "creator"
-          ? CREATOR_JOB_SCHEMA_VERSION
-          : PLATE_JOB_SCHEMA_VERSION,
+    schemaVersion: currentSchemaVersion(request.kind),
     jobId,
     kind: request.kind,
     createdAt: now,
@@ -402,6 +411,13 @@ export async function rerunJob(
   const batch = await generate(job.request);
   const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString(), matte);
   job.runs.push(run);
+  // The new lineage was produced under the CURRENT prompt contract, so the
+  // record is re-persisted at the current schema version with the lineage —
+  // one write, version and runs together. Role-aware lineage must never hide
+  // under a legacy version (v1/v2) that an older binary would rerun with
+  // weaker, path-only prompt behavior (PROD-1 follow-up). A failed rerun
+  // throws above and leaves the legacy record untouched.
+  job.schemaVersion = currentSchemaVersion(job.kind);
   await writeJobRecord(jobRoot, job);
   return job;
 }
@@ -544,11 +560,14 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
   try {
     const job = JSON.parse(raw) as GenerationJob;
     // The (schemaVersion, kind) matrix is the rollback boundary (PROD-1):
-    // legacy records keep their versions and kinds; new Plate/Object records
-    // ride v4, which released binaries reject as unknown, and no record may
-    // claim a version/kind pairing this binary would never write — an older
-    // binary would misread such a pairing (e.g. run a role-aware plate job
-    // with path-only prompt behavior under its v1/v2 contract).
+    // legacy records keep their versions and kinds on read, and a successful
+    // rerun re-persists the record at the current version with its new
+    // lineage — so role-aware runs never hide under a legacy version. New
+    // Plate/Object records ride v4, which released binaries reject as
+    // unknown, and no record may claim a version/kind pairing this binary
+    // would never write — an older binary would misread such a pairing
+    // (e.g. run a role-aware plate job with path-only prompt behavior under
+    // its v1/v2 contract).
     const knownSchemaVersions = [
       LEGACY_PLATE_JOB_SCHEMA_VERSION,
       LEGACY_OBJECT_JOB_SCHEMA_VERSION,

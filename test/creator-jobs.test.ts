@@ -228,6 +228,23 @@ describe("loadJob record integrity for creator jobs", () => {
       adoptCandidate(jobRoot, "creator-forged-v4", "0", "no-gate", { libraryRoot }),
     ).rejects.toThrow(/schemaVersion 4|creator/i);
   });
+  test("keeps schemaVersion 3 across a rerun — creator semantics are unchanged", async () => {
+    // The role-aware prompt contract is a Plate/Object transition (PROD-1):
+    // creator records are v3 today and stay v3 through reruns.
+    const anchor = path.join(root, "anchor-keep-v3.png");
+    await writeFile(anchor, "anchor-bytes");
+    const req: CreatorJobRequest = {
+      ...baseRequest(),
+      refs: [{ role: "identity", path: anchor, contentHash: createHash("sha256").update("anchor-bytes").digest("hex") }],
+    };
+    await runCreatorJob(jobRoot, "creator-rerun-v3", req, fakeGen, fakeMatte);
+    await rerunCreatorJob(jobRoot, "creator-rerun-v3", fakeGen, fakeMatte);
+    const record = JSON.parse(
+      await readFile(path.join(jobRoot, "creator-rerun-v3", "job.json"), "utf8"),
+    );
+    expect(record.schemaVersion).toBe(3);
+    expect(record.runs).toHaveLength(2);
+  });
 });
 
 describe("the matting pass (REQ-017)", () => {
