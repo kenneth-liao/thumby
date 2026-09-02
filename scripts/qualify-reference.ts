@@ -35,14 +35,15 @@
  * Publication contract (PROD-1): evidence leaves the box through exactly one
  * serializer (publishedJson) — every string passes credential redaction for
  * each supported Gateway auth source (AI_GATEWAY_API_KEY, VERCEL_OIDC_TOKEN)
- * and local-filesystem facts (the reference argument, the repo root, the
- * caller's cwd), then a length cap; warnings and errors pass strict field
- * whitelists before serialization; the local reference path is never
- * recorded; the fatal CLI boundary emits the same whitelisted, redacted,
- * capped shape — never a stack. Absolute Gateway balances are never emitted.
- * Artifacts stay under the repo-rooted, gitignored out/ tree regardless of
- * the caller's cwd (PROD-2), and a partial record is persisted the moment
- * the paid call settles, then enriched (PROD-3).
+ * and for local-filesystem facts — the reference argument, the repo root, and
+ * the caller's cwd, accepted only through the canonical fact boundary (RE-1)
+ * — then a length cap; warnings and errors pass strict field whitelists
+ * before serialization; the local reference path is never recorded; the fatal
+ * CLI boundary emits the same whitelisted, redacted, capped shape — never a
+ * stack. Absolute Gateway balances are never emitted. Artifacts stay under
+ * the repo-rooted, gitignored out/ tree regardless of the caller's cwd
+ * (PROD-2), and a partial record is persisted the moment the paid call
+ * settles, then enriched (PROD-3).
  *
  * Usage: bun scripts/qualify-reference.ts <model-key|gateway-id> <reference-image>
  */
@@ -66,12 +67,32 @@ const OUT_DIR = path.join(REPO_ROOT, "out", "qualify-reference");
 
 /**
  * Local filesystem facts that must never appear in emitted output (PROD-1):
- * the reference argument joins at startup; the repo root and caller's cwd are
- * known from the start. Degenerate short values ("/", "") are never facts.
+ * the repo root, the caller's cwd, and the reference argument. Module-private
+ * by construction — the only way in is addLocalPathFact, so a raw push that
+ * bypasses the non-degenerate boundary is unrepresentable (RE-1).
  */
-const LOCAL_PATH_FACTS: string[] = [REPO_ROOT, process.cwd()].filter(
-  (p) => typeof p === "string" && p.length > 1,
-);
+const LOCAL_PATH_FACTS: string[] = [];
+
+/**
+ * The one ingestion point for a local-path fact (RE-1): the input is
+ * normalized to its canonical absolute form first, and a fact is accepted
+ * only when non-degenerate — a short string like a one-character relative
+ * filename would otherwise become a global substring redaction token and
+ * corrupt every published string containing it.
+ */
+export function addLocalPathFact(raw: string): boolean {
+  const fact = path.resolve(raw);
+  if (fact.length <= 1) return false;
+  if (!LOCAL_PATH_FACTS.includes(fact)) LOCAL_PATH_FACTS.push(fact);
+  return true;
+}
+
+/** The accepted facts, for attribution and tests — a copy, not the live list. */
+export function localPathFacts(): string[] {
+  return [...LOCAL_PATH_FACTS];
+}
+
+for (const seed of [REPO_ROOT, process.cwd()]) addLocalPathFact(seed);
 
 const PROMPT = [
   "Simplified, recognizable representation of the referenced application window:",
@@ -277,7 +298,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  LOCAL_PATH_FACTS.push(refPath); // the operator's argument is a local fact from here on
+  addLocalPathFact(refPath); // the operator's argument becomes a canonical local fact (RE-1)
   const refBytes = await readReference(refPath); // path-free refusal before any spend if unreadable
   const refHash = createHash("sha256").update(refBytes).digest("hex");
   const requestArgs = buildImageRequestArgs(spec, PROMPT, [refBytes]);

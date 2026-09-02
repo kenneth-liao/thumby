@@ -11,6 +11,8 @@ import {
   publishableWarning,
   publishableError,
   publishedJson,
+  addLocalPathFact,
+  localPathFacts,
 } from "../scripts/qualify-reference.js";
 
 describe("publishedJson — the one publication boundary", () => {
@@ -119,5 +121,24 @@ describe("CLI fatal boundary (PROD-1 re-review)", () => {
     for (const line of stderr.split("\n")) {
       expect(line.length).toBeLessThanOrEqual(2100); // the length cap holds at the CLI boundary
     }
+  });
+});
+
+describe("local-path fact boundary (RE-1)", () => {
+  test("a one-character relative filename cannot become a global substring redaction token", () => {
+    const before = localPathFacts().length;
+    expect(addLocalPathFact("a")).toBe(true); // accepted — but normalized, never as the bare token
+    expect(localPathFacts().length).toBe(before + 1); // deduped on repeat
+    expect(addLocalPathFact("a")).toBe(true);
+    expect(localPathFacts().length).toBe(before + 1);
+    for (const fact of localPathFacts()) {
+      expect(fact.length).toBeGreaterThan(1); // no single-character fact can exist
+    }
+    const out = publishedJson({ word: "banana", line: "a a a" });
+    expect(JSON.parse(out)).toEqual({ word: "banana", line: "a a a" }); // no corruption
+  });
+
+  test("facts are canonical absolute paths", () => {
+    expect(localPathFacts()).toContain(path.resolve("a"));
   });
 });
