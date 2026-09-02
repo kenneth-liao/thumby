@@ -94,6 +94,39 @@ async function makeFixture(
   return { root, scenePath, referencePath };
 }
 
+/**
+ * An id exercising HTML escaping end to end — valid per the schema (a
+ * non-empty unique string), but executable markup if ever interpolated
+ * unescaped. Selectors must carry only generated indices.
+ */
+const SNEAKY_ID = 'sneaky"><svg onload=alert(1)>';
+
+/**
+ * The live session's richer Scene (#59): every layer kind the view must
+ * list — image, auto-fit text, shape, a user-authored id needing escaping,
+ * an own-hidden shape, and a Connector with an arrow between two shapes.
+ * Tree order (the view's index space): bg, headline, chip, sneaky, ghost, line.
+ */
+const layerInspectionScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
+  ...scene,
+  layers: [
+    { id: "bg", type: "image", asset: "./bg.svg", position: { x: 0, y: 0 }, size: { width: 1280, height: 720 } },
+    {
+      id: "headline",
+      type: "text",
+      text: "Layer inspection",
+      font: "Source Sans 3",
+      position: { x: 60, y: 40 },
+      size: { width: 700, height: 140 },
+      autoFit: { min: 24, max: 110 },
+    },
+    { id: "chip", type: "shape", shape: "rect", color: "#ff0044", radius: 12, position: { x: 120, y: 320 }, size: { width: 260, height: 160 } },
+    { id: SNEAKY_ID, type: "shape", shape: "ellipse", color: "#22cc88", position: { x: 880, y: 420 }, size: { width: 220, height: 140 } },
+    { id: "ghost", type: "shape", shape: "rect", color: "#333333", position: { x: 400, y: 500 }, size: { width: 120, height: 80 }, visible: false },
+    { id: "line", type: "connector", from: "chip", to: SNEAKY_ID, arrow: true, width: 4 },
+  ],
+});
+
 // --- subprocess helpers ----------------------------------------------------
 
 interface RunResult {
@@ -344,7 +377,7 @@ describe("scene author — live session", () => {
   let closed: Promise<JsonEvent>;
 
   beforeAll(async () => {
-    fix = await makeFixture("live");
+    fix = await makeFixture("live", layerInspectionScene);
     referenceBytes = await readFile(fix.referencePath);
     session = Bun.spawn(["bun", CLI, "author", fix.scenePath], {
       cwd: ROOT,
@@ -530,6 +563,166 @@ describe("scene author — live session", () => {
 
         // Every request the view made stayed on the loopback session.
         for (const req of requested) expect(req.startsWith(origin)).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "the view lists every Layer once; selection works from listing and canvas; the Scene bytes never change",
+    async () => {
+      const sceneBytesBefore = await readFile(fix.scenePath);
+      const browser = await getBrowser();
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1500 },
+        deviceScaleFactor: 1,
+      });
+      const origin = url.origin;
+      await ctx.route("**/*", (route) =>
+        route.request().url().startsWith(origin) ? route.continue() : route.abort(),
+      );
+      const page: Page = await ctx.newPage();
+      // Canvas fractions for an untransformed box — the exactness contract.
+      const pct = (v: number, base: number) => Number(((v / base) * 100).toFixed(4));
+      try {
+        await page.goto(started.url);
+
+        // Every Layer exactly once, in render order — Connectors included,
+        // hidden Layers present but visibly disabled and non-selectable.
+        const rows = await page.evaluate(() =>
+          [...document.querySelectorAll(".listing .row")].map((row) => ({
+            tag: row.tagName,
+            hidden: row.classList.contains("hidden"),
+            selectable: row.getAttribute("for") !== null,
+            ariaDisabled: row.getAttribute("aria-disabled"),
+            id: row.querySelector(".name")?.textContent ?? "",
+            forIndex: row.getAttribute("for"),
+            bounds: row.querySelector(".bounds")?.textContent ?? "",
+          })),
+        );
+        expect(rows.map((r) => r.id)).toEqual([
+          "bg", "headline", "chip", SNEAKY_ID, "ghost", "line",
+        ]);
+        expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
+        const hidden = rows.filter((r) => r.hidden);
+        expect(hidden.map((r) => r.id)).toEqual(["ghost"]);
+        expect(hidden[0]!.tag).toBe("DIV");
+        expect(hidden[0]!.selectable).toBe(false);
+        expect(hidden[0]!.ariaDisabled).toBe("true");
+        expect(hidden[0]!.bounds).toBe(""); // bounds absent for a hidden Layer
+        expect(rows.filter((r) => !r.hidden)).toHaveLength(5);
+
+        // Visible Layers: one radio each (the single selection state), one
+        // exact highlight box and one hit target on the canvas, indexed by
+        // tree order — hidden Layers get no radio and no canvas target.
+        expect(await page.locator('input[type="radio"][name="layer"]').count()).toBe(5);
+        expect(await page.locator(".canvas .hit").count()).toBe(5);
+        expect(await page.locator(".canvas .box").count()).toBe(5);
+        expect(await page.locator('.canvas .hit[data-sel="4"]').count()).toBe(0);
+        expect(await page.locator('.canvas .box[data-sel="4"]').count()).toBe(0);
+
+        // Generated indices only: no raw layer id ever lands in a
+        // selector-carrying attribute.
+        const offenders = await page.evaluate((ids) => {
+          const bad: string[] = [];
+          for (const el of document.querySelectorAll("*")) {
+            for (const attr of ["id", "for", "data-sel"]) {
+              const v = el.getAttribute(attr);
+              if (v && ids.some((id) => v.includes(id))) bad.push(`${attr}=${v}`);
+            }
+          }
+          return bad;
+        }, rows.map((r) => r.id));
+        expect(offenders).toEqual([]);
+
+        // The user-authored id is escaped text in the listing — never markup.
+        // The served bytes carry the fully escaped form; the DOM text node
+        // round-trips to the exact raw id (content() re-serializes the text
+        // with only the necessary escapes, so it is not the escaping target).
+        const servedHtml = (await rawRequest(port, `/${token}/view`)).body.toString("utf8");
+        expect(servedHtml).toContain("sneaky&quot;&gt;&lt;svg onload=alert(1)&gt;");
+        expect(servedHtml).not.toContain("<svg onload");
+        expect(servedHtml).not.toContain('onerror');
+        const viewHtml = await page.content();
+        expect(viewHtml).not.toContain("<svg onload");
+        expect(await page.locator("script").count()).toBe(0);
+        expect(await page.locator('.listing .row[data-sel="3"] .name').textContent()).toBe(SNEAKY_ID);
+
+        // Selection starts empty.
+        const noneChecked = await page.evaluate(() =>
+          [...document.querySelectorAll<HTMLInputElement>('input[name="layer"]')].every(
+            (r) => !r.checked,
+          ),
+        );
+        expect(noneChecked).toBe(true);
+
+        // Selecting from the listing: chip's row (index 2).
+        const chipFor = rows.find((r) => r.id === "chip")!.forIndex!;
+        await page.click(`.listing label[for="${chipFor}"]`);
+        expect(await page.isChecked(`#${chipFor}`)).toBe(true);
+        // The highlight is the exact transformed canvas-space AABB — chip is
+        // untransformed: 120,320 260×160 in frame px → canvas fractions.
+        const boxStyle = await page.getAttribute(`.canvas .box[data-sel="2"]`, "style");
+        const styleNum = (re: RegExp) => {
+          const m = boxStyle!.match(re);
+          expect(m).not.toBeNull();
+          return Number(m![1]);
+        };
+        expect(styleNum(/left:([\d.]+)%/)).toBeCloseTo(pct(120, 1280), 9);
+        expect(styleNum(/top:([\d.]+)%/)).toBeCloseTo(pct(320, 720), 9);
+        expect(styleNum(/width:([\d.]+)%/)).toBeCloseTo(pct(260, 1280), 9);
+        expect(styleNum(/height:([\d.]+)%/)).toBeCloseTo(pct(160, 720), 9);
+        expect(
+          await page.locator('.canvas .box[data-sel="2"]').evaluate((el) => getComputedStyle(el).display),
+        ).toBe("block");
+        // The same selection highlights the listing row and nothing else.
+        const rowBg = (i: number) =>
+          page
+            .locator(`.listing .row[data-sel="${i}"]`)
+            .evaluate((el) => getComputedStyle(el).backgroundColor);
+        expect(await rowBg(2)).not.toBe("rgba(0, 0, 0, 0)");
+        expect(await rowBg(3)).toBe("rgba(0, 0, 0, 0)");
+
+        // Selecting from the canvas: the Connector's hit target (index 5).
+        const lineFor = rows.find((r) => r.id === "line")!.forIndex!;
+        await page.click(`.canvas .hit[for="${lineFor}"]`);
+        expect(await page.isChecked(`#${lineFor}`)).toBe(true);
+        // One shared selection: chip's highlight yielded to line's.
+        expect(
+          await page.locator('.canvas .box[data-sel="2"]').evaluate((el) => getComputedStyle(el).display),
+        ).toBe("none");
+        expect(
+          await page.locator('.canvas .box[data-sel="5"]').evaluate((el) => getComputedStyle(el).display),
+        ).toBe("block");
+        expect(await rowBg(5)).not.toBe("rgba(0, 0, 0, 0)");
+        expect(await rowBg(2)).toBe("rgba(0, 0, 0, 0)");
+        // The hit target carries the symmetric minimum (centered max())
+        // while the displayed box stays the exact bounds.
+        const hitStyle = await page.getAttribute(`.canvas .hit[data-sel="5"]`, "style");
+        expect(hitStyle).toContain("max(");
+        expect(hitStyle).toContain("translate(-50%,-50%)");
+        // Compositing order sets canvas priority: bg's hit (index 0) sits
+        // under line's (index 5).
+        const zIndexOf = (i: number) =>
+          page
+            .locator(`.canvas .hit[data-sel="${i}"]`)
+            .evaluate((el) => Number(getComputedStyle(el).zIndex));
+        expect(await zIndexOf(0)).toBeLessThan(await zIndexOf(5));
+
+        // A fully occluded Layer — bg, beneath every later hit across the
+        // whole canvas — stays listing-selectable.
+        const bgFor = rows.find((r) => r.id === "bg")!.forIndex!;
+        await page.click(`.listing label[for="${bgFor}"]`);
+        expect(await page.isChecked(`#${bgFor}`)).toBe(true);
+        expect(
+          await page.locator('.canvas .box[data-sel="0"]').evaluate((el) => getComputedStyle(el).display),
+        ).toBe("block");
+
+        // Opening and using selection leaves the Scene bytes unchanged.
+        const sceneBytesAfter = await readFile(fix.scenePath);
+        expect(Buffer.compare(sceneBytesBefore, sceneBytesAfter)).toBe(0);
       } finally {
         await ctx.close();
       }

@@ -31,7 +31,7 @@ import {
 import { SCENE_SCHEMA, LAYER_DEFAULTS, loadScene, SCHEMA_VERSION, type SceneError, type ResolvedScene } from "./scene.js";
 import { resolveVariant } from "./variants.js";
 import { resolveFace } from "./fonts.js";
-import { renderScene, renderContactSheet, renderGuidelines, countLayers } from "./scene-render.js";
+import { renderScene, renderSceneInspection, renderContactSheet, renderGuidelines, countLayers } from "./scene-render.js";
 import { PROTECTED_REGIONS, findSafeAreaViolations } from "./safe-area.js";
 import { THEMES, themeRevision } from "./themes.js";
 import { buildScene, getTemplate, TEMPLATES } from "./templates.js";
@@ -938,12 +938,16 @@ async function dispatch(
       ]);
     // One in-memory Render before the session listens: a session never serves
     // a Render it has not already produced (and a failed render never opens one).
-    const { png } = await renderScene(result.resolved);
+    // The inspection pass (#59) is the same render — the PNG is identical to
+    // renderScene's — plus the canonical layer inspection the view lists and
+    // selects: every resolved Layer once, with browser-measured bounds.
+    const { png, layers } = await renderSceneInspection(result.resolved);
     // Holds the session until SIGTERM/SIGINT drives the one shutdown path.
     return startAuthorSession({
       scene: path.basename(path.resolve(file), ".json"),
       renderPng: png,
       reference: ref.reference,
+      layers,
     });
   }
 
