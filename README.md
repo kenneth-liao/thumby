@@ -932,9 +932,8 @@ why: its geometry derives from its `from`/`to` target Layers.
 
 Ctrl-C or SIGTERM ends the session and
 releases its listener and browser cleanly. A missing or invalid Reference
-fails before any session exists, naming the field to fix. Resizing, numeric
-position/size editing, saving, and generation are out of scope — edit the
-Scene file itself for those.
+fails before any session exists, naming the field to fix. Saving and
+generation remain separate workflow steps.
 
 ## Overlay cards
 

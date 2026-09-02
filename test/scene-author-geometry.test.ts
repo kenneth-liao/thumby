@@ -28,7 +28,6 @@ import {
   ROOT,
   SessionEvents,
   type Fixture,
-  type JsonEvent,
 } from "./author-helpers.js";
 
 // --- independent test-side basis math ---------------------------------------
@@ -113,7 +112,6 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
   let url: URL;
   let token: string;
   let port: number;
-  let closed: Promise<JsonEvent>;
 
   beforeAll(async () => {
     fix = await makeFixture("geometry", geometryScene);
@@ -128,8 +126,6 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
     url = new URL(started.url);
     port = Number(url.port);
     token = url.pathname.split("/").filter(Boolean)[0] ?? "";
-    // Awaited by the final immutability phase; the collector pumps either way.
-    closed = events.waitForEvent("closed", 120_000);
   }, 180_000);
 
   afterAll(async () => {
@@ -178,6 +174,8 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
       const origin = url.origin;
       const requested: string[] = [];
       ctx.on("request", (r) => requested.push(r.url()));
+      /** Resize POSTs observed so far — the exactly-one-gesture proof. */
+      const resizeCount = () => requested.filter((u) => u.endsWith("/resize")).length;
       await ctx.route("**/*", (route) =>
         route.request().url().startsWith(origin) ? route.continue() : route.abort(),
       );
@@ -194,6 +192,7 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
       }
       interface GeometryResponse {
         rev: number;
+        png: string;
         warnings: string[];
         layers: ResponseLayer[];
       }
@@ -333,38 +332,48 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         expect(await statusText()).toBe("rev 0 · unsaved 0 · Scene file unchanged");
 
         // --- phase 2: SE-handle resize on a top-level raster Layer ----------
-        // Selecting the photo shows its four authored-corner handles; the
-        // trace drags the SE handle by a known displayed-px delta.
-        await page.locator('.listing .row[data-sel="1"]').click();
+        // Selecting the photo shows its four authored-corner handles. First
+        // an aborted gesture commits nothing; then one real corner gesture
+        // emits exactly one request and one revision, and the applied preview
+        // is byte-exactly the response's canonical render.
+        await selectRow("1");
         expect(await page.locator('.canvas .handle[data-sel="1"]').count()).toBe(4);
         const seHandle = page.locator('.canvas .handle[data-sel="1"][data-handle="se"]');
         expect(await seHandle.evaluate((el) => getComputedStyle(el).display)).toBe("block");
-        // The handle sits at the Layer's measured transformed SE corner —
-        // for this untransformed top-level Layer, its authored box corner.
-        const handlePoint = await page.evaluate(() => {
-          const el = document.querySelector<HTMLElement>('.canvas .handle[data-sel="1"][data-handle="se"]');
-          if (!el) return null;
+        const previewBefore = await previewSrc();
+        const resizeCountBefore = resizeCount();
+        // An aborted gesture — pointerdown, a move past the threshold, then
+        // pointercancel — commits nothing: no request, no revision, preview
+        // untouched, and the gesture listeners torn down (the next gesture
+        // binds fresh).
+        await page.evaluate(() => {
+          const el = document.querySelector('.canvas .handle[data-sel="1"][data-handle="se"]')!;
           const r = el.getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          const at = (dx: number, dy: number): PointerEventInit => ({
+            bubbles: true,
+            cancelable: true,
+            pointerId: 7,
+            button: 0,
+            clientX: r.left + r.width / 2 + dx,
+            clientY: r.top + r.height / 2 + dy,
+          });
+          el.dispatchEvent(new PointerEvent("pointerdown", at(0, 0)));
+          el.dispatchEvent(new PointerEvent("pointermove", at(24, 18)));
+          el.dispatchEvent(new PointerEvent("pointercancel", at(24, 24)));
         });
-        expect(handlePoint).not.toBeNull();
-        const topmost = await page.evaluate(
-          ({ x, y }: { x: number; y: number }) =>
-            document.elementFromPoint(x, y)?.getAttribute("data-handle") ?? null,
-          handlePoint!,
-        );
-        expect(topmost).toBe("se");
-        await page.mouse.move(handlePoint!.x, handlePoint!.y);
-        await page.mouse.down();
-        await page.mouse.move(handlePoint!.x + 60, handlePoint!.y + 40, { steps: 4 });
-        await page.mouse.up();
-        await page.waitForFunction(
-          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 1,
-          undefined,
-          { timeout: 30_000 },
-        );
-        const frameDx = 60 * scale;
-        const frameDy = 40 * scale;
+        expect(resizeCount()).toBe(resizeCountBefore);
+        expect(await appliedRev()).toBe(0);
+        expect(await previewSrc()).toBe(previewBefore);
+        // One real corner gesture through the view's own drag lifecycle.
+        const drag0 = await dragHandle("1", "se", 60, 40);
+        expect(drag0.body.rev).toBe(1);
+        expect(resizeCount()).toBe(resizeCountBefore + 1);
+        const frameDx = drag0.frameDx;
+        const frameDy = drag0.frameDy;
+        // The applied data URI is exactly the response's canonical render —
+        // and it changed from the pre-gesture preview.
+        expect(await previewSrc()).toBe(`data:image/png;base64,${drag0.body.png}`);
+        expect(await previewSrc()).not.toBe(previewBefore);
         // The SE edge followed the drag; the NW corner (the anchor) stayed.
         const photoAfter = await boundsFromBox(page, '.canvas .box[data-sel="1"]');
         expect(photoAfter.x).toBeCloseTo(700, 0);
@@ -374,8 +383,6 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         // The authored size changed by exactly the frame delta; position did
         // not move. (Response facts, asserted via the DOM below.)
         expect(await statusText()).toBe("rev 1 · unsaved 1 · Scene file unchanged");
-        // The preview swapped to a fresh canonical render, applied atomically.
-        expect(await previewSrc()).toContain("data:image/png;base64,");
 
         // --- phase 3: numeric edits on the text Layer -----------------------
         await page.locator('.listing .row[data-sel="3"]').click();
@@ -497,6 +504,21 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         // The response's measured corners agree with the re-anchored handles.
         expect(byId(dragA.body, "card-plate").handles!.nw.x).toBeCloseTo(postNW.x, 1);
         expect(byId(dragA.body, "card-plate").handles!.se.y).toBeCloseTo(postSE.y, 1);
+        // The outbound shape carries view facts only: renderer-measured bases
+        // and raw corner readings never serialize, and the handle coordinates
+        // appear exactly once (#61).
+        const plateView = byId(dragA.body, "card-plate") as unknown as Record<string, unknown>;
+        expect("basis" in plateView).toBe(false);
+        expect("fullBasis" in plateView).toBe(false);
+        expect("corners" in plateView).toBe(false);
+        expect(plateView.handles).toBeDefined();
+        // Hidden Layers carry no geometry facts at all in the view shape.
+        for (const h of dragA.body.layers.filter((l) => !l.visible)) {
+          const hiddenView = h as unknown as Record<string, unknown>;
+          expect("position" in hiddenView).toBe(false);
+          expect("size" in hiddenView).toBe(false);
+          expect("handles" in hiddenView).toBe(false);
+        }
 
         // The own-rotated (45°) shape: F = P·R(45) composes its own rotation
         // with the Group basis — exact, no rejection, no AABB model.
@@ -539,27 +561,48 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         // photo (position+size), headline (size), card-plate (position+size),
         // card-tilt (position+size), dot (size) — five unsaved Layers.
         expect(await statusText()).toBe("rev 7 · unsaved 5 · Scene file unchanged");
+        // Numeric edits apply the submitted numbers exactly — no gesture
+        // rounding: more than four decimal places, and a five-decimal width
+        // that four-decimal rounding would collapse to an invalid zero.
+        await dotW.fill("100.12345678");
+        await dotW.blur();
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 8,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await dotW.inputValue()).toBe("100.12345678");
+        await dotW.fill("0.00001");
+        await dotW.blur();
+        await page.waitForFunction(
+          () => Number(document.getElementById("status")?.getAttribute("data-rev")) === 9,
+          undefined,
+          { timeout: 30_000 },
+        );
+        expect(await dotW.inputValue()).toBe("0.00001");
+        expect(await statusText()).toBe("rev 9 · unsaved 5 · Scene file unchanged");
 
         // --- phase 6: invalid geometry never replaces the last valid preview
-        const previewAtRev7 = await previewSrc();
+        const previewBeforeRejections = await previewSrc();
         // (a) A typed zero width: rejected, named field-specifically, the form
         // restored from its data-accepted home, preview byte-identical.
         await selectRow("3");
         const headlineForm = page.locator('.geometry .geom[data-sel="3"]');
         const hW = headlineForm.locator('input[data-field="width"]');
+        const statusBeforeZero = await statusText();
         await hW.fill("0");
         await hW.blur();
         await page.waitForFunction(
           (prev) => document.getElementById("status")?.textContent !== prev,
-          await statusText(),
+          statusBeforeZero,
           { timeout: 30_000 },
         );
         expect(await statusText()).toContain("width");
         expect(await statusText()).toContain("positive");
         expect(await hW.inputValue()).toBe("520");
         expect(await hW.getAttribute("data-accepted")).toBe("520");
-        expect(await previewSrc()).toBe(previewAtRev7);
-        expect(await appliedRev()).toBe(7);
+        expect(await previewSrc()).toBe(previewBeforeRejections);
+        expect(await appliedRev()).toBe(9);
         // (b) A negative height over the raw boundary: same retention.
         const negative = await postRaw("geometry", JSON.stringify({ id: "headline", set: { height: -5 } }), "application/json");
         expect(negative.status).toBe(400);
@@ -581,6 +624,22 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         const wrongType = await postRaw("geometry", JSON.stringify({ id: "headline", set: { width: 10 } }), "text/plain");
         expect(wrongType.status).toBe(400);
         expect(wrongType.body.toString("utf8")).toContain("application/json");
+        // (e) Movement parses through the same strict boundary: an array body
+        // and an extra field are rejected, never ignored or guessed.
+        const moveArray = await postRaw("move", JSON.stringify(["chip", 1, 1]), "application/json");
+        expect(moveArray.status).toBe(400);
+        expect(moveArray.body.toString("utf8")).toContain("must be a JSON object");
+        const moveExtra = await postRaw("move", JSON.stringify({ id: "chip", dx: 1, dy: 1, pad: "x" }), "application/json");
+        expect(moveExtra.status).toBe(400);
+        expect(moveExtra.body.toString("utf8")).toContain("unexpected field");
+        // (f) Prototype-keyed handles are not handles: constructor and
+        // __proto__ get the clean corner-handle rejection — never a 500.
+        const ctorHandle = await postRaw("resize", JSON.stringify({ id: "photo", handle: "constructor", dx: 1, dy: 1 }), "application/json");
+        expect(ctorHandle.status).toBe(400);
+        expect(ctorHandle.body.toString("utf8")).toContain("corner handle");
+        const protoHandle = await postRaw("resize", JSON.stringify({ id: "photo", handle: "__proto__", dx: 1, dy: 1 }), "application/json");
+        expect(protoHandle.status).toBe(400);
+        expect(protoHandle.body.toString("utf8")).toContain("corner handle");
         const oversized = await postRaw("geometry", JSON.stringify({ id: "headline", set: { width: 10 }, pad: "x".repeat(17 * 1024) }), "application/json");
         expect(oversized.status).toBe(413);
         // (e) A handle drag that would collapse the size below zero: the
@@ -604,8 +663,8 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         expect(negResponse.status()).toBe(400);
         const negBody = (await negResponse.json()) as { errors: { path: string; message: string }[] };
         expect(negBody.errors[0]!.path).toContain("size.width");
-        expect(await previewSrc()).toBe(previewAtRev7);
-        expect(await appliedRev()).toBe(7);
+        expect(await previewSrc()).toBe(previewBeforeRejections);
+        expect(await appliedRev()).toBe(9);
         expect(await statusText()).toContain("positive");
 
         // --- phase 7: a Connector is read-only, with the reason --------------
@@ -627,7 +686,95 @@ describe("scene author — resize handles and numeric geometry (#61)", () => {
         expect(linkGeometrySize.status).toBe(400);
         expect(linkGeometrySize.body.toString("utf8")).toContain("no authored size");
 
-        // --- phase 8: nothing was ever saved ---------------------------------
+        // --- phase 8: a stale rejection never overwrites newer form state ----
+        // The exact same-field race: A (width 0, invalid) rejects after 600ms;
+        // B (width 510, valid) answers after 1800ms. Between A's rejection and
+        // B's response, B's typed value must still sit in the field — an
+        // unguarded restore would clobber it with the last accepted value.
+        await selectRow("3");
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __aSettled?: boolean;
+            __bSettled?: boolean;
+          };
+          w.__origFetch = window.fetch;
+          w.__aSettled = false;
+          w.__bSettled = false;
+          const orig = w.__origFetch!;
+          let calls = 0;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig.apply(window, args);
+            if (!String(args[0]).endsWith("/geometry")) return p;
+            calls += 1;
+            const delay = calls === 1 ? 600 : 1800;
+            const flag = calls === 1 ? "__aSettled" : "__bSettled";
+            return new Promise<Response>((resolve) =>
+              setTimeout(() => {
+                (w as unknown as Record<string, boolean>)[flag] = true;
+                resolve(p);
+              }, delay),
+            );
+          }) as unknown as typeof fetch;
+        });
+        await hW.fill("0");
+        await hW.blur(); // request A: invalid width, rejects in ~600ms
+        await hW.fill("510");
+        await hW.blur(); // request B: valid width, answers in ~1800ms
+        await page.waitForFunction(
+          () => (window as unknown as { __aSettled?: boolean }).__aSettled === true,
+          undefined,
+          { timeout: 10_000 },
+        );
+        // Let A's rejection handler run to completion; B is still pending.
+        await page.waitForTimeout(150);
+        // B's typed value survived the stale rejection — an unguarded restore
+        // would have put the last accepted width (520) back into the field.
+        expect(await hW.inputValue()).toBe("510");
+        expect(await appliedRev()).toBe(9);
+        // Release B: the accepted response synchronizes the whole form.
+        await page.waitForFunction(
+          () =>
+            (window as unknown as { __bSettled?: boolean }).__bSettled === true &&
+            Number(document.getElementById("status")?.getAttribute("data-rev")) === 10,
+          undefined,
+          { timeout: 10_000 },
+        );
+        expect(await hW.inputValue()).toBe("510");
+        expect(await hW.getAttribute("data-accepted")).toBe("510");
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // --- phase 8b: a current network failure restores the form ----------
+        const statusBeforeNetworkFail = await statusText();
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          w.__origFetch = window.fetch;
+          window.fetch = ((...args: Parameters<typeof fetch>) =>
+            String(args[0]).endsWith("/geometry")
+              ? Promise.reject(new TypeError("network down"))
+              : w.__origFetch!.apply(window, args)) as unknown as typeof fetch;
+        });
+        await hW.fill("700");
+        await hW.blur();
+        await page.waitForFunction(
+          (prev) => document.getElementById("status")?.textContent !== prev,
+          statusBeforeNetworkFail,
+          { timeout: 10_000 },
+        );
+        expect(await statusText()).toContain("unreachable");
+        // The one restore ran on the network path too: back to last accepted.
+        expect(await hW.inputValue()).toBe("510");
+        expect(await hW.getAttribute("data-accepted")).toBe("510");
+        expect(await appliedRev()).toBe(10);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
+        // --- phase 9: nothing was ever saved ---------------------------------
         const sceneBytesAfter = await readFile(fix.scenePath);
         expect(Buffer.compare(sceneBytesBefore, sceneBytesAfter)).toBe(0);
         // Every request the page made stayed on the loopback session.
