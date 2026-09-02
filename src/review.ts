@@ -60,7 +60,7 @@ export interface ReviewCandidate {
   ranAt: string;
   /**
    * What adoption would write for this candidate — the same canonical read
-   * adoption performs (`resolveAdoptedBytes`), so review and adoption cannot
+   * adoption performs (`resolveAdoptionEvidence`), so review and adoption cannot
    * drift: the recorded matte (with its engine), the candidate's own verified
    * bytes when adopted as-is, or the recorded reason it cannot be adopted.
    */
