@@ -707,13 +707,16 @@ const fitTextLayer = ({
  * The browser pipeline renderScene and renderGuidelines share: measure
  * cropped images, build the page HTML, verify fonts resolved, run auto-fit,
  * screenshot. The page's HTML — and nothing else — is what distinguishes a
- * final render from the guideline view.
+ * final render from the guideline view. `inspect` adds the canonical layer
+ * inspection (#59) to the same pass: bounds are measured from the rendered
+ * DOM after crop sizing, fonts, and auto-fit — never before — so the PNG
+ * and the inspection describe one render.
  */
 async function renderResolvedToPng(
   resolved: ResolvedScene,
   buildHtml: (natural: Map<string, ImageSize>) => string,
-  opts?: { page?: Page },
-): Promise<SceneRenderResult> {
+  opts?: { page?: Page; inspect?: boolean },
+): Promise<SceneRenderResult & { layers?: RenderedLayer[] }> {
   const render = async (page: Page): Promise<SceneRenderResult> => {
     const natural = await measureCroppedImages(page, resolved);
     await page.setContent(buildHtml(natural), { waitUntil: "load" });
@@ -748,12 +751,30 @@ async function renderResolvedToPng(
         );
     }
 
+    // Canonical layer inspection (#59) — same pass, measured after auto-fit:
+    // the spec (ids/types/order/effective visibility) comes from the one
+    // resolved tree walk; bounds come only from the browser DOM of the exact
+    // rendered elements (wrapper for non-connectors, the connector's own
+    // path). Measuring paints nothing, so the screenshot is unchanged.
+    let layers: RenderedLayer[] | undefined;
+    if (opts?.inspect) {
+      const spec = [...inspectionLayers(resolved.scene.layers)];
+      const measured = await page.evaluate(collectLayerBounds, spec);
+      layers = spec.map((s, i): RenderedLayer => {
+        const bounds = measured[i]!;
+        return bounds === null
+          ? { id: s.id, type: s.type as SceneLayer["type"], visible: false, bounds: null }
+          : { id: s.id, type: s.type as SceneLayer["type"], visible: true, bounds };
+      });
+    }
+
     const png = await page.screenshot({ type: "png" });
     return {
       png,
       width: resolved.scene.canvas.width,
       height: resolved.scene.canvas.height,
       warnings,
+      ...(layers ? { layers } : {}),
     };
   };
   // An injected page is caller-owned: used as-is, never closed or replaced,
@@ -767,6 +788,223 @@ async function renderResolvedToPng(
     });
     return render(page);
   });
+}
+
+/** The exact frame-px box of rendered paint. */
+export interface LayerBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One resolved Layer as the render pass actually drew it (#59) — a
+ * discriminated union, so a hidden Layer carrying bounds (or a visible one
+ * without them) is unrepresentable:
+ *
+ * - `visible: true` carries the exact bounds of the rendered paint in frame
+ *   px, browser-measured: the wrapper element for non-connectors
+ *   (post-transform — nested, scaled, rotated, and mirrored geometry is
+ *   Chromium's own measurement, never a second transform model) and the
+ *   connector's exact painted extent (see `collectLayerBounds`).
+ * - `visible: false` — `visible: false` or exactly `opacity: 0` on the layer
+ *   itself or any ancestor Group — paints nothing, so bounds are absent:
+ *   null, never a zero-size box.
+ */
+export interface VisibleRenderedLayer {
+  id: string;
+  type: SceneLayer["type"];
+  visible: true;
+  bounds: LayerBox;
+}
+
+/** A Layer that paints nothing — hidden or fully transparent, at any depth. */
+export interface HiddenRenderedLayer {
+  id: string;
+  type: SceneLayer["type"];
+  visible: false;
+  bounds: null;
+}
+
+export type RenderedLayer = VisibleRenderedLayer | HiddenRenderedLayer;
+
+export interface SceneInspectionResult extends SceneRenderResult {
+  /** Every layer in the scene tree, depth-first — the render's own order. */
+  layers: RenderedLayer[];
+}
+
+/**
+ * The inspection spec: every layer in tree order with its effective paint
+ * visibility — a layer paints nothing when it or any ancestor Group is
+ * `visible: false` or exactly `opacity: 0`. Ids are unique (the load gate
+ * rejects duplicates), so the browser can address each element by its stable
+ * `data-layer-id`.
+ */
+function* inspectionLayers(
+  layers: SceneLayer[],
+  painted = true,
+): Generator<{ id: string; type: string; visible: boolean }> {
+  for (const layer of layers) {
+    const own =
+      (layer.visible ?? LAYER_DEFAULTS.visible) &&
+      (layer.opacity ?? LAYER_DEFAULTS.opacity) !== 0;
+    yield { id: layer.id, type: layer.type, visible: painted && own };
+    if (layer.type === "group") yield* inspectionLayers(layer.layers, painted && own);
+  }
+}
+
+/*
+ * Browser-side bounds probe for the inspection pass (#59). Non-connectors
+ * measure their wrapper element — post-transform, so nested, scaled,
+ * rotated, and mirrored geometry is Chromium's own measurement, never a
+ * second transform model.
+ *
+ * A connector's wrapper is the full canvas; its bounds are its exact painted
+ * AABB: the connector's own rendered SVG — the same svg/path/marker markup
+ * the browser painted — is cloned (the live DOM is never touched), given
+ * explicit pixel dimensions, and rasterized through an unattached canvas
+ * from a data URI; scanning nonzero alpha yields the pixel AABB of what
+ * actually painted, covering stroke, dash, curve bow, and the auto-oriented
+ * arrow marker with no transform model and no conservative envelope. Only
+ * when nothing painted (degenerate geometry) does it fall back to the path's
+ * geometry box widened by its own computed stroke. The rasterization is
+ * inlined because Playwright serializes only this function into the page —
+ * it must stay self-contained.
+ *
+ * The rasterization is bounded (PROD-1): connector scans run strictly
+ * sequentially and share one reused full-canvas buffer, cleared between
+ * scans — a connector-heavy Scene holds at most one canvas and one decoded
+ * ImageData at a time, never one allocation per connector.
+ */
+const collectLayerBounds = async (
+  spec: { id: string; type: string; visible: boolean }[],
+): Promise<(LayerBox | null)[]> => {
+  const els = [...document.querySelectorAll<HTMLElement>(".scene-layer")];
+  const round = (v: number) => Number(v.toFixed(4));
+  let canvas: HTMLCanvasElement | null = null;
+  let ctx: CanvasRenderingContext2D | null = null;
+  const rasterizePaintedAabb = (
+    svg: Element,
+    frame: { x: number; y: number; width: number; height: number },
+  ): Promise<LayerBox | null> =>
+    new Promise((resolve, reject) => {
+      const w = Math.max(1, Math.round(frame.width));
+      const h = Math.max(1, Math.round(frame.height));
+      const clone = svg.cloneNode(true) as SVGSVGElement;
+      clone.setAttribute("width", String(w));
+      clone.setAttribute("height", String(h));
+      clone.removeAttribute("style");
+      const uri =
+        "data:image/svg+xml;charset=utf-8," +
+        encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      const img = new Image();
+      img.onload = () => {
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+          ctx = canvas.getContext("2d");
+          if (!ctx) return reject(new Error("no 2d context for connector rasterization"));
+        }
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+        ctx!.clearRect(0, 0, w, h);
+        ctx!.drawImage(img, 0, 0, w, h);
+        let data: Uint8ClampedArray;
+        try {
+          data = ctx!.getImageData(0, 0, w, h).data;
+        } catch (err) {
+          return reject(err as Error);
+        }
+        let minX = w;
+        let minY = h;
+        let maxX = -1;
+        let maxY = -1;
+        for (let y = 0; y < h; y++) {
+          const row = y * w * 4;
+          for (let x = 0; x < w; x++) {
+            if (data[row + x * 4 + 3] > 0) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX < 0) return resolve(null);
+        resolve({ x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 });
+      };
+      img.onerror = () => reject(new Error("connector rasterization failed to decode"));
+      img.src = uri;
+    });
+  // Strictly sequential: one layer measured at a time, so at most one
+  // rasterization canvas exists for the whole pass.
+  const out: (LayerBox | null)[] = [];
+  for (const s of spec) {
+    const el = els.find((e) => e.dataset.layerId === s.id);
+    if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
+    if (!s.visible) {
+      out.push(null);
+      continue;
+    }
+    if (s.type === "connector") {
+      const svg = el.querySelector("svg");
+      if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
+      const frame = svg.getBoundingClientRect();
+      const painted = await rasterizePaintedAabb(svg, frame);
+      if (painted) {
+        out.push({
+          x: round(frame.x + painted.x),
+          y: round(frame.y + painted.y),
+          width: round(painted.width),
+          height: round(painted.height),
+        });
+      } else {
+        // Nothing painted (degenerate geometry) — the path's own geometry,
+        // widened by its computed stroke so the extent stays nonzero.
+        const path = el.querySelector<SVGGeometryElement>("svg > path");
+        if (!path) throw new Error(`connector "${s.id}" has no rendered path`);
+        const r = path.getBoundingClientRect();
+        const sw = parseFloat(getComputedStyle(path).strokeWidth) || 0;
+        out.push({
+          x: round(r.x - sw / 2),
+          y: round(r.y - sw / 2),
+          width: round(r.width + sw),
+          height: round(r.height + sw),
+        });
+      }
+    } else {
+      const r = el.getBoundingClientRect();
+      out.push({ x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) });
+    }
+  }
+  return out;
+};
+
+/**
+ * Render a resolved Scene and inspect it in the same pass (#59): the PNG is
+ * byte-identical to renderScene's, and `layers` reports every resolved Layer
+ * once, in tree order, with bounds measured from the rendered DOM after crop
+ * sizing, fonts, and auto-fit. Hidden layers (own or ancestor) are listed
+ * with `visible: false` and null bounds. Pass `page` to render in an
+ * existing page (tests inject route-blocked ones).
+ */
+export async function renderSceneInspection(
+  resolved: ResolvedScene,
+  opts?: { page?: Page },
+): Promise<SceneInspectionResult> {
+  const result = await renderResolvedToPng(
+    resolved,
+    (natural) => scenePageHtml(resolved, natural),
+    { ...opts, inspect: true },
+  );
+  if (!result.layers) throw new Error("the inspection render produced no layer measurements");
+  return {
+    png: result.png,
+    width: result.width,
+    height: result.height,
+    warnings: [...result.warnings, ...safeAreaWarnings(resolved)],
+    layers: result.layers,
+  };
 }
 
 /**

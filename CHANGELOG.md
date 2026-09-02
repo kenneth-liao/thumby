@@ -4,6 +4,7 @@
 
 ### Added
 
+- The Scene author session lists every resolved Layer once with its rendered bounds and selects Layers from the listing or the canvas through one script-free radio group (#59).
 - Offline Scene author sessions show a validated Scene and Reference Thumbnail side by side and in an adjustable overlay through a capability-scoped loopback URL (#58).
 - Generation Job review for every kind (US-022, #57): `jobs review` shows Plate, Object, and Creator candidates at full size and 168px, with the isolation evidence adoption would use and, for creators, face detail against the identity anchors
 - Typed References are semantic for Plate and Object generation (US-020/021/023/024, #56): the effective prompt role-assigns every attached reference by ordinal and role — never by path — with an `edit` reference described as the source-to-simplify (macrostructure kept: major regions, proportions, visual language, as a few large legible regions; incidental controls, small labels, and dense text dropped) and `style` kept style-only. Object generation permits one isolated non-text UI panel — final text, exact official-logo subjects, scenes, and final composites stay rejected. Job records and reruns preserve typed Reference identity, role, and effective-prompt semantics; README and `jobs` help document the thumbnail-scale simplification target and the Plate-versus-Object editability choice. Legacy `thumb --ref` normalizes its documented likeness paths to the `identity` role, so its effective prompt role-assigns them too (backdrop/content contract otherwise unchanged)
@@ -13,6 +14,8 @@
 
 ### Fixed
 
+- Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
+- Scene author Connector selection highlights the connector's exact painted extent — stroke, dash, curve, and arrowhead measured from the browser's own rasterization of the rendered connector — instead of a conservative stroke/arrow envelope, and a hidden Layer's inspection state can no longer carry bounds (#59).
 - The Scene CLI's generic missing/unknown-command recovery guidance now lists the `author` command among the expected commands (#58, #70)
 - Scene author session: the side-by-side view keeps the Render and Reference Thumbnail on one horizontal row at common viewports, capability checks are constant-time, and a failed session shutdown reports a structured terminal failure with a nonzero exit instead of a silent success (#58)
 - A recorded matte that fails the true-alpha gate is labeled "invalid matte — not adoptable" with its refusal reason instead of "no matte", and the review sheet is published atomically so a failed write can never truncate the prior sheet (#57)

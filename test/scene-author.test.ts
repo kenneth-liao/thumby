@@ -46,6 +46,8 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 // --- fixtures --------------------------------------------------------------
 
 const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="#10233f"/></svg>`;
+/** Intrinsic 200×200 source for the live fixture's cropped layer. */
+const PHOTO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#3366aa"/><circle cx="100" cy="100" r="70" fill="#ffcc00"/></svg>`;
 
 /** Left half red, right half blue — a valid 1280×720 reference with spatial variation. */
 const halfReferenceRgba = (): Buffer => {
@@ -73,6 +75,7 @@ async function makeFixture(
 ): Promise<Fixture> {
   const root = await mkdtemp(path.join(tmpdir(), `thumby-author-${name}-`));
   await writeFile(path.join(root, "bg.svg"), SVG);
+  await writeFile(path.join(root, "photo.svg"), PHOTO_SVG);
   const referencePath = path.join(root, "ref.png");
   await writeFile(referencePath, encodePngRgba(1280, 720, halfReferenceRgba()));
   const scene: Record<string, unknown> = {
@@ -93,6 +96,85 @@ async function makeFixture(
   await writeFile(scenePath, JSON.stringify(override ? override(scene) : scene));
   return { root, scenePath, referencePath };
 }
+
+/**
+ * An id exercising HTML escaping end to end — valid per the schema (a
+ * non-empty unique string), but executable markup if ever interpolated
+ * unescaped. Selectors must carry only generated indices.
+ */
+const SNEAKY_ID = 'sneaky"><svg onload=alert(1)>';
+
+/**
+ * The live session's richer Scene (#59): every layer kind the view must
+ * list and select — image, auto-fit text, shape, a user-authored id needing
+ * escaping, a mirrored shape, a cropped image, a scaled Group with nested
+ * (one rotated) children, a plain Group with a zero-opacity child, a
+ * zero-opacity Group (and its child), a zero-opacity leaf, an own-hidden
+ * shape, and a Connector with an arrow. Tree order (the view's index
+ * space): bg, headline, chip, sneaky, flip, portrait, card, card-plate,
+ * card-tilt, tag, tag-dot, tag-fade, hush, hush-dot, faded, ghost, line.
+ */
+const layerInspectionScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
+  ...scene,
+  layers: [
+    { id: "bg", type: "image", asset: "./bg.svg", position: { x: 0, y: 0 }, size: { width: 1280, height: 720 } },
+    {
+      id: "headline",
+      type: "text",
+      text: "Layer inspection",
+      font: "Source Sans 3",
+      position: { x: 60, y: 40 },
+      size: { width: 700, height: 140 },
+      autoFit: { min: 24, max: 110 },
+    },
+    { id: "chip", type: "shape", shape: "rect", color: "#ff0044", radius: 12, position: { x: 120, y: 320 }, size: { width: 260, height: 160 } },
+    { id: SNEAKY_ID, type: "shape", shape: "ellipse", color: "#22cc88", position: { x: 880, y: 420 }, size: { width: 220, height: 140 } },
+    { id: "flip", type: "shape", shape: "rect", color: "#2f6fdb", position: { x: 620, y: 540 }, size: { width: 180, height: 110 }, mirror: true },
+    {
+      id: "portrait",
+      type: "image",
+      asset: "./photo.svg",
+      position: { x: 1000, y: 80 },
+      size: { width: 200, height: 140 },
+      crop: { left: 10, top: 10, right: 10, bottom: 10 },
+      fit: "cover",
+    },
+    {
+      id: "card",
+      type: "group",
+      position: { x: 180, y: 120 },
+      size: { width: 300, height: 170 },
+      scale: 1.5,
+      layers: [
+        { id: "card-plate", type: "shape", shape: "rect", color: "#4455aa", position: { x: 16, y: 16 }, size: { width: 268, height: 138 } },
+        { id: "card-tilt", type: "shape", shape: "rect", color: "#dd8822", position: { x: 40, y: 50 }, size: { width: 120, height: 80 }, rotation: 30 },
+      ],
+    },
+    {
+      id: "tag",
+      type: "group",
+      position: { x: 640, y: 180 },
+      size: { width: 160, height: 90 },
+      layers: [
+        { id: "tag-dot", type: "shape", shape: "ellipse", color: "#d9a441", position: { x: 10, y: 10 }, size: { width: 70, height: 70 } },
+        { id: "tag-fade", type: "shape", shape: "rect", color: "#7a4a9a", position: { x: 90, y: 20 }, size: { width: 60, height: 50 }, opacity: 0 },
+      ],
+    },
+    {
+      id: "hush",
+      type: "group",
+      position: { x: 60, y: 560 },
+      size: { width: 140, height: 80 },
+      opacity: 0,
+      layers: [
+        { id: "hush-dot", type: "shape", shape: "rect", color: "#4a7a5a", position: { x: 10, y: 10 }, size: { width: 60, height: 50 } },
+      ],
+    },
+    { id: "faded", type: "shape", shape: "rect", color: "#aa3344", position: { x: 1060, y: 600 }, size: { width: 120, height: 70 }, opacity: 0 },
+    { id: "ghost", type: "shape", shape: "rect", color: "#333333", position: { x: 400, y: 500 }, size: { width: 120, height: 80 }, visible: false },
+    { id: "line", type: "connector", from: "chip", to: SNEAKY_ID, arrow: true, width: 4 },
+  ],
+});
 
 // --- subprocess helpers ----------------------------------------------------
 
@@ -344,7 +426,7 @@ describe("scene author — live session", () => {
   let closed: Promise<JsonEvent>;
 
   beforeAll(async () => {
-    fix = await makeFixture("live");
+    fix = await makeFixture("live", layerInspectionScene);
     referenceBytes = await readFile(fix.referencePath);
     session = Bun.spawn(["bun", CLI, "author", fix.scenePath], {
       cwd: ROOT,
@@ -530,6 +612,225 @@ describe("scene author — live session", () => {
 
         // Every request the view made stayed on the loopback session.
         for (const req of requested) expect(req.startsWith(origin)).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+    },
+    60_000,
+  );
+
+  test(
+    "the view lists every Layer once; selection works from listing and canvas; the Scene bytes never change",
+    async () => {
+      const sceneBytesBefore = await readFile(fix.scenePath);
+      const browser = await getBrowser();
+      const ctx = await browser.newContext({
+        viewport: { width: 1440, height: 1500 },
+        deviceScaleFactor: 1,
+      });
+      const origin = url.origin;
+      await ctx.route("**/*", (route) =>
+        route.request().url().startsWith(origin) ? route.continue() : route.abort(),
+      );
+      const page: Page = await ctx.newPage();
+      try {
+        await page.goto(started.url);
+
+        // Every Layer exactly once, in render order — nested Group children,
+        // mirrored, cropped, and Connector Layers included; hidden Layers
+        // present but visibly disabled and non-selectable.
+        const rows = await page.evaluate(() =>
+          [...document.querySelectorAll(".listing .row")].map((row) => ({
+            tag: row.tagName,
+            hidden: row.classList.contains("hidden"),
+            selectable: row.getAttribute("for") !== null,
+            ariaDisabled: row.getAttribute("aria-disabled"),
+            id: row.querySelector(".name")?.textContent ?? "",
+            forIndex: row.getAttribute("for"),
+            bounds: row.querySelector(".bounds")?.textContent ?? "",
+          })),
+        );
+        expect(rows.map((r) => r.id)).toEqual([
+          "bg", "headline", "chip", SNEAKY_ID, "flip", "portrait",
+          "card", "card-plate", "card-tilt", "tag", "tag-dot", "tag-fade",
+          "hush", "hush-dot", "faded", "ghost", "line",
+        ]);
+        expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
+        // Layers that paint nothing — visible:false and opacity:0 (leaf,
+        // Group, or Group child) — each appear once as visibly hidden,
+        // disabled, non-selectable rows with bounds absent.
+        const hidden = rows.filter((r) => r.hidden);
+        expect(hidden.map((r) => r.id)).toEqual([
+          "tag-fade", "hush", "hush-dot", "faded", "ghost",
+        ]);
+        for (const h of hidden) {
+          expect(h.tag).toBe("DIV");
+          expect(h.selectable).toBe(false);
+          expect(h.ariaDisabled).toBe("true");
+          expect(h.bounds).toBe(""); // bounds absent for a non-painted Layer
+        }
+        expect(rows.filter((r) => !r.hidden)).toHaveLength(12);
+
+        // Visible Layers: one radio each (the single selection state), one
+        // exact highlight box and one hit target on the canvas, indexed by
+        // tree order — non-painted Layers get no radio and no canvas target.
+        expect(await page.locator('input[type="radio"][name="layer"]').count()).toBe(12);
+        expect(await page.locator(".canvas .hit").count()).toBe(12);
+        expect(await page.locator(".canvas .box").count()).toBe(12);
+        for (const i of [11, 12, 13, 14, 15]) {
+          expect(await page.locator(`.canvas .hit[data-sel="${i}"]`).count()).toBe(0);
+          expect(await page.locator(`.canvas .box[data-sel="${i}"]`).count()).toBe(0);
+          expect(await page.locator(`input#layer-${i}`).count()).toBe(0);
+        }
+
+        // Every hit/highlight box names its stable Layer (escaped attribute;
+        // selectors stay index-only — no raw id in id/for/data-sel).
+        const boxIds = await page.evaluate(() =>
+          [...document.querySelectorAll(".canvas .box")].map((el) => el.getAttribute("data-layer-id")),
+        );
+        expect(boxIds).toEqual([
+          "bg", "headline", "chip", SNEAKY_ID, "flip", "portrait",
+          "card", "card-plate", "card-tilt", "tag", "tag-dot", "line",
+        ]);
+        const offenders = await page.evaluate((ids) => {
+          const bad: string[] = [];
+          for (const el of document.querySelectorAll("*")) {
+            for (const attr of ["id", "for", "data-sel"]) {
+              const v = el.getAttribute(attr);
+              if (v && ids.some((id) => v.includes(id))) bad.push(`${attr}=${v}`);
+            }
+          }
+          return bad;
+        }, rows.map((r) => r.id));
+        expect(offenders).toEqual([]);
+
+        // The user-authored id is escaped text everywhere it appears — the
+        // listing and the canvas boxes — never markup.
+        const servedHtml = (await rawRequest(port, `/${token}/view`)).body.toString("utf8");
+        expect(servedHtml).toContain("sneaky&quot;&gt;&lt;svg onload=alert(1)&gt;");
+        expect(servedHtml).not.toContain("<svg onload");
+        expect(servedHtml).not.toContain('onerror');
+        const viewHtml = await page.content();
+        expect(viewHtml).not.toContain("<svg onload");
+        expect(await page.locator("script").count()).toBe(0);
+        expect(await page.locator('.listing .row[data-sel="3"] .name').textContent()).toBe(SNEAKY_ID);
+
+        // Selection starts empty.
+        const noneChecked = await page.evaluate(() =>
+          [...document.querySelectorAll<HTMLInputElement>('input[name="layer"]')].every(
+            (r) => !r.checked,
+          ),
+        );
+        expect(noneChecked).toBe(true);
+
+        // A selected box must be the exact transformed canvas-space AABB of
+        // that stable Layer: its data-layer-id names the Layer and its
+        // percentages invert to the exact bounds the listing reports.
+        const expectSelectedBox = async (i: number, id: string) => {
+          const box = page.locator(`.canvas .box[data-sel="${i}"]`);
+          expect(await box.getAttribute("data-layer-id")).toBe(id);
+          expect(await box.evaluate((el) => getComputedStyle(el).display)).toBe("block");
+          const style = await box.getAttribute("style");
+          const boundsText = await page
+            .locator(`.listing .row[data-sel="${i}"] .bounds`)
+            .textContent();
+          const m = boundsText!.match(/^([\d.]+),([\d.]+) · ([\d.]+)×([\d.]+)$/);
+          expect(m).not.toBeNull();
+          const stylePct = (re: RegExp) => {
+            const hit = style!.match(re);
+            expect(hit).not.toBeNull();
+            return Number(hit![1]);
+          };
+          // Percentages are bounds/1280·100 (x, width) and /720·100 (y, height)
+          // rounded to 4 decimals — inverting stays within 0.01px.
+          expect((stylePct(/left:([\d.]+)%/) / 100) * 1280).toBeCloseTo(Number(m![1]), 2);
+          expect((stylePct(/top:([\d.]+)%/) / 100) * 720).toBeCloseTo(Number(m![2]), 2);
+          expect((stylePct(/width:([\d.]+)%/) / 100) * 1280).toBeCloseTo(Number(m![3]), 2);
+          expect((stylePct(/height:([\d.]+)%/) / 100) * 720).toBeCloseTo(Number(m![4]), 2);
+        };
+        const rowBg = (i: number) =>
+          page
+            .locator(`.listing .row[data-sel="${i}"]`)
+            .evaluate((el) => getComputedStyle(el).backgroundColor);
+        const expectOnlySelected = async (i: number) => {
+          for (const other of rows.filter((r) => !r.hidden).map((r) => r.forIndex!)) {
+            const idx = Number(other.replace("layer-", ""));
+            expect(
+              await page
+                .locator(`.canvas .box[data-sel="${idx}"]`)
+                .evaluate((el) => getComputedStyle(el).display),
+            ).toBe(idx === i ? "block" : "none");
+          }
+          expect(await rowBg(i)).not.toBe("rgba(0, 0, 0, 0)");
+        };
+
+        // From the listing: the rotated child of the scaled Group (index 8).
+        const tiltFor = rows.find((r) => r.id === "card-tilt")!.forIndex!;
+        await page.click(`.listing label[for="${tiltFor}"]`);
+        expect(await page.isChecked(`#${tiltFor}`)).toBe(true);
+        await expectSelectedBox(8, "card-tilt");
+        await expectOnlySelected(8);
+
+        // From the listing: the Group child next to a zero-opacity sibling
+        // (index 10) — the faded sibling neither blocks nor shadows it.
+        const dotFor = rows.find((r) => r.id === "tag-dot")!.forIndex!;
+        await page.click(`.listing label[for="${dotFor}"]`);
+        expect(await page.isChecked(`#${dotFor}`)).toBe(true);
+        await expectSelectedBox(10, "tag-dot");
+        await expectOnlySelected(10);
+
+        // From the listing: the cropped image (index 5).
+        const portraitFor = rows.find((r) => r.id === "portrait")!.forIndex!;
+        await page.click(`.listing label[for="${portraitFor}"]`);
+        expect(await page.isChecked(`#${portraitFor}`)).toBe(true);
+        await expectSelectedBox(5, "portrait");
+        await expectOnlySelected(5);
+
+        // From the canvas: the mirrored shape (index 4).
+        const flipFor = rows.find((r) => r.id === "flip")!.forIndex!;
+        await page.click(`.canvas .hit[for="${flipFor}"]`);
+        expect(await page.isChecked(`#${flipFor}`)).toBe(true);
+        await expectSelectedBox(4, "flip");
+        await expectOnlySelected(4);
+
+        // From the canvas: the adversarial-id layer (index 3) — selectable,
+        // associated by its escaped stable id, and inert.
+        const sneakyFor = rows.find((r) => r.id === SNEAKY_ID)!.forIndex!;
+        await page.click(`.canvas .hit[for="${sneakyFor}"]`);
+        expect(await page.isChecked(`#${sneakyFor}`)).toBe(true);
+        await expectSelectedBox(3, SNEAKY_ID);
+        await expectOnlySelected(3);
+
+        // From the canvas: the Connector (index 16) — its box is the exact
+        // painted extent the listing reports.
+        const lineFor = rows.find((r) => r.id === "line")!.forIndex!;
+        await page.click(`.canvas .hit[for="${lineFor}"]`);
+        expect(await page.isChecked(`#${lineFor}`)).toBe(true);
+        await expectSelectedBox(16, "line");
+        await expectOnlySelected(16);
+        // The hit target carries the symmetric minimum (centered max())
+        // while the displayed box stays the exact bounds.
+        const hitStyle = await page.getAttribute(`.canvas .hit[data-sel="16"]`, "style");
+        expect(hitStyle).toContain("max(");
+        expect(hitStyle).toContain("translate(-50%,-50%)");
+        // Compositing order sets canvas priority: bg's hit (index 0) sits
+        // under line's (index 16).
+        const zIndexOf = (i: number) =>
+          page
+            .locator(`.canvas .hit[data-sel="${i}"]`)
+            .evaluate((el) => Number(getComputedStyle(el).zIndex));
+        expect(await zIndexOf(0)).toBeLessThan(await zIndexOf(16));
+
+        // A fully occluded Layer — bg, beneath every later hit across the
+        // whole canvas — stays listing-selectable.
+        const bgFor = rows.find((r) => r.id === "bg")!.forIndex!;
+        await page.click(`.listing label[for="${bgFor}"]`);
+        expect(await page.isChecked(`#${bgFor}`)).toBe(true);
+        await expectSelectedBox(0, "bg");
+
+        // Opening and using selection leaves the Scene bytes unchanged.
+        const sceneBytesAfter = await readFile(fix.scenePath);
+        expect(Buffer.compare(sceneBytesBefore, sceneBytesAfter)).toBe(0);
       } finally {
         await ctx.close();
       }

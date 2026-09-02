@@ -881,11 +881,20 @@ Thumbnail side by side plus an adjustable overlay — pure CSS, no script —
 under a strict CSP (default/script/connect/object 'none', images same-origin
 only, inline style only) with `no-store`/`nosniff`/`no-referrer`; the session
 and its view make no remote requests, and `/reference.png` serves the exact
-bytes validation read (never reread). Ctrl-C or SIGTERM ends the session and
+bytes validation read (never reread). The view also lists every Layer of the
+resolved Scene exactly once in render order (nested Group children and
+Connectors included) with its rendered bounds, and a script-free radio group
+selects a Layer from either the listing or the canvas — the highlighted box
+is the Layer's exact transformed bounds on the current Render. Hidden Layers
+appear once as disabled, non-selectable rows with no canvas target. Opening
+and using selection never writes. Selecting a Layer highlights its exact
+rendered bounds on the current Render — the transformed box for positioned
+Layers, the painted extent (stroke, dash, curve, arrowhead) for a
+Connector. Ctrl-C or SIGTERM ends the session and
 releases its listener and browser cleanly. A missing or invalid Reference
-fails before any session exists, naming the field to fix. Layer inspection,
-mutation, saving, and generation are out of scope — the session is a review
-view; edit the Scene file itself.
+fails before any session exists, naming the field to fix. Layer mutation,
+saving, and generation are out of scope — the session is a review view; edit
+the Scene file itself.
 
 ## Overlay cards
 

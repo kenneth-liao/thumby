@@ -31,6 +31,7 @@
  */
 import crypto, { timingSafeEqual } from "node:crypto";
 import type { CheckedReference } from "./compare.js";
+import type { RenderedLayer } from "./scene-render.js";
 import { closeBrowser } from "./browser.js";
 import { escapeHtml } from "./html.js";
 
@@ -41,6 +42,12 @@ export interface AuthorSessionInput {
   renderPng: Buffer;
   /** The validated Reference Thumbnail (its bytes were read once upstream). */
   reference: CheckedReference;
+  /**
+   * The canonical inspection of the same render pass (#59): every resolved
+   * Layer once, in tree order, with browser-measured bounds. Read-only
+   * session data — selection highlights these bounds and never writes.
+   */
+  layers: RenderedLayer[];
 }
 
 /**
@@ -118,8 +125,20 @@ function securityHeaders(extra: Record<string, string> = {}): Record<string, str
  * The authoring view: side by side by default, an overlay behind a mode
  * radio, opacity steps 0–100 driven by sibling `:checked` selectors — no
  * script anywhere, so the CSP's script/connect bans cost nothing.
+ *
+ * Layer inspection (#59): every resolved Layer is listed exactly once in
+ * render order — nested Group children and Connectors included. Visible
+ * layers get a generated-index radio (one script-free radio group is the
+ * single selection state), an exact hit/highlight box over the render, and a
+ * selectable listing row; layers that paint nothing — hidden or exactly
+ * opacity: 0, on themselves or an ancestor Group — appear once as disabled,
+ * non-selectable rows with bounds absent and no canvas target. Raw layer ids
+ * never enter selectors or generated control attributes (id, for, data-sel —
+ * generated tree indices only); escaped ids appear solely as inert
+ * data-layer-id association attributes on the hit/highlight boxes and as
+ * escaped listing text.
  */
-export function renderAuthorView(scene: string): string {
+export function renderAuthorView(scene: string, layers: RenderedLayer[]): string {
   const steps = Array.from({ length: 11 }, (_, i) => i * 10);
   const radios = steps
     .map((v) => `<input type="radio" name="alpha" id="alpha-${v}"${v === 50 ? " checked" : ""}>`)
@@ -129,12 +148,82 @@ export function renderAuthorView(scene: string): string {
     .map((v) => `#alpha-${v}:checked ~ .views .overlay .render{opacity:${v / 100}}`)
     .join("\n");
 
+  // Frame-px bounds → canvas-box percentages. The canvas is exactly 1280×720
+  // (the Scene contract, the same fixed geometry the overlay view assumes).
+  const pctOf = (v: number, base: number) => `${Number(((v / base) * 100).toFixed(4))}%`;
+  // One radio per VISIBLE layer, keyed by generated tree index — the single
+  // selection state both the canvas and the listing drive. Hidden layers get
+  // none: no radio, no canvas target, nothing to select.
+  const layerRadios = layers
+    .map((l, i) => (l.visible ? `<input type="radio" name="layer" id="layer-${i}">` : ""))
+    .join("");
+  // Generated selection rules — indexed, never id-bearing.
+  const selectionRules = layers
+    .map((l, i) =>
+      l.visible
+        ? `#layer-${i}:checked ~ .views .box[data-sel="${i}"]{display:block}\n` +
+          `#layer-${i}:checked ~ .views .hit[data-sel="${i}"]{outline:2px solid #ffd166}\n` +
+          `#layer-${i}:checked ~ .listing .row[data-sel="${i}"]{background:#26282e;box-shadow:inset 2px 0 0 #ffd166}`
+        : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+  // Canvas hit targets, one per visible layer, stacked in compositing order —
+  // later layers sit above earlier ones. Each carries its stable Layer id
+  // (escaped — text only, never a selector). Positioned at the bounds'
+  // center with a symmetric 14px minimum, so small layers stay clickable;
+  // the displayed highlight stays exact (the separate .box below).
+  const hits = layers
+    .map((l, i) => {
+      if (!l.visible) return "";
+      const b = l.bounds;
+      return (
+        `<label class="hit" for="layer-${i}" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}" style="` +
+        `left:${pctOf(b.x + b.width / 2, 1280)};top:${pctOf(b.y + b.height / 2, 720)};` +
+        `width:max(${pctOf(b.width, 1280)},14px);height:max(${pctOf(b.height, 720)},14px);` +
+        `transform:translate(-50%,-50%);z-index:${1 + i}"></label>`
+      );
+    })
+    .join("");
+  // Highlight boxes: the exact transformed canvas-space AABB of the selected
+  // layer — never the min-target geometry. pointer-events:none keeps every
+  // click flowing to the hit targets beneath.
+  const boxes = layers
+    .map((l, i) => {
+      if (!l.visible) return "";
+      const b = l.bounds;
+      return (
+        `<div class="box" data-sel="${i}" data-layer-id="${escapeHtml(l.id)}" style="left:${pctOf(b.x, 1280)};top:${pctOf(b.y, 720)};` +
+        `width:${pctOf(b.width, 1280)};height:${pctOf(b.height, 720)};z-index:${200 + i}"></div>`
+      );
+    })
+    .join("");
+  // The listing: every layer exactly once, in render order. Visible rows are
+  // labels for the same radios; hidden rows are disabled divs with bounds
+  // absent — visibly hidden, never selectable. The visible/hidden branch is
+  // the RenderedLayer union's discriminant: a visible row always has bounds,
+  // a hidden row never does.
+  const boundsText = (b: { x: number; y: number; width: number; height: number }) =>
+    `${b.x},${b.y} · ${b.width}×${b.height}`;
+  const rows = layers
+    .map((l, i) => {
+      const head = `<span class="idx">${i}</span><span class="type">${l.type}</span>` +
+        `<span class="name">${escapeHtml(l.id)}</span>`;
+      if (!l.visible)
+        return `<div class="row hidden" data-sel="${i}" aria-disabled="true">${head}` +
+          `<span class="state">hidden</span></div>`;
+      return `<label class="row" for="layer-${i}" data-sel="${i}">${head}` +
+        `<span class="bounds">${boundsText(l.bounds)}</span></label>`;
+    })
+    .join("\n");
+
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${CSP}">
 <title>scene author — ${escapeHtml(scene)}</title>
 <style>
 ${rules}
+${selectionRules}
 #mode-overlay:checked ~ .views .side{display:none}
 #mode-side:checked ~ .views .overlay{display:none}
 #mode-side:checked ~ .controls label[for="mode-side"],
@@ -150,6 +239,16 @@ h1{font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#8a8a94;f
 .controls{display:flex;align-items:center;gap:6px;margin:0 0 12px;font-size:11px;color:#8a8a94}
 input[type="radio"]{position:absolute;opacity:0;pointer-events:none}
 .controls label{border:1px solid #26282e;border-radius:4px;padding:2px 8px;cursor:pointer}
+.listing{width:1280px;max-width:100%;margin:0 0 16px;border:1px solid #26282e;border-radius:8px;overflow:hidden;background:#101216}
+.listing .row{display:flex;align-items:baseline;gap:12px;padding:4px 12px;font:12px/1.7 ui-monospace,monospace;margin:0}
+.listing label.row{cursor:pointer}
+.listing .row .idx{color:#5a5a62;min-width:2ch;text-align:right}
+.listing .row .type{color:#7fb0ff;min-width:9ch}
+.listing .row .name{color:#e7e7ea;overflow-wrap:anywhere}
+.listing .row .bounds{color:#8a8a94;margin-left:auto;white-space:nowrap}
+.listing .row.hidden{color:#6a6a72;opacity:.55;cursor:default}
+.listing .row.hidden .type{color:#6a6a72}
+.listing .row.hidden .state{color:#c96f6f;margin-left:auto;font-style:italic}
 .views .side{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
   .side figure{flex:1 1 480px;min-width:480px;max-width:1280px;margin:0;background:linear-gradient(160deg,#16181d,#0e1013);border:1px solid #26282e;border-radius:8px;padding:14px;display:flex;flex-direction:column;align-items:center;gap:10px}
 .side img{display:block;width:100%;max-width:1280px;height:auto;border-radius:4px}
@@ -157,16 +256,23 @@ figcaption{font-size:11px;color:#8a8a94;font-family:ui-monospace,monospace;text-
 .views .overlay{position:relative;width:1280px;max-width:100%;aspect-ratio:16/9;border-radius:4px;overflow:hidden;background:linear-gradient(160deg,#16181d,#0e1013)}
 .overlay img{position:absolute;inset:0;width:100%;height:100%;display:block}
 .overlay .render{opacity:.5}
+.canvas{position:relative;width:100%;max-width:1280px;aspect-ratio:16/9}
+.canvas img{position:absolute;inset:0;width:100%;height:100%;display:block;border-radius:4px}
+.canvas .hit{position:absolute;display:block;cursor:pointer;border-radius:2px}
+.canvas .hit:hover{outline:1px dashed rgba(255,209,102,.55)}
+.canvas .box{position:absolute;display:none;outline:2px solid #ffd166;outline-offset:-1px;pointer-events:none;border-radius:2px}
 </style></head><body>
 <h1>Scene author · ${escapeHtml(scene)}</h1>
 <input type="radio" name="mode" id="mode-side" checked>
 <input type="radio" name="mode" id="mode-overlay">
 ${radios}
+${layerRadios}
 <div class="controls">view <label for="mode-side">side by side</label><label for="mode-overlay">overlay</label><span>opacity</span>${labels}</div>
+<div class="listing">${rows}</div>
 <div class="views">
   <div class="side">
     <figure><img src="reference.png" alt="Reference Thumbnail"><figcaption>reference</figcaption></figure>
-    <figure><img src="render.png" alt="Render"><figcaption>render</figcaption></figure>
+    <figure><div class="canvas"><img src="render.png" alt="Render">${hits}${boxes}</div><figcaption>render — click a layer to select it</figcaption></figure>
   </div>
   <div class="overlay">
     <img src="reference.png" alt="Reference Thumbnail (under)">
@@ -214,7 +320,7 @@ export async function startAuthorSession(input: AuthorSessionInput): Promise<nev
           return empty(404);
         switch (match[2]) {
           case "/view":
-            return new Response(renderAuthorView(input.scene), {
+            return new Response(renderAuthorView(input.scene, input.layers), {
               headers: securityHeaders({ "content-type": "text/html; charset=utf-8" }),
             });
           case "/render.png":
