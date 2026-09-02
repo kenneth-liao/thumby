@@ -1640,6 +1640,78 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
           if (w.__origFetch) window.fetch = w.__origFetch;
         });
 
+        // The exact reverse order: an older REAL success is delayed while a
+        // newer request is genuinely rejected. The rejection displays first;
+        // the older success must then still apply its valid preview, geometry,
+        // and applied revision — but must not overwrite the newer rejection's
+        // status text.
+        await page.evaluate(() => {
+          const w = window as unknown as {
+            __origFetch?: typeof fetch;
+            __older?: { rev: number; png: string; layers: { id: string; position?: { current: { x: number; y: number } } }[] };
+          };
+          w.__origFetch = window.fetch;
+          w.__older = undefined;
+          const orig = w.__origFetch;
+          let first = true;
+          window.fetch = ((...args: Parameters<typeof fetch>) => {
+            const p = orig!(...args);
+            if (!String(args[0]).endsWith("/move")) return p;
+            if (!first) return p;
+            first = false;
+            void p.then((r) => r.clone().json()).then((b) => {
+              w.__older = b;
+            });
+            // The real success is held back from the client; the server has
+            // already committed it.
+            return new Promise<Response>((resolve) => setTimeout(() => resolve(p), 2000));
+          }) as unknown as typeof fetch;
+        });
+        const statusBeforeReverse = await statusText();
+        await dragHit("1", 10, 0); // real success, delayed
+        await dragHit("8", 10, 0); // a Connector drag: real rejection, displayed first
+        await page.waitForFunction(
+          (prev) => document.getElementById("status")?.textContent !== prev,
+          statusBeforeReverse,
+          { timeout: 30_000 },
+        );
+        const reverseError = await statusText();
+        expect(reverseError).toContain("no authored position");
+        // The delayed success has not applied yet: the applied revision is
+        // still the pre-rejection one.
+        expect(await appliedRev()).toBe(14);
+        await page.waitForFunction(
+          () => (window as unknown as { __older?: unknown }).__older !== undefined,
+          undefined,
+          { timeout: 30_000 },
+        );
+        const olderSuccess = await page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __older: { rev: number; png: string; layers: { id: string; position?: { current: { x: number; y: number } } }[] };
+              }
+            ).__older,
+        );
+        expect(olderSuccess).not.toBeNull();
+        expect(olderSuccess!.rev).toBe(15);
+        await page.waitForFunction(
+          (r: number) => Number(document.getElementById("status")?.getAttribute("data-rev")) === r,
+          olderSuccess!.rev,
+          { timeout: 30_000 },
+        );
+        // The accepted state became visible — preview, listing, applied
+        // revision — while the newer rejection text survived.
+        expect(await previewSrc()).toBe(`data:image/png;base64,${olderSuccess!.png}`);
+        const chipPosAfter = (await page.locator('.listing .row[data-sel="1"] .pos').textContent())!;
+        const chipFromOlder = olderSuccess!.layers.find((l) => l.id === "chip")!.position!.current;
+        expect(chipFromOlder.x + "," + chipFromOlder.y).toBe(chipPosAfter);
+        expect(await statusText()).toBe(reverseError);
+        await page.evaluate(() => {
+          const w = window as unknown as { __origFetch?: typeof fetch };
+          if (w.__origFetch) window.fetch = w.__origFetch;
+        });
+
         // Rapid overlapping movements serialize strictly FIFO: revisions
         // advance one by one and each response carries the cumulative state
         // of every delta so far.
@@ -1649,7 +1721,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         const deltas = [10, 20, 30, 40, 50, 60];
         const burst = await Promise.all(deltas.map((d) => postMove("chip", d, 0)));
         for (let i = 0; i < burst.length; i++) {
-          expect(burst[i]!.rev).toBe(15 + i);
+          expect(burst[i]!.rev).toBe(16 + i);
           const chip = byId(burst[i]!, "chip").position!.current;
           expect(chip.x).toBeCloseTo(
             chipXBefore + deltas.slice(0, i + 1).reduce((a, b) => a + b, 0),
@@ -1672,7 +1744,7 @@ describe("scene author — moving Layers with unsaved live preview (#60)", () =>
         for (let ci = 0; ci < cycles.length; ci++) {
           const c = cycles[ci]!;
           const next = await postMove(c.id, c.dx, c.dy);
-          expect(next.rev).toBe(21 + ci);
+          expect(next.rev).toBe(22 + ci);
           const center = centerOf(byId(next, c.id));
           const centerBefore = centerOf(byId(last, c.id));
           expect(center.x - centerBefore.x).toBeCloseTo(c.dx, 0);

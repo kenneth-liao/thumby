@@ -235,7 +235,7 @@ const CLIENT_SCRIPT = `(() => {
     row.classList.toggle("modified", moved);
   };
 
-  const apply = (body) => {
+  const apply = (body, current) => {
     const dataUri = "data:image/png;base64," + body.png;
     img.src = dataUri;
     const overlayRender = document.querySelector(".overlay .render");
@@ -257,10 +257,15 @@ const CLIENT_SCRIPT = `(() => {
       }
       setRow(i, l);
     });
-    status.dataset.rev = String(body.rev);
-    status.textContent =
-      "rev " + body.rev + " · unsaved " + unsavedCount(body.layers) + " · Scene file unchanged";
     if (warnings) warnings.textContent = body.warnings.join(" · ");
+    // The applied revision stays accurate even when a newer outcome owns the
+    // status text.
+    status.dataset.rev = String(body.rev);
+    // The status text belongs to the newest request's outcome only: a delayed
+    // older success applies its state without hiding a newer error.
+    if (current)
+      status.textContent =
+        "rev " + body.rev + " · unsaved " + unsavedCount(body.layers) + " · Scene file unchanged";
   };
 
   const showError = (body, current) => {
@@ -302,7 +307,7 @@ const CLIENT_SCRIPT = `(() => {
     // Responses resolve in completion order; only a newer revision may ever
     // replace the display, so an older result cannot become the newest state.
     if (body && body.rev > applied) {
-      apply(body);
+      apply(body, seq === issued);
       applied = body.rev;
     }
   };
