@@ -15,7 +15,7 @@
 
 ### Fixed
 
-- Scene author session: a Connector's listing bounds now update when its target Layers move, and a delayed older movement outcome can no longer overwrite the status of a newer one — a late older error cannot hide a newer accepted preview, and a late older success cannot hide a newer rejection, while the accepted preview, geometry, and applied revision still apply (#60). Movements now queue by request arrival (the body read enqueues with the apply) instead of body completion, and tiny-scale Groups no longer collapse — basis precision is preserved and invertibility is scale-relative, so valid small or nested positive scales stay draggable (#60).
+- Scene author movement keeps Connector bounds and the latest request status current, queues changes by request arrival, and supports valid tiny-scale Groups (#60).
 - Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
 - Scene author Connector selection highlights the connector's exact painted extent — stroke, dash, curve, and arrowhead measured from the browser's own rasterization of the rendered connector — instead of a conservative stroke/arrow envelope, and a hidden Layer's inspection state can no longer carry bounds (#59).
 - The Scene CLI's generic missing/unknown-command recovery guidance now lists the `author` command among the expected commands (#58, #70)
