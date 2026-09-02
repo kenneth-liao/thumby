@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Scene author layer inspection: `opacity: 0` on a Layer or any ancestor Group now counts as painting nothing — those Layers report `visible: false` with bounds absent and get no radio, canvas hit, or highlight box, remaining disabled listing rows — and Connector bounds rasterization runs strictly sequentially over one reused canvas, so connector-heavy Scenes allocate one full-canvas buffer in total instead of one per Connector (#59).
 - Scene author Connector selection highlights the connector's exact painted extent — stroke, dash, curve, and arrowhead measured from the browser's own rasterization of the rendered connector — instead of a conservative stroke/arrow envelope, and a hidden Layer's inspection state can no longer carry bounds (#59).
 - The Scene CLI's generic missing/unknown-command recovery guidance now lists the `author` command among the expected commands (#58, #70)
 - Scene author session: the side-by-side view keeps the Render and Reference Thumbnail on one horizontal row at common viewports, capability checks are constant-time, and a failed session shutdown reports a structured terminal failure with a nonzero exit instead of a silent success (#58)

@@ -58,11 +58,23 @@ const layers: SceneLayer[] = [
     layers: [
       { id: "cluster-dot", type: "shape", shape: "ellipse", color: "#ff00ff", position: { x: 20, y: 20 }, size: { width: 80, height: 80 } },
       { id: "cluster-label", type: "text", text: "nested", font: "Source Sans 3", position: { x: 20, y: 110 }, size: { width: 260, height: 50 }, fontSize: 28 },
+      { id: "cluster-fade", type: "shape", shape: "rect", color: "#8a11aa", position: { x: 120, y: 20 }, size: { width: 60, height: 40 }, opacity: 0 },
     ],
   },
   { id: "hline", type: "connector", from: "badge", to: "htarget", arrow: true, width: 4 },
   { id: "line", type: "connector", from: "badge", to: "flip", arrow: true, width: 4 },
   { id: "cline", type: "connector", from: "flip", to: "cluster", bow: 60, dash: [6, 4], arrow: true, width: 4, color: "#9a34c9" },
+  { id: "fade", type: "shape", shape: "rect", color: "#aa2222", position: { x: 60, y: 520 }, size: { width: 90, height: 60 }, opacity: 0 },
+  {
+    id: "mist",
+    type: "group",
+    position: { x: 200, y: 600 },
+    size: { width: 160, height: 80 },
+    opacity: 0,
+    layers: [
+      { id: "mist-dot", type: "shape", shape: "ellipse", color: "#2266aa", position: { x: 10, y: 10 }, size: { width: 50, height: 40 } },
+    ],
+  },
   { id: "ghost", type: "shape", shape: "rect", color: "#333333", position: { x: 600, y: 500 }, size: { width: 120, height: 80 }, visible: false },
   {
     id: "veil",
@@ -166,6 +178,9 @@ const paintedAabb = (id: string) =>
     };
   }, id);
 
+/** Layers that paint nothing: hidden, fully transparent, or under either. */
+const NON_PAINTED = ["cluster-fade", "fade", "mist", "mist-dot", "ghost", "veil", "veil-inner"];
+
 // --- the canonical inspection result ----------------------------------------
 
 describe("renderSceneInspection — canonical renderer inspection (#59)", () => {
@@ -181,25 +196,31 @@ describe("renderSceneInspection — canonical renderer inspection (#59)", () => 
     // the connector follows its tree position, hidden layers stay listed.
     expect(got.map((l) => l.id)).toEqual([
       "plate", "headline", "badge", "tilt", "flip", "portrait", "htarget",
-      "cluster", "cluster-dot", "cluster-label", "hline", "line", "cline",
+      "cluster", "cluster-dot", "cluster-label", "cluster-fade",
+      "hline", "line", "cline", "fade", "mist", "mist-dot",
       "ghost", "veil", "veil-inner",
     ]);
   });
 
-  it("reports visibility through ancestors: own-hidden and ancestor-hidden are false, bounds absent", async () => {
+  it("reports effective paint visibility: hidden and opacity:0 (leaf, group, group child) are false, bounds absent", async () => {
     const { layers: got } = await inspect();
     const byId = new Map(got.map((l) => [l.id, l]));
-    expect(byId.get("ghost")!.visible).toBe(false);
-    expect(byId.get("veil")!.visible).toBe(false);
-    expect(byId.get("veil-inner")!.visible).toBe(false);
-    expect(byId.get("ghost")!.bounds).toBeNull();
-    expect(byId.get("veil")!.bounds).toBeNull();
-    expect(byId.get("veil-inner")!.bounds).toBeNull();
+    // opacity:0 paints nothing exactly like visible:false — on the layer
+    // itself (fade), on a Group and everything under it (mist, mist-dot),
+    // and on a child inside an otherwise painted Group (cluster-fade).
+    for (const id of NON_PAINTED) {
+      expect(byId.get(id)!.visible).toBe(false);
+      expect(byId.get(id)!.bounds).toBeNull();
+    }
     for (const l of got) {
-      if (l.id === "ghost" || l.id === "veil" || l.id === "veil-inner") continue;
+      if (NON_PAINTED.includes(l.id)) continue;
       expect(l.visible).toBe(true);
       expect(l.bounds).not.toBeNull();
     }
+    // The zero-opacity child's Group and siblings stay painted.
+    expect(byId.get("cluster")!.visible).toBe(true);
+    expect(byId.get("cluster-dot")!.visible).toBe(true);
+    expect(byId.get("cluster-label")!.visible).toBe(true);
   });
 
   it("measures image, text/auto-fit, and shape wrappers exactly", async () => {
@@ -271,5 +292,62 @@ describe("renderSceneInspection — canonical renderer inspection (#59)", () => 
     expect(inspection.height).toBe(720);
     expect(Buffer.compare(inspection.png, plain.png)).toBe(0);
     expect(inspection.warnings).toEqual(plain.warnings);
+  });
+
+  it("bounds connector rasterization: strictly sequential scans sharing one reused canvas", async () => {
+    // A connector-heavy Scene: 13 shapes chained by 12 connectors with mixed
+    // arrows, widths, bows, and dashes — every one a full-canvas SVG scan.
+    const shapes: SceneLayer[] = Array.from({ length: 13 }, (_, i) => ({
+      id: `n${i}`,
+      type: "shape",
+      shape: "rect",
+      color: "#3a7d5a",
+      position: { x: 40 + i * 92, y: 330 },
+      size: { width: 60, height: 40 },
+    }));
+    const connectors: SceneLayer[] = Array.from({ length: 12 }, (_, i) => ({
+      id: `e${i}`,
+      type: "connector",
+      from: `n${i}`,
+      to: `n${i + 1}`,
+      arrow: true,
+      width: 2 + (i % 3),
+      ...(i % 4 === 0 ? { bow: 24 } : {}),
+      ...(i % 3 === 0 ? { dash: [5, 4] } : {}),
+    }));
+    const result = await loadScene(root, async () => {
+      throw new Error("inspection tests must not reference library assets");
+    }, { schemaVersion: 1, canvas: { width: 1280, height: 720 }, layers: [...shapes, ...connectors] });
+    if (!result.ok) throw new Error(`heavy scene failed to load: ${JSON.stringify(result.errors)}`);
+
+    // Count every full-canvas rasterization buffer the whole pass allocates.
+    await page.evaluate(() => {
+      const w = window as unknown as { __canvases?: () => number };
+      if (w.__canvases) return;
+      const orig = document.createElement.bind(document);
+      let created = 0;
+      w.__canvases = () => created;
+      document.createElement = ((tag: string, options?: ElementCreationOptions) => {
+        if (String(tag).toLowerCase() === "canvas") created++;
+        return orig(tag, options);
+      }) as typeof document.createElement;
+    });
+    const { layers } = await renderSceneInspection(result.resolved, { page });
+    const created = await page.evaluate(() =>
+      (window as unknown as { __canvases: () => number }).__canvases(),
+    );
+    // The bounded contract: the pass holds at most one rasterization canvas
+    // at a time and reuses it across every connector — never one full canvas
+    // (≈1280×720×4 bytes) per connector, however many the Scene chains.
+    expect(created).toBe(1);
+    // Bounded must not mean wrong: every connector's reported bounds still
+    // equal its exact painted pixels (scanned here, independently).
+    const connectorsReported = layers.filter((l) => l.type === "connector");
+    expect(connectorsReported).toHaveLength(12);
+    for (const c of connectorsReported) {
+      const painted = await paintedAabb(c.id);
+      expect(painted).not.toBeNull();
+      expect(nearBox(c.bounds!, painted!, 1)).toBe(true);
+    }
   });
 });

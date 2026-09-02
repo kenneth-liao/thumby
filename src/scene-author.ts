@@ -130,7 +130,8 @@ function securityHeaders(extra: Record<string, string> = {}): Record<string, str
  * render order — nested Group children and Connectors included. Visible
  * layers get a generated-index radio (one script-free radio group is the
  * single selection state), an exact hit/highlight box over the render, and a
- * selectable listing row; hidden layers appear once as disabled,
+ * selectable listing row; layers that paint nothing — hidden or exactly
+ * opacity: 0, on themselves or an ancestor Group — appear once as disabled,
  * non-selectable rows with bounds absent and no canvas target. Raw layer ids
  * never enter selectors or generated control attributes (id, for, data-sel —
  * generated tree indices only); escaped ids appear solely as inert

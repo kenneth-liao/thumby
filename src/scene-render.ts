@@ -808,8 +808,9 @@ export interface LayerBox {
  *   (post-transform — nested, scaled, rotated, and mirrored geometry is
  *   Chromium's own measurement, never a second transform model) and the
  *   connector's exact painted extent (see `collectLayerBounds`).
- * - `visible: false` (own or inherited `visible: false`) renders nothing, so
- *   bounds are absent — null, never a zero-size box.
+ * - `visible: false` — `visible: false` or exactly `opacity: 0` on the layer
+ *   itself or any ancestor Group — paints nothing, so bounds are absent:
+ *   null, never a zero-size box.
  */
 export interface VisibleRenderedLayer {
   id: string;
@@ -818,6 +819,7 @@ export interface VisibleRenderedLayer {
   bounds: LayerBox;
 }
 
+/** A Layer that paints nothing — hidden or fully transparent, at any depth. */
 export interface HiddenRenderedLayer {
   id: string;
   type: SceneLayer["type"];
@@ -833,18 +835,22 @@ export interface SceneInspectionResult extends SceneRenderResult {
 }
 
 /**
- * The inspection spec: every layer in tree order with its effective
- * visibility. Ids are unique (the load gate rejects duplicates), so the
- * browser can address each element by its stable `data-layer-id`.
+ * The inspection spec: every layer in tree order with its effective paint
+ * visibility — a layer paints nothing when it or any ancestor Group is
+ * `visible: false` or exactly `opacity: 0`. Ids are unique (the load gate
+ * rejects duplicates), so the browser can address each element by its stable
+ * `data-layer-id`.
  */
 function* inspectionLayers(
   layers: SceneLayer[],
-  visible = true,
+  painted = true,
 ): Generator<{ id: string; type: string; visible: boolean }> {
   for (const layer of layers) {
-    const own = layer.visible ?? LAYER_DEFAULTS.visible;
-    yield { id: layer.id, type: layer.type, visible: visible && own };
-    if (layer.type === "group") yield* inspectionLayers(layer.layers, visible && own);
+    const own =
+      (layer.visible ?? LAYER_DEFAULTS.visible) &&
+      (layer.opacity ?? LAYER_DEFAULTS.opacity) !== 0;
+    yield { id: layer.id, type: layer.type, visible: painted && own };
+    if (layer.type === "group") yield* inspectionLayers(layer.layers, painted && own);
   }
 }
 
@@ -865,12 +871,19 @@ function* inspectionLayers(
  * geometry box widened by its own computed stroke. The rasterization is
  * inlined because Playwright serializes only this function into the page —
  * it must stay self-contained.
+ *
+ * The rasterization is bounded (PROD-1): connector scans run strictly
+ * sequentially and share one reused full-canvas buffer, cleared between
+ * scans — a connector-heavy Scene holds at most one canvas and one decoded
+ * ImageData at a time, never one allocation per connector.
  */
 const collectLayerBounds = async (
   spec: { id: string; type: string; visible: boolean }[],
 ): Promise<(LayerBox | null)[]> => {
   const els = [...document.querySelectorAll<HTMLElement>(".scene-layer")];
   const round = (v: number) => Number(v.toFixed(4));
+  let canvas: HTMLCanvasElement | null = null;
+  let ctx: CanvasRenderingContext2D | null = null;
   const rasterizePaintedAabb = (
     svg: Element,
     frame: { x: number; y: number; width: number; height: number },
@@ -887,15 +900,18 @@ const collectLayerBounds = async (
         encodeURIComponent(new XMLSerializer().serializeToString(clone));
       const img = new Image();
       img.onload = () => {
-        const cnv = document.createElement("canvas");
-        cnv.width = w;
-        cnv.height = h;
-        const ctx = cnv.getContext("2d");
-        if (!ctx) return reject(new Error("no 2d context for connector rasterization"));
-        ctx.drawImage(img, 0, 0, w, h);
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+          ctx = canvas.getContext("2d");
+          if (!ctx) return reject(new Error("no 2d context for connector rasterization"));
+        }
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+        ctx!.clearRect(0, 0, w, h);
+        ctx!.drawImage(img, 0, 0, w, h);
         let data: Uint8ClampedArray;
         try {
-          data = ctx.getImageData(0, 0, w, h).data;
+          data = ctx!.getImageData(0, 0, w, h).data;
         } catch (err) {
           return reject(err as Error);
         }
@@ -920,40 +936,48 @@ const collectLayerBounds = async (
       img.onerror = () => reject(new Error("connector rasterization failed to decode"));
       img.src = uri;
     });
-  return Promise.all(
-    spec.map(async (s) => {
-      const el = els.find((e) => e.dataset.layerId === s.id);
-      if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
-      if (!s.visible) return null;
-      if (s.type === "connector") {
-        const svg = el.querySelector("svg");
-        if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
-        const frame = svg.getBoundingClientRect();
-        const painted = await rasterizePaintedAabb(svg, frame);
-        if (painted)
-          return {
-            x: round(frame.x + painted.x),
-            y: round(frame.y + painted.y),
-            width: round(painted.width),
-            height: round(painted.height),
-          };
+  // Strictly sequential: one layer measured at a time, so at most one
+  // rasterization canvas exists for the whole pass.
+  const out: (LayerBox | null)[] = [];
+  for (const s of spec) {
+    const el = els.find((e) => e.dataset.layerId === s.id);
+    if (!el) throw new Error(`layer "${s.id}" has no rendered element`);
+    if (!s.visible) {
+      out.push(null);
+      continue;
+    }
+    if (s.type === "connector") {
+      const svg = el.querySelector("svg");
+      if (!svg) throw new Error(`connector "${s.id}" has no rendered svg`);
+      const frame = svg.getBoundingClientRect();
+      const painted = await rasterizePaintedAabb(svg, frame);
+      if (painted) {
+        out.push({
+          x: round(frame.x + painted.x),
+          y: round(frame.y + painted.y),
+          width: round(painted.width),
+          height: round(painted.height),
+        });
+      } else {
         // Nothing painted (degenerate geometry) — the path's own geometry,
         // widened by its computed stroke so the extent stays nonzero.
         const path = el.querySelector<SVGGeometryElement>("svg > path");
         if (!path) throw new Error(`connector "${s.id}" has no rendered path`);
         const r = path.getBoundingClientRect();
         const sw = parseFloat(getComputedStyle(path).strokeWidth) || 0;
-        return {
+        out.push({
           x: round(r.x - sw / 2),
           y: round(r.y - sw / 2),
           width: round(r.width + sw),
           height: round(r.height + sw),
-        };
+        });
       }
+    } else {
       const r = el.getBoundingClientRect();
-      return { x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) };
-    }),
-  );
+      out.push({ x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height) });
+    }
+  }
+  return out;
 };
 
 /**

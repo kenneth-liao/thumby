@@ -108,9 +108,11 @@ const SNEAKY_ID = 'sneaky"><svg onload=alert(1)>';
  * The live session's richer Scene (#59): every layer kind the view must
  * list and select — image, auto-fit text, shape, a user-authored id needing
  * escaping, a mirrored shape, a cropped image, a scaled Group with nested
- * (one rotated) children, an own-hidden shape, and a Connector with an
- * arrow. Tree order (the view's index space): bg, headline, chip, sneaky,
- * flip, portrait, card, card-plate, card-tilt, ghost, line.
+ * (one rotated) children, a plain Group with a zero-opacity child, a
+ * zero-opacity Group (and its child), a zero-opacity leaf, an own-hidden
+ * shape, and a Connector with an arrow. Tree order (the view's index
+ * space): bg, headline, chip, sneaky, flip, portrait, card, card-plate,
+ * card-tilt, tag, tag-dot, tag-fade, hush, hush-dot, faded, ghost, line.
  */
 const layerInspectionScene = (scene: Record<string, unknown>): Record<string, unknown> => ({
   ...scene,
@@ -148,6 +150,27 @@ const layerInspectionScene = (scene: Record<string, unknown>): Record<string, un
         { id: "card-tilt", type: "shape", shape: "rect", color: "#dd8822", position: { x: 40, y: 50 }, size: { width: 120, height: 80 }, rotation: 30 },
       ],
     },
+    {
+      id: "tag",
+      type: "group",
+      position: { x: 640, y: 180 },
+      size: { width: 160, height: 90 },
+      layers: [
+        { id: "tag-dot", type: "shape", shape: "ellipse", color: "#d9a441", position: { x: 10, y: 10 }, size: { width: 70, height: 70 } },
+        { id: "tag-fade", type: "shape", shape: "rect", color: "#7a4a9a", position: { x: 90, y: 20 }, size: { width: 60, height: 50 }, opacity: 0 },
+      ],
+    },
+    {
+      id: "hush",
+      type: "group",
+      position: { x: 60, y: 560 },
+      size: { width: 140, height: 80 },
+      opacity: 0,
+      layers: [
+        { id: "hush-dot", type: "shape", shape: "rect", color: "#4a7a5a", position: { x: 10, y: 10 }, size: { width: 60, height: 50 } },
+      ],
+    },
+    { id: "faded", type: "shape", shape: "rect", color: "#aa3344", position: { x: 1060, y: 600 }, size: { width: 120, height: 70 }, opacity: 0 },
     { id: "ghost", type: "shape", shape: "rect", color: "#333333", position: { x: 400, y: 500 }, size: { width: 120, height: 80 }, visible: false },
     { id: "line", type: "connector", from: "chip", to: SNEAKY_ID, arrow: true, width: 4 },
   ],
@@ -629,25 +652,36 @@ describe("scene author — live session", () => {
         );
         expect(rows.map((r) => r.id)).toEqual([
           "bg", "headline", "chip", SNEAKY_ID, "flip", "portrait",
-          "card", "card-plate", "card-tilt", "ghost", "line",
+          "card", "card-plate", "card-tilt", "tag", "tag-dot", "tag-fade",
+          "hush", "hush-dot", "faded", "ghost", "line",
         ]);
         expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
+        // Layers that paint nothing — visible:false and opacity:0 (leaf,
+        // Group, or Group child) — each appear once as visibly hidden,
+        // disabled, non-selectable rows with bounds absent.
         const hidden = rows.filter((r) => r.hidden);
-        expect(hidden.map((r) => r.id)).toEqual(["ghost"]);
-        expect(hidden[0]!.tag).toBe("DIV");
-        expect(hidden[0]!.selectable).toBe(false);
-        expect(hidden[0]!.ariaDisabled).toBe("true");
-        expect(hidden[0]!.bounds).toBe(""); // bounds absent for a hidden Layer
-        expect(rows.filter((r) => !r.hidden)).toHaveLength(10);
+        expect(hidden.map((r) => r.id)).toEqual([
+          "tag-fade", "hush", "hush-dot", "faded", "ghost",
+        ]);
+        for (const h of hidden) {
+          expect(h.tag).toBe("DIV");
+          expect(h.selectable).toBe(false);
+          expect(h.ariaDisabled).toBe("true");
+          expect(h.bounds).toBe(""); // bounds absent for a non-painted Layer
+        }
+        expect(rows.filter((r) => !r.hidden)).toHaveLength(12);
 
         // Visible Layers: one radio each (the single selection state), one
         // exact highlight box and one hit target on the canvas, indexed by
-        // tree order — hidden Layers get no radio and no canvas target.
-        expect(await page.locator('input[type="radio"][name="layer"]').count()).toBe(10);
-        expect(await page.locator(".canvas .hit").count()).toBe(10);
-        expect(await page.locator(".canvas .box").count()).toBe(10);
-        expect(await page.locator('.canvas .hit[data-sel="9"]').count()).toBe(0);
-        expect(await page.locator('.canvas .box[data-sel="9"]').count()).toBe(0);
+        // tree order — non-painted Layers get no radio and no canvas target.
+        expect(await page.locator('input[type="radio"][name="layer"]').count()).toBe(12);
+        expect(await page.locator(".canvas .hit").count()).toBe(12);
+        expect(await page.locator(".canvas .box").count()).toBe(12);
+        for (const i of [11, 12, 13, 14, 15]) {
+          expect(await page.locator(`.canvas .hit[data-sel="${i}"]`).count()).toBe(0);
+          expect(await page.locator(`.canvas .box[data-sel="${i}"]`).count()).toBe(0);
+          expect(await page.locator(`input#layer-${i}`).count()).toBe(0);
+        }
 
         // Every hit/highlight box names its stable Layer (escaped attribute;
         // selectors stay index-only — no raw id in id/for/data-sel).
@@ -656,7 +690,7 @@ describe("scene author — live session", () => {
         );
         expect(boxIds).toEqual([
           "bg", "headline", "chip", SNEAKY_ID, "flip", "portrait",
-          "card", "card-plate", "card-tilt", "line",
+          "card", "card-plate", "card-tilt", "tag", "tag-dot", "line",
         ]);
         const offenders = await page.evaluate((ids) => {
           const bad: string[] = [];
@@ -737,6 +771,14 @@ describe("scene author — live session", () => {
         await expectSelectedBox(8, "card-tilt");
         await expectOnlySelected(8);
 
+        // From the listing: the Group child next to a zero-opacity sibling
+        // (index 10) — the faded sibling neither blocks nor shadows it.
+        const dotFor = rows.find((r) => r.id === "tag-dot")!.forIndex!;
+        await page.click(`.listing label[for="${dotFor}"]`);
+        expect(await page.isChecked(`#${dotFor}`)).toBe(true);
+        await expectSelectedBox(10, "tag-dot");
+        await expectOnlySelected(10);
+
         // From the listing: the cropped image (index 5).
         const portraitFor = rows.find((r) => r.id === "portrait")!.forIndex!;
         await page.click(`.listing label[for="${portraitFor}"]`);
@@ -759,25 +801,25 @@ describe("scene author — live session", () => {
         await expectSelectedBox(3, SNEAKY_ID);
         await expectOnlySelected(3);
 
-        // From the canvas: the Connector (index 10) — its box is the exact
+        // From the canvas: the Connector (index 16) — its box is the exact
         // painted extent the listing reports.
         const lineFor = rows.find((r) => r.id === "line")!.forIndex!;
         await page.click(`.canvas .hit[for="${lineFor}"]`);
         expect(await page.isChecked(`#${lineFor}`)).toBe(true);
-        await expectSelectedBox(10, "line");
-        await expectOnlySelected(10);
+        await expectSelectedBox(16, "line");
+        await expectOnlySelected(16);
         // The hit target carries the symmetric minimum (centered max())
         // while the displayed box stays the exact bounds.
-        const hitStyle = await page.getAttribute(`.canvas .hit[data-sel="10"]`, "style");
+        const hitStyle = await page.getAttribute(`.canvas .hit[data-sel="16"]`, "style");
         expect(hitStyle).toContain("max(");
         expect(hitStyle).toContain("translate(-50%,-50%)");
         // Compositing order sets canvas priority: bg's hit (index 0) sits
-        // under line's (index 10).
+        // under line's (index 16).
         const zIndexOf = (i: number) =>
           page
             .locator(`.canvas .hit[data-sel="${i}"]`)
             .evaluate((el) => Number(getComputedStyle(el).zIndex));
-        expect(await zIndexOf(0)).toBeLessThan(await zIndexOf(10));
+        expect(await zIndexOf(0)).toBeLessThan(await zIndexOf(16));
 
         // A fully occluded Layer — bg, beneath every later hit across the
         // whole canvas — stays listing-selectable.
