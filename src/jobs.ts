@@ -23,22 +23,19 @@ import { matteCandidate, type MatteEngine } from "./matte.js";
 
 /**
  * Job record schema versions. v1 is the legacy plate-only record; v2 the
- * legacy object-capable record; v3 the creator-capable record; v4 — shared by
- * plate and object — the role-aware-Reference prompt contract (#56): the
- * effective-prompt semantics changed without a record-shape change, so the
- * bump exists purely as the rollback boundary. Released binaries accept any
- * of {1,2,3} with a plate or object kind, so v4 is a value they reject
- * outright as unknown, and this binary still reads v1/v2/v3 records with
- * their previous behavior. Each bump is the rollback boundary: an older
- * binary rejects a record outright instead of rerunning or adopting a newer
- * job kind through an older path (where its gate does not exist — a creator
- * candidate adopted through the plate path would skip the true-alpha check).
+ * legacy object record; v3 the legacy creator contract that attached identity
+ * references first and pose last; v4 is the role-aware Plate/Object contract;
+ * and v5 is the Creator contract that preserves caller order. Prompt-contract
+ * changes bump the record even when its JSON shape is unchanged, so older
+ * binaries fail closed rather than silently rerunning with different
+ * semantics.
  */
 const LEGACY_PLATE_JOB_SCHEMA_VERSION = 1 as const;
 const LEGACY_OBJECT_JOB_SCHEMA_VERSION = 2 as const;
-export const CREATOR_JOB_SCHEMA_VERSION = 3 as const;
+const LEGACY_CREATOR_JOB_SCHEMA_VERSION = 3 as const;
 export const PLATE_JOB_SCHEMA_VERSION = 4 as const;
 export const OBJECT_JOB_SCHEMA_VERSION = 4 as const;
+export const CREATOR_JOB_SCHEMA_VERSION = 5 as const;
 
 /** The three Generation Job kinds. */
 export type JobKind = "plate" | "object" | "creator";
@@ -46,8 +43,8 @@ export type JobKind = "plate" | "object" | "creator";
 /**
  * The schema version the current binary writes for a job kind — the single
  * source of truth for both record writers. Plate and Object records carry the
- * role-aware-Reference prompt contract (v4); creator semantics are unchanged
- * and stay at v3.
+ * role-aware-Reference prompt contract (v4); Creator records preserve caller
+ * Reference order (v5).
  */
 function currentSchemaVersion(kind: JobKind): GenerationJob["schemaVersion"] {
   return kind === "object"
@@ -167,8 +164,9 @@ export interface GenerationJob {
   schemaVersion:
     | typeof LEGACY_PLATE_JOB_SCHEMA_VERSION
     | typeof LEGACY_OBJECT_JOB_SCHEMA_VERSION
-    | typeof CREATOR_JOB_SCHEMA_VERSION
-    | typeof PLATE_JOB_SCHEMA_VERSION;
+    | typeof LEGACY_CREATOR_JOB_SCHEMA_VERSION
+    | typeof PLATE_JOB_SCHEMA_VERSION
+    | typeof CREATOR_JOB_SCHEMA_VERSION;
   jobId: string;
   kind: JobKind;
   createdAt: string;
@@ -220,18 +218,17 @@ export function validateObjectSubject(subject: string): void {
 
 /**
  * The creator request boundary (REQ-017): roles are restricted to the typed
- * creator set, and at least one identity anchor is mandatory — a likeness is
- * never generated from text alone (docs/asset-requirements.md). Runs before
- * any generation call, so a refused request costs nothing.
+ * creator set, and at least one caller-supplied identity reference is
+ * mandatory — a likeness is never generated from text alone. Runs before any
+ * generation call, so a refused request costs nothing.
  */
 export function validateCreatorRequest(request: CreatorJobRequest): void {
   if (!request.subject.trim())
     throw new Error(`A creator job needs a subject describing the pose, expression, outfit, or edit to produce`);
   if (!request.refs.some((r) => r.role === "identity"))
     throw new Error(
-      `A creator job needs at least one "identity:" reference (an identity-kit anchor). ` +
-        `A likeness is never generated from text alone — search the kit with ` +
-        `"bun run library list --facets …" and pass 2–4 anchors, e.g. --ref identity:<file>.`,
+      `A creator job needs at least one caller-supplied "identity:" reference. ` +
+        `A likeness is never generated from text alone — pass a local image, e.g. --ref identity:<file>.`,
     );
   for (const ref of request.refs) {
     if (!(CREATOR_ROLES as readonly string[]).includes(ref.role))
@@ -387,12 +384,26 @@ export async function rerunJob(
   matte?: MatteEngine,
 ): Promise<GenerationJob> {
   const job = await loadJob(jobRoot, jobId);
+  // v3 Creator Jobs attached identity references first and pose last. Preserve
+  // that provider order for their first current-binary rerun, then store the
+  // normalized order with v5 so every later rerun has one canonical meaning.
+  const request: JobRequest =
+    job.schemaVersion === LEGACY_CREATOR_JOB_SCHEMA_VERSION && job.request.kind === "creator"
+      ? {
+          ...job.request,
+          refs: [
+            ...job.request.refs.filter((ref) => ref.role === "identity"),
+            ...job.request.refs.filter((ref) => ref.role !== "identity" && ref.role !== "pose"),
+            ...job.request.refs.filter((ref) => ref.role === "pose"),
+          ],
+        }
+      : job.request;
   // The recorded model is re-checked against the current registry first — a
   // pure, free check before any reference bytes are read. A qualification
   // retracted since the job was recorded refuses here instead of spending on
   // a call the model would not honour (DEC-018/DEC-020).
-  validateReferenceCapability(job.request.model, job.request.refs.length > 0);
-  for (const ref of job.request.refs) {
+  validateReferenceCapability(request.model, request.refs.length > 0);
+  for (const ref of request.refs) {
     let bytes: Buffer;
     try {
       bytes = await readFile(path.resolve(ref.path));
@@ -408,15 +419,16 @@ export async function rerunJob(
 
   // A rerun pays for candidates too — same rule as the first run.
   await matte?.preflight?.();
-  const batch = await generate(job.request);
-  const run = await recordRun(jobRoot, job, job.request, batch, new Date().toISOString(), matte);
+  const batch = await generate(request);
+  const run = await recordRun(jobRoot, job, request, batch, new Date().toISOString(), matte);
   job.runs.push(run);
   // The new lineage was produced under the CURRENT prompt contract, so the
   // record is re-persisted at the current schema version with the lineage —
-  // one write, version and runs together. Role-aware lineage must never hide
-  // under a legacy version (v1/v2) that an older binary would rerun with
-  // weaker, path-only prompt behavior (PROD-1 follow-up). A failed rerun
-  // throws above and leaves the legacy record untouched.
+  // one write, version, canonical request order, and runs together. Current
+  // lineage must never hide under a legacy prompt-contract version that an
+  // older binary would interpret differently. A failed rerun throws above and
+  // leaves the legacy record untouched.
+  job.request = request;
   job.schemaVersion = currentSchemaVersion(job.kind);
   await writeJobRecord(jobRoot, job);
   return job;
@@ -563,20 +575,22 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
     // legacy records keep their versions and kinds on read, and a successful
     // rerun re-persists the record at the current version with its new
     // lineage — so role-aware runs never hide under a legacy version. New
-    // Plate/Object records ride v4, which released binaries reject as
-    // unknown, and no record may claim a version/kind pairing this binary
+    // Plate/Object records ride v4 and caller-ordered Creator records ride
+    // v5; older binaries reject unknown contracts. No record may claim a
+    // version/kind pairing this binary
     // would never write — an older binary would misread such a pairing
     // (e.g. run a role-aware plate job with path-only prompt behavior under
     // its v1/v2 contract).
     const knownSchemaVersions = [
       LEGACY_PLATE_JOB_SCHEMA_VERSION,
       LEGACY_OBJECT_JOB_SCHEMA_VERSION,
-      CREATOR_JOB_SCHEMA_VERSION,
+      LEGACY_CREATOR_JOB_SCHEMA_VERSION,
       PLATE_JOB_SCHEMA_VERSION,
+      CREATOR_JOB_SCHEMA_VERSION,
     ];
     if (!knownSchemaVersions.includes(job.schemaVersion))
       throw new Error(
-        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${LEGACY_PLATE_JOB_SCHEMA_VERSION} (legacy plate), ${LEGACY_OBJECT_JOB_SCHEMA_VERSION} (legacy object), ${CREATOR_JOB_SCHEMA_VERSION} (creator), and ${PLATE_JOB_SCHEMA_VERSION} (role-aware-Reference plate/object) only`,
+        `unsupported job schemaVersion ${JSON.stringify(job.schemaVersion)} — this tool reads versions ${LEGACY_PLATE_JOB_SCHEMA_VERSION} (legacy plate), ${LEGACY_OBJECT_JOB_SCHEMA_VERSION} (legacy object), ${LEGACY_CREATOR_JOB_SCHEMA_VERSION} (legacy creator), ${PLATE_JOB_SCHEMA_VERSION} (role-aware-Reference plate/object), and ${CREATOR_JOB_SCHEMA_VERSION} (caller-ordered creator) only`,
       );
     if (job.kind !== job.request.kind)
       throw new Error(
@@ -590,9 +604,13 @@ export async function loadJob(jobRoot: string, jobId: string): Promise<Generatio
       throw new Error(
         `Job "${jobId}" claims schemaVersion ${LEGACY_OBJECT_JOB_SCHEMA_VERSION}, which is the legacy object-job version, but its kind is ${JSON.stringify(job.kind)} — creator jobs require schemaVersion ${CREATOR_JOB_SCHEMA_VERSION} and role-aware plate jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
       );
+    if (job.schemaVersion === LEGACY_CREATOR_JOB_SCHEMA_VERSION && job.kind !== "creator")
+      throw new Error(
+        `Job "${jobId}" claims schemaVersion ${LEGACY_CREATOR_JOB_SCHEMA_VERSION}, which is the legacy creator-job version, but its kind is ${JSON.stringify(job.kind)} — plate and object jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
+      );
     if (job.schemaVersion === CREATOR_JOB_SCHEMA_VERSION && job.kind !== "creator")
       throw new Error(
-        `Job "${jobId}" claims schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}, which is the creator-job version, but its kind is ${JSON.stringify(job.kind)} — plate and object jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
+        `Job "${jobId}" claims schemaVersion ${CREATOR_JOB_SCHEMA_VERSION}, which is the caller-ordered creator-job version, but its kind is ${JSON.stringify(job.kind)} — plate and object jobs require schemaVersion ${PLATE_JOB_SCHEMA_VERSION}`,
       );
     if (job.schemaVersion === PLATE_JOB_SCHEMA_VERSION && job.kind !== "plate" && job.kind !== "object")
       throw new Error(
@@ -839,7 +857,7 @@ export async function adoptCandidate(
     if (evidence.from !== "matte")
       throw new Error("a creator candidate is only adoptable as its matte");
     // Trial is forced — adoption is never an approval (REQ-017, DEC-004):
-    // only Kenneth promotes a Creator Asset through the library CLI.
+    // only an explicit human decision promotes a Creator Asset through the library CLI.
     const imagePath = await writeCreatorAsset(opts.libraryRoot, assetId, evidence.bytes, {
       kind: "cutout",
       id: assetId,

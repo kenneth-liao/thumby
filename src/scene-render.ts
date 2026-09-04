@@ -1,7 +1,7 @@
 /**
  * Generic Scene renderer — ordered layers composited into a 1280×720 PNG.
  *
- * Built like src/compose.ts but without any specialized branches: the Scene's
+ * Built without specialized layout branches: the Scene's
  * array order is the compositing order, every layer is one positioned element,
  * and nothing here knows about plates, cutouts, or style presets.
  *
@@ -662,7 +662,7 @@ async function measureCroppedImages(
  * overflows, `min` renders and the caller is told the floor was hit — the
  * floor is honored, not a guarantee. Span font sizes are absolute and never
  * scaled. Stroke width is an explicit scene value and stays fixed — unlike
- * compose.ts's headline loop, which rescales stroke with size by design.
+ * Text stroke rescales with size by design.
  * Returns whether the final size actually fits.
  * Must stay self-contained — Playwright serializes it into the page.
  */
@@ -721,7 +721,7 @@ async function renderResolvedToPng(
     const natural = await measureCroppedImages(page, resolved);
     await page.setContent(buildHtml(natural), { waitUntil: "load" });
 
-    // Same probe compose.ts uses: if a requested family did not resolve from
+    // If a requested family did not resolve from
     // its bundled bytes, fail naming it before a screenshot is accepted.
     const unresolved: string[] = [];
     for (const face of sceneFaces(resolved)) {

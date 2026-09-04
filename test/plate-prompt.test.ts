@@ -31,7 +31,6 @@ mock.module("ai", () => ({
 }));
 
 import { run } from "../src/job-cli.js";
-import { generatePlates } from "../src/generate.js";
 import type { MatteEngine } from "../src/matte.js";
 
 let root: string;
@@ -114,25 +113,5 @@ describe("plate job effective-prompt contract (#51)", () => {
       await readFile(path.join(libraryRoot, "plates", "flex-plate", "meta.json"), "utf8"),
     );
     expectFlexiblePlateContract(meta.fullPrompt);
-  });
-});
-
-describe("legacy cutout backdrop mode (INT-1 regression)", () => {
-  test("the subjectless mode keeps its UI ban — only Plate Jobs are flexible", async () => {
-    const result = await generatePlates({
-      subject: "a calm studio wall with soft gradient light",
-      model: "gpt-image",
-      zone: "left",
-      refs: [],
-      count: 1,
-      subjectless: true,
-    });
-    // The legacy backdrop contract is intact: no competing subject…
-    expect(result.fullPrompt).toMatch(/backdrop only/i);
-    expect(result.fullPrompt).toMatch(/not include any person/i);
-    // …and no UI — the ban the shared CRITICAL line carried before #51.
-    expect(result.fullPrompt).toMatch(/no ui elements/i);
-    // The local-composition boundary holds in both modes.
-    expect(result.fullPrompt).toMatch(/no text/i);
   });
 });

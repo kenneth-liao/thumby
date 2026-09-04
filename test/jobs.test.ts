@@ -326,16 +326,16 @@ async function reversion(jobId: string, schemaVersion: number): Promise<void> {
 }
 
 describe("the job schema-version matrix is the rollback boundary (PROD-1, #56)", () => {
-  test("new Plate/Object records ride schemaVersion 4 — a value no released binary accepts", () => {
+  test("current prompt contracts have rollback-safe schema versions", () => {
     // Released binaries (≤ 0.29.2) accept any of {1,2,3} with a plate or
     // object kind — reusing those numbers would let an older binary silently
     // rerun a role-aware job with path-only prompt behavior. The role-aware
-    // prompt contract therefore rides v4: an older binary rejects it outright
-    // as an unknown version, and the current binary keeps reading legacy
-    // v1 plate, v2 object, and v3 creator records with unchanged behavior.
+    // Plate/Object role semantics ride v4 and caller-ordered Creator
+    // references ride v5. Older binaries reject both versions they do not
+    // understand; this binary still reads legacy v1/v2/v3 records.
     expect(PLATE_JOB_SCHEMA_VERSION).toBe(4);
     expect(OBJECT_JOB_SCHEMA_VERSION).toBe(4);
-    expect(CREATOR_JOB_SCHEMA_VERSION).toBe(3);
+    expect(CREATOR_JOB_SCHEMA_VERSION).toBe(5);
   });
 
   test("a legacy v1 plate record reruns into the role-aware contract — re-persisted as v4 with the new lineage", async () => {

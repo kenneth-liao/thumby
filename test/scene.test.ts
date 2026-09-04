@@ -449,7 +449,7 @@ describe("scene validation", () => {
 // --- bundled face registry --------------------------------------------------
 
 describe("bundled face registry", () => {
-  it("exposes every pairing face keyed by family", () => {
+  it("exposes every bundled face keyed by family", () => {
     expect(BUNDLED_FACES.get("Anton")?.file).toBe("anton.ttf");
     expect(BUNDLED_FACES.get("Source Sans 3")).toBeTruthy();
   });

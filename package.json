@@ -1,11 +1,10 @@
 {
   "name": "thumby",
-  "version": "0.36.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "for f in $(find test -name '*.test.ts'); do bun test --isolate \"$f\" || exit 1; done",
-    "thumb": "bun run src/cli.ts",
     "scene": "bun run src/scene-cli.ts",
     "library": "bun run src/library-cli.ts",
     "jobs": "bun run src/job-cli.ts"

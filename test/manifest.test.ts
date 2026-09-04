@@ -38,7 +38,7 @@ beforeAll(async () => {
       id: "demo-plate",
       name: "Demo Plate",
       tags: ["secret-tag"],
-      subject: "Kenneth",
+      subject: "Creator Subject",
       fullPrompt: "TOP-SECRET-PROMPT",
       model: "image-model-1",
       adoptedFrom: "run-123",
@@ -187,7 +187,7 @@ describe("manifest shape — build and strict read", () => {
     // one canonical home on the Asset, never copied into the manifest.
     expect(Object.keys(entry).sort()).toEqual(["hash", "id", "kind", "layer", "mediaType", "scope"]);
     const text = JSON.stringify(manifest);
-    for (const secret of ["TOP-SECRET-PROMPT", "image-model-1", "run-123", "Kenneth", "secret-tag"])
+    for (const secret of ["TOP-SECRET-PROMPT", "image-model-1", "run-123", "Creator Subject", "secret-tag"])
       expect(text).not.toContain(secret);
   });
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the deprecated `thumb` command and its specialized renderer, styles, overlays, tests, and examples. Scene composition is now the only rendering path.
+- Removed the built-in identity/reference catalog, facet search, qualification harness, spent generated outputs, obsolete model exports, and obsolete unapproved trial artifacts. Generation callers now supply reference files directly.
+- Removed personal asset-policy documentation from thumby; project-specific source discovery and likeness policy belong to consuming projects.
+
+### Changed
+
+- Breaking: bumped to 1.0.0 after removing the deprecated command and identity catalog.
+- Creator References now reach providers in caller order, matching Plate and Object Jobs. New Creator Job records use schema version 5; a v3 rerun preserves its legacy identity-first/pose-last provider order once, normalizes the recorded request to that exact order, and upgrades atomically so later reruns cannot drift. Thumby records, verifies, and forwards arbitrary caller-supplied reference files without discovering them.
+- Reframed the README, glossary, and agent guidance around the general Scene, Asset, Generation Job, and caller-supplied Reference workflow.
+
 ### Added
 
 - The Scene author session saves explicitly (#62): a Save control POSTs the token-scoped `/save` route through the same arrival-order queue as geometry, re-validates the complete candidate through the ordinary gate, and atomically replaces the Scene with exactly the raw authored document — refusing a stale on-disk edit and leaving the previous Scene usable and unchanged on any failure.

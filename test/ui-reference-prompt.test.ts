@@ -38,7 +38,7 @@ mock.module("ai", () => ({
 }));
 
 import { run } from "../src/job-cli.js";
-import { generatePlates, generateObjects } from "../src/generate.js";
+import { generatePlates, generateObjects, generateCreators } from "../src/generate.js";
 import type { MatteEngine } from "../src/matte.js";
 import { encodePng } from "./png.js";
 
@@ -229,25 +229,24 @@ describe("object jobs permit one isolated non-text UI panel (#56)", () => {
   });
 });
 
-describe("typed reference semantics below the job boundary", () => {
-  test("an identity-typed reference renders the identity manifest line — the legacy thumb mapping", async () => {
-    // The legacy `thumb --ref <path>` boundary normalizes its documented
-    // likeness paths to role "identity"; the shared manifest then identifies
-    // them. This pins that intended prompt change (#56) without touching the
-    // legacy backdrop contract.
-    const result = await generatePlates({
-      subject: "a calm studio wall with soft gradient light",
+describe("reference order at the generation boundary", () => {
+  test("creator references reach the provider in caller order", async () => {
+    const result = await generateCreators({
+      subject: "a presenter pointing left",
       model: "gpt-image",
-      zone: "left",
-      refs: [{ role: "identity", path: editPath }],
+      refs: [
+        { role: "style", path: stylePath },
+        { role: "identity", path: editPath },
+      ],
       count: 1,
-      subjectless: true,
     });
-    expect(result.fullPrompt).toMatch(/image 1 — identity/);
-    expect(result.fullPrompt).not.toContain(editPath);
-    // The legacy backdrop/content contract is otherwise unchanged.
-    expect(result.fullPrompt).toMatch(/backdrop only/i);
-    expect(result.fullPrompt).toMatch(/no ui elements/i);
+
+    expect(result.fullPrompt).toContain("image 1 — style");
+    expect(result.fullPrompt).toContain("image 2 — identity");
+    expect(imageCalls[0]!.images.map((bytes) => Buffer.from(bytes).toString("hex"))).toEqual([
+      styleBytes.toString("hex"),
+      editBytes.toString("hex"),
+    ]);
   });
 });
 

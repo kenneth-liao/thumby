@@ -5,8 +5,6 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   scanLibrary,
-  resolveLogo,
-  resolveCutout,
   searchLibrary,
   resolveAsset,
   parseAssetRef,
@@ -59,7 +57,6 @@ describe("scanLibrary", () => {
       cutouts: [],
       objects: [],
       masks: [],
-      identity: { present: false, entries: [], vocabulary: {} },
     };
     expect(await scanLibrary(path.join(root, "nope"))).toEqual(empty);
     expect(await scanLibrary(root)).toEqual(empty);
@@ -72,14 +69,6 @@ describe("scanLibrary", () => {
     expect(lib.logos[0]!.meta.id).toBe("openai");
     expect(lib.logos[0]!.imagePath).toBe(path.resolve(root, "logos/openai/openai.svg"));
     expect(lib.logos[0]!.kind).toBe("svg");
-  });
-
-  it("sees through aliases to an id (alias is not stored separately)", async () => {
-    await seedLogo("openai", { extra: '{ "aliases": ["chatgpt", "gpt"] }' });
-    const lib = await scanLibrary(root);
-    expect(await resolveLogo(lib, "chatgpt")).toEqual({
-      ...lib.logos[0],
-    });
   });
 
   it("fails fast on duplicate ids across entries", async () => {
@@ -266,8 +255,6 @@ describe("searchLibrary", () => {
     const lib = await scanLibrary(root);
     expect((await searchLibrary(lib, "deadpan")).cutouts).toHaveLength(1);
     expect((await searchLibrary(lib, "zzz")).cutouts).toHaveLength(0);
-    expect(resolveCutout(lib, "deadpan").meta.id).toBe("deadpan");
-    expect(() => resolveCutout(lib, "nope")).toThrow(/Unknown cutout/);
   });
 
   it("matches objects by id, name, and tag", async () => {

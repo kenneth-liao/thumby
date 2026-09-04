@@ -3,13 +3,6 @@ import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  scanIdentityKit,
-  searchIdentityFacets,
-  EMPTY_IDENTITY_KIT,
-  type IdentityKit,
-  type IdentityMeta,
-} from "./identity.js";
 
 /**
  * The single canonical location of the asset library: `<repo>/assets`.
@@ -152,8 +145,6 @@ export interface Library {
   cutouts: LibraryEntry<CutoutMeta>[];
   objects: LibraryEntry<ObjectMeta>[];
   masks: LibraryEntry<MaskMeta>[];
-  /** Identity-kit sources (REQ-016) — searchable, not scene-resolvable. */
-  identity: IdentityKit;
 }
 
 /** The canonical empty library — for callers resolving project-scope refs only. */
@@ -163,7 +154,6 @@ export const EMPTY_LIBRARY: Library = {
   cutouts: [],
   objects: [],
   masks: [],
-  identity: EMPTY_IDENTITY_KIT,
 };
 
 const KIND_DIRS = ["logos", "plates", "cutouts", "objects", "masks"] as const;
@@ -245,13 +235,12 @@ function scanKindDir(root: string, subdir: KindDir): Promise<LibraryEntry[]> {
 }
 
 export async function scanLibrary(root: string): Promise<Library> {
-  const [logos, plates, cutouts, objects, masks, kit] = await Promise.all([
+  const [logos, plates, cutouts, objects, masks] = await Promise.all([
     scanKindDir(root, "logos"),
     scanKindDir(root, "plates"),
     scanKindDir(root, "cutouts"),
     scanKindDir(root, "objects"),
     scanKindDir(root, "masks"),
-    scanIdentityKit(root),
   ]);
   // An id is the vocabulary every reader uses; it must be unambiguous library-wide.
   const seen = new Map<string, string>();
@@ -261,7 +250,6 @@ export async function scanLibrary(root: string): Promise<Library> {
     ["cutouts", cutouts],
     ["objects", objects],
     ["masks", masks],
-    ["identity", kit.entries],
   ] as const) {
     for (const e of entries) {
       const owner = seen.get(e.meta.id);
@@ -278,7 +266,6 @@ export async function scanLibrary(root: string): Promise<Library> {
     cutouts: cutouts as LibraryEntry<CutoutMeta>[],
     objects: objects as LibraryEntry<ObjectMeta>[],
     masks: masks as LibraryEntry<MaskMeta>[],
-    identity: kit,
   };
 }
 
@@ -417,8 +404,8 @@ export async function writeCreatorAsset(
 //
 // The one promotion path from trial to approved. Adoption (src/jobs.ts) and
 // `library add-cutout` only ever write the state a source claims — adoption
-// forces "trial", and `--approval approved` is the sourced identity-kit
-// import path, not a promotion. Promotion happens here and nowhere else:
+// forces "trial", and `--approval approved` imports an externally approved
+// source rather than promoting a trial. Promotion happens here and nowhere else:
 // it requires a recorded approver decision and refuses to re-decide an
 // already-approved asset.
 
@@ -483,9 +470,9 @@ export async function approveCutout(
 
 // --- the Creator approval gate (REQ-018) -------------------------------------
 //
-// One home for the gate's language: every render path — Scene and the legacy
-// thumb command alike — states the same refusal and marks the same non-final
-// outputs, so the two paths cannot drift apart in wording or remedies.
+// One home for the gate's language: every Scene render path states the same
+// refusal and marks the same non-final outputs, so they cannot drift apart in
+// wording or remedies.
 
 /**
  * The refusal for a trial Creator Asset reference (REQ-018): names the asset,
@@ -528,52 +515,17 @@ function matches(entry: LibraryEntry<BaseMeta>, q: string): boolean {
 export async function searchLibrary(
   lib: Library,
   query: string,
-  opts?: { facets?: Record<string, string[]> },
 ): Promise<Library> {
   const q = query.trim().toLowerCase();
   const text = <M extends BaseMeta>(entries: LibraryEntry<M>[]) =>
     q ? entries.filter((e) => matches(e, q)) : entries;
-  const identity = opts?.facets
-    ? searchIdentityFacets(lib.identity.entries, opts.facets, lib.identity.vocabulary)
-    : lib.identity.entries;
   return {
     logos: text(lib.logos),
     plates: text(lib.plates),
     cutouts: text(lib.cutouts),
     objects: text(lib.objects),
     masks: text(lib.masks),
-    identity: { ...lib.identity, entries: text(identity) },
   };
-}
-
-/**
- * Resolve a logo id or alias to its entry. Throws with the available options
- * when nothing matches, so a typo'd overlay spec fails loudly before compose.
- */
-export function resolveLogo(lib: Library, idOrAlias: string): LibraryEntry<LogoMeta> {
-  const want = idOrAlias.toLowerCase();
-  const hit = lib.logos.find((l) => matchesLogo(l, want));
-  if (hit) return hit;
-  throw new Error(
-    `Unknown logo "${idOrAlias}". In library: ${
-      lib.logos.map((l) => l.meta.id).join(", ") || "(none — add one with bun run library add-logo)"
-    }`,
-  );
-}
-
-/**
- * Resolve a cutout id to its entry. Throws with the available options when
- * nothing matches, so a typo'd --cutout fails loudly before compose.
- */
-export function resolveCutout(lib: Library, id: string): LibraryEntry<CutoutMeta> {
-  const hit = lib.cutouts.find(byId(id.toLowerCase()));
-  if (hit) return hit;
-  throw new Error(
-    `Unknown cutout "${id}". In library: ${
-      lib.cutouts.map((c) => c.meta.id).join(", ") ||
-      "(none — add one with bun run library add-cutout <file> --id <name>)"
-    }`,
-  );
 }
 
 // --- the asset resolution contract ------------------------------------------

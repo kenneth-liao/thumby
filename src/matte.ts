@@ -2,9 +2,8 @@
  * The matting pass (REQ-017) — the stage that turns a generated creator
  * candidate into an adoptable isolated asset.
  *
- * Why it exists: the tested likeness recipe returns opaque RGB (measured —
- * see "Isolation" in docs/asset-requirements.md), and the adoption gate
- * refuses opaque bytes by design. Isolation therefore cannot be a prompt
+ * Why it exists: image providers return opaque RGB for this workflow, and
+ * the adoption gate refuses opaque bytes by design. Isolation therefore cannot be a prompt
  * instruction and cannot be RGB chroma-key distance; it is a segmentation
  * pass that predicts a subject matte and applies it as a real alpha channel.
  *

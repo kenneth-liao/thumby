@@ -24,17 +24,8 @@ export type TextZone = "left" | "right" | "bottom" | "none";
 function buildPrompt(
   subject: string,
   zone: TextZone,
-  subjectless = false,
   refs: TypedRefInput[] = [],
-): string {  // With a cutout supplying the subject, the plate must stay a clean backdrop —
-  // asking for a subject here produces something that fights the cutout.
-  // Legacy `thumb --cutout` mode only; Plate Jobs never set it.
-  const backdrop: Record<TextZone, string> = {
-    left: "Keep the entire left half AND the centre of the frame completely empty and unobstructed. Confine every visual element to the far right edge.",
-    right: "Keep the entire right half AND the centre of the frame completely empty and unobstructed. Confine every visual element to the far left edge.",
-    bottom: "Keep the bottom half and the centre completely empty. Confine every visual element to the top edge.",
-    none: "Keep the composition even and uncluttered across the whole frame.",
-  };
+): string {
   const composition: Record<TextZone, string> = {
     left: "Compose with the subject pushed to the RIGHT third of the frame. Keep the left half visually calm and uncluttered.",
     right:
@@ -49,19 +40,9 @@ function buildPrompt(
     "",
     ...(refs.length ? [...roleManifest(refs, PLATE_OBJECT_ROLE_INSTRUCTIONS), ""] : []),
     "Format: a 16:9 YouTube thumbnail background plate.",
-    subjectless ? backdrop[zone] : composition[zone],
-    ...(subjectless
-      ? [
-          "This is a backdrop only. Do NOT include any person, character, figure, hands, product, device, or prominent foreground object.",
-        ]
-      : []),
+    composition[zone],
     "Style: high contrast, saturated, punchy lighting, strong focal subject, clean readable silhouette at small sizes.",
-    // The UI ban belongs to the legacy cutout backdrop contract (INT-1): a UI
-    // element in the backdrop fights the local cutout like any other subject
-    // would. Flexible Plate Jobs (ADR-0011) may request UI freely.
-    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks" +
-      (subjectless ? ", and no UI elements" : "") +
-      " anywhere in the image.",
+    "CRITICAL: render absolutely no text, no letters, no words, no numbers, no logos, no watermarks anywhere in the image.",
   ].join("\n");
 }
 
@@ -93,9 +74,8 @@ function buildObjectPrompt(subject: string, refs: TypedRefInput[] = []): string 
  * A typed reference as generation receives it: its declared role, the path
  * whose bytes are sent, and the recorded content identity those bytes are
  * verified against — exactly once, at the generation boundary
- * (loadVerifiedRefs), before any candidate runs. The legacy thumb path
- * supplies no recorded identity, so its references are loaded without
- * verification.
+ * (loadVerifiedRefs), before any candidate runs. Direct API callers may omit
+ * a recorded identity; those references are loaded without verification.
  */
 export interface TypedRefInput {
   role: string;
@@ -105,10 +85,9 @@ export interface TypedRefInput {
 }
 
 /**
- * Per-role instructions, role-assigning every reference in the prompt —
- * unassigned references make the model average faces (the chubby-drift
- * failure mode, docs/asset-requirements.md). The likeness recipe lines are
- * the tested rules from that document.
+ * Per-role instructions assign every reference in the prompt. Identity roles
+ * preserve the supplied subject instead of letting the model average faces;
+ * other roles limit what the model should borrow from each image.
  */
 const CREATOR_ROLE_INSTRUCTIONS: Record<string, string> = {
   identity:
@@ -119,20 +98,6 @@ const CREATOR_ROLE_INSTRUCTIONS: Record<string, string> = {
   style: "style reference — lighting and visual style only",
   edit: "source-to-edit — the image to change; keep its person's identity exactly",
 };
-
-/**
- * The model-adapted reference order (REQ-017): identity anchors first, the
- * pose reference last, every other role in declared order between — the
- * ordering the tested likeness recipe prescribes. The prompt's role manifest
- * is built from this same order, so the recorded fullPrompt always describes
- * how the images were actually attached, whatever the model's call shape.
- */
-export function creatorRefOrder(refs: TypedRefInput[]): TypedRefInput[] {
-  const identity = refs.filter((r) => r.role === "identity");
-  const pose = refs.filter((r) => r.role === "pose");
-  const middle = refs.filter((r) => r.role !== "identity" && r.role !== "pose");
-  return [...identity, ...middle, ...pose];
-}
 
 /**
  * The one shape of an effective prompt's reference manifest: every attached
@@ -222,12 +187,6 @@ export interface GenerateOptions {
   /** Typed references — role-assigned in the effective prompt, never path-named. */
   refs: TypedRefInput[];
   count: number;
-  /**
-   * Legacy `thumb --cutout` mode only: the cutout supplies the subject, so the
-   * plate must stay a bare backdrop that does not fight it. Plate Jobs never
-   * set it — the agent's subject is authoritative (DEC-010, ADR-0011).
-   */
-  subjectless?: boolean;
   /**
    * Multimodal models only — lowers creative drift for likeness work.
    * Image-kind models have no such knob; a value here is rejected loudly.
@@ -402,7 +361,7 @@ async function runGeneration(
 export async function generatePlates(
   opts: GenerateOptions,
 ): Promise<GenerateResult> {
-  const prompt = buildPrompt(opts.subject, opts.zone, opts.subjectless, opts.refs);
+  const prompt = buildPrompt(opts.subject, opts.zone, opts.refs);
   const { plates, warnings } = await runGeneration(
     resolveModel(opts.model),
     prompt,
@@ -455,9 +414,8 @@ const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes)
  * the path is resolved exactly once here, and the returned bytes are exactly
  * what the model is sent for every candidate, so the provider can never
  * receive different content than the Job records (INT: request-to-generation
- * drift is refused, not sent). A reference without a recorded identity (the
- * legacy thumb path) is loaded without verification — nothing was recorded
- * to verify against.
+ * drift is refused, not sent). A reference without a recorded identity is
+ * loaded without verification because there is nothing to compare it with.
  */
 export async function loadVerifiedRefs(refs: TypedRefInput[]): Promise<LoadedRef[]> {
   return Promise.all(
@@ -486,10 +444,10 @@ export async function loadVerifiedRefs(refs: TypedRefInput[]): Promise<LoadedRef
 }
 
 /**
- * Creator candidate generation (REQ-017): typed references are adapted to the
- * tested ordering (identity anchors first, pose last) and role-assigned in the
- * effective prompt by ordinal, so the recorded fullPrompt preserves every
- * declared role for any model call shape — with no local path sent off-box.
+ * Creator candidate generation (REQ-017): typed references keep the caller's
+ * order and are role-assigned in the effective prompt by ordinal, so the
+ * recorded fullPrompt describes the images exactly as they reach the model —
+ * with no local path sent off-box.
  * The prompt asks for a clean, evenly lit figure on a flat background — the
  * best input for the matting pass — and never for transparency: asking for it
  * produced a painted checkerboard (ADR-0006).
@@ -502,12 +460,11 @@ export async function generateCreators(
   opts: GenerateCreatorOptions,
 ): Promise<GenerateResult> {
   const spec = resolveModel(opts.model);
-  const ordered = creatorRefOrder(opts.refs);
-  const prompt = buildCreatorPrompt(opts.subject, ordered);
+  const prompt = buildCreatorPrompt(opts.subject, opts.refs);
   const { plates, warnings } = await runGeneration(
     spec,
     prompt,
-    ordered,
+    opts.refs,
     opts.count,
     opts.temperature,
   );
