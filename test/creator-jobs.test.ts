@@ -13,6 +13,7 @@ import {
   type CreatorGenerator,
   type CreatorJobRequest,
   type JobGenerator,
+  type TypedRef,
 } from "../src/jobs.js";
 import { scanLibrary, writePlateAsset } from "../src/assets.js";
 import { composeMatte, type MatteEngine } from "../src/matte.js";
@@ -34,7 +35,7 @@ afterEach(async () => {
 
 /**
  * What the tested recipe actually returns: an opaque RGB figure on a plain
- * background (measured — docs/asset-requirements.md). The fixtures model the
+ * background (measured provider behavior). The fixtures model the
  * real default path, so the suite exercises generation *and* matting.
  */
 const OPAQUE_PNG = encodePng(
@@ -144,13 +145,13 @@ describe("validateCreatorRequest", () => {
 });
 
 describe("runCreatorJob", () => {
-  test("records a schemaVersion 3 creator job with its typed references", async () => {
+  test("records a schemaVersion 5 creator job with its ordered typed references", async () => {
     const job = await runCreatorJob(jobRoot, "creator-basic", baseRequest(), fakeGen, fakeMatte);
     expect(job.kind).toBe("creator");
-    expect(job.schemaVersion).toBe(3);
+    expect(job.schemaVersion).toBe(5);
     expect(job.request.refs.map((r) => r.role)).toEqual(["identity", "identity", "pose"]);
     const record = JSON.parse(await readFile(path.join(jobRoot, "creator-basic", "job.json"), "utf8"));
-    expect(record.schemaVersion).toBe(3);
+    expect(record.schemaVersion).toBe(5);
     expect(record.kind).toBe("creator");
   });
 
@@ -214,10 +215,9 @@ describe("loadJob record integrity for creator jobs", () => {
     ).rejects.toThrow(/schemaVersion 2|creator/i);
   });
 
-  test("rejects a v4 record claiming kind creator — creator keeps schemaVersion 3", async () => {
-    // v4 is the role-aware-Reference prompt contract for plate and object
-    // jobs (#56, PROD-1); a creator record under it has no contract and must
-    // not run.
+  test("rejects a v4 record claiming kind creator — v4 belongs to Plate/Object Jobs", async () => {
+    // v4 is the role-aware-Reference prompt contract for Plate and Object
+    // Jobs (#56, PROD-1); a Creator record under it has no contract.
     await runCreatorJob(jobRoot, "creator-forged-v4", baseRequest(), fakeGen, fakeMatte);
     const file = path.join(jobRoot, "creator-forged-v4", "job.json");
     const rec = JSON.parse(await readFile(file, "utf8"));
@@ -228,21 +228,43 @@ describe("loadJob record integrity for creator jobs", () => {
       adoptCandidate(jobRoot, "creator-forged-v4", "0", "no-gate", { libraryRoot }),
     ).rejects.toThrow(/schemaVersion 4|creator/i);
   });
-  test("keeps schemaVersion 3 across a rerun — creator semantics are unchanged", async () => {
-    // The role-aware prompt contract is a Plate/Object transition (PROD-1):
-    // creator records are v3 today and stay v3 through reruns.
-    const anchor = path.join(root, "anchor-keep-v3.png");
+  test("upgrades a v3 creator rerun without changing its legacy provider order", async () => {
+    const pose = path.join(root, "legacy-pose.png");
+    const style = path.join(root, "legacy-style.png");
+    const anchor = path.join(root, "legacy-anchor.png");
+    await writeFile(pose, "pose-bytes");
+    await writeFile(style, "style-bytes");
     await writeFile(anchor, "anchor-bytes");
+    const hashed = (role: string, file: string, bytes: string): TypedRef => ({
+      role,
+      path: file,
+      contentHash: createHash("sha256").update(bytes).digest("hex"),
+    });
     const req: CreatorJobRequest = {
       ...baseRequest(),
-      refs: [{ role: "identity", path: anchor, contentHash: createHash("sha256").update("anchor-bytes").digest("hex") }],
+      refs: [
+        hashed("pose", pose, "pose-bytes"),
+        hashed("style", style, "style-bytes"),
+        hashed("identity", anchor, "anchor-bytes"),
+      ],
     };
     await runCreatorJob(jobRoot, "creator-rerun-v3", req, fakeGen, fakeMatte);
-    await rerunCreatorJob(jobRoot, "creator-rerun-v3", fakeGen, fakeMatte);
-    const record = JSON.parse(
-      await readFile(path.join(jobRoot, "creator-rerun-v3", "job.json"), "utf8"),
-    );
-    expect(record.schemaVersion).toBe(3);
+    const file = path.join(jobRoot, "creator-rerun-v3", "job.json");
+    const legacy = JSON.parse(await readFile(file, "utf8"));
+    legacy.schemaVersion = 3;
+    await writeFile(file, JSON.stringify(legacy, null, 2));
+
+    let rerunRoles: string[] = [];
+    const capture: CreatorGenerator = async (request) => {
+      rerunRoles = request.refs.map((ref) => ref.role);
+      return fakeGen(request);
+    };
+    await rerunCreatorJob(jobRoot, "creator-rerun-v3", capture, fakeMatte);
+
+    const record = JSON.parse(await readFile(file, "utf8"));
+    expect(rerunRoles).toEqual(["identity", "style", "pose"]);
+    expect(record.schemaVersion).toBe(5);
+    expect(record.request.refs.map((ref: TypedRef) => ref.role)).toEqual(rerunRoles);
     expect(record.runs).toHaveLength(2);
   });
 });
@@ -384,7 +406,7 @@ describe("adoptCandidate for creator jobs", () => {
     const job = await runCreatorJob(jobRoot, "creator-adopt", baseRequest(), fakeGen, fakeMatte);
     const cand = job.runs[0]!.candidates[0]!;
 
-    const result = await adoptCandidate(jobRoot, "creator-adopt", cand.contentHash, "kenny-crossed", {
+    const result = await adoptCandidate(jobRoot, "creator-adopt", cand.contentHash, "creator-crossed", {
       libraryRoot,
       name: "Arms Crossed",
       tags: ["arms-crossed", "explaining"],
@@ -392,7 +414,7 @@ describe("adoptCandidate for creator jobs", () => {
 
     expect(result.adoptedFrom).toBe(`job:creator-adopt#${cand.contentHash}`);
     const lib = await scanLibrary(libraryRoot);
-    const asset = lib.cutouts.find((c) => c.meta.id === "kenny-crossed")!;
+    const asset = lib.cutouts.find((c) => c.meta.id === "creator-crossed")!;
     expect(asset).toBeDefined();
     // The Asset's bytes are the matte — the isolated form, not the opaque
     // candidate — and the candidate it came from stays in the provenance.
@@ -417,7 +439,7 @@ describe("adoptCandidate for creator jobs", () => {
     expect(result.contentHash).toBe(cand.matte!.contentHash);
     expect(result.contentHash).toBe(asset.hash);
     expect(result.contentHash).not.toBe(cand.contentHash);
-    expect(result.imagePath.endsWith(path.join("kenny-crossed", "cutout.png"))).toBe(true);
+    expect(result.imagePath.endsWith(path.join("creator-crossed", "cutout.png"))).toBe(true);
   });
 
   test("refuses a candidate the matting pass could not isolate — never the opaque bytes", async () => {
@@ -484,7 +506,7 @@ describe("adoptCandidate for creator jobs", () => {
     const job = await loadJob(jobRoot, "creator-scene");
     const scenePath = path.join(root, "scene.json");
     await writeFile(scenePath, JSON.stringify({ schemaVersion: 1, layers: [] }));
-    await adoptCandidate(jobRoot, "creator-scene", job.runs[0]!.candidates[0]!.contentHash, "kenny-trial", {
+    await adoptCandidate(jobRoot, "creator-scene", job.runs[0]!.candidates[0]!.contentHash, "creator-trial", {
       libraryRoot,
     });
     // The scene file is byte-identical: adoption enters the library only.
@@ -548,13 +570,13 @@ describe("jobs creators (CLI)", () => {
       "--ref", `identity:${anchor}`,
       "--ref", `pose:${pose}`,
       "--count", "3",
-      "--job", "kenny-crossed",
+      "--job", "creator-crossed",
     ]);
     expect(res.exitCode).toBe(0);
     const out = res.output as Record<string, any>;
     expect(out.ok).toBe(true);
     expect(out.kind).toBe("creator");
-    const record = JSON.parse(await readFile(path.join(cliJobsRoot, "kenny-crossed", "job.json"), "utf8"));
+    const record = JSON.parse(await readFile(path.join(cliJobsRoot, "creator-crossed", "job.json"), "utf8"));
     expect(record.request.model).toBe("nano-2");
     expect(record.request.refs.map((r: any) => r.role)).toEqual(["identity", "pose"]);
     expect(record.request.count).toBe(3);
@@ -622,10 +644,10 @@ describe("jobs creators (CLI)", () => {
     await runCli(["creators", "arms crossed", "--ref", `identity:${anchor}`, "--job", "cli-adopt"]);
     const job = await loadJob(cliJobsRoot, "cli-adopt");
     const hash = job.runs[0]!.candidates[0]!.contentHash;
-    const res = await runCli(["adopt", "cli-adopt", hash, "--id", "kenny-trial", "--tags", "arms-crossed"]);
+    const res = await runCli(["adopt", "cli-adopt", hash, "--id", "creator-trial", "--tags", "arms-crossed"]);
     expect(res.exitCode).toBe(0);
     const lib = await scanLibrary(cliLibraryRoot);
-    const cutout = lib.cutouts.find((c) => c.meta.id === "kenny-trial")!;
+    const cutout = lib.cutouts.find((c) => c.meta.id === "creator-trial")!;
     expect(cutout).toBeDefined();
     if (cutout.meta.kind === "cutout") expect(cutout.meta.approval).toBe("trial");
   });

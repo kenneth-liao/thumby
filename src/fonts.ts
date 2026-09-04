@@ -1,8 +1,7 @@
 /**
- * Type pairings. Each is a display face for the headline plus a humanist sans
- * for the eyebrow and kicker. Every face is bundled under assets/fonts/ as an
- * OFL-licensed TTF (latin subset) and loaded via @font-face from local bytes —
- * no system fonts, no network. See assets/fonts/LICENSE.md.
+ * Fonts bundled under assets/fonts/ as OFL-licensed TTFs (latin subsets).
+ * Scene text loads them through @font-face from local bytes: no system fonts,
+ * no network, and no silent fallback. See assets/fonts/LICENSE.md.
  */
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -17,122 +16,29 @@ export interface FontFace {
   file: string;
 }
 
-export interface Pairing {
-  display: FontFace;
-  sans: FontFace;
-  /** Headline tracking. Condensed blacks want a touch negative. */
-  tracking: string;
-  /**
-   * "style" defers to the preset. Display sans faces are drawn for caps at
-   * size, so they pin to upper regardless of which preset is running.
-   */
-  textCase: "upper" | "style";
-  /** Multiplies the preset stroke. Sans takes a heavier outline than serif. */
-  strokeScale: number;
-  description: string;
-}
-
 const FONTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "fonts");
-export { FONTS_DIR };
-
-const SOURCE_SANS = {
-  family: "Source Sans 3",
-  weight: 600,
-  file: "source-sans-3.ttf",
-};
-
-export const PAIRINGS: Record<string, Pairing> = {
-  // --- punchy display sans -------------------------------------------------
-  condensed: {
-    display: { family: "Anton", weight: 400, file: "anton.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "-0.02em",
-    textCase: "upper",
-    strokeScale: 1.35,
-    description: "Anton + Source Sans 3 — most caps per line, heaviest strokes",
-  },
-  impact: {
-    display: { family: "Archivo Black", weight: 400, file: "archivo-black.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "-0.01em",
-    textCase: "upper",
-    strokeScale: 1.35,
-    description: "Archivo Black + Source Sans 3 — the canonical thumbnail face",
-  },
-  black: {
-    display: { family: "Oswald", weight: 700, file: "oswald.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "-0.02em",
-    textCase: "upper",
-    strokeScale: 1.35,
-    description: "Oswald Bold + Source Sans 3 — tall condensed caps",
-  },
-  phosphate: {
-    display: { family: "Passion One", weight: 900, file: "passion-one.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "0",
-    textCase: "upper",
-    strokeScale: 1.2,
-    description: "Passion One Black + Source Sans 3 — condensed with more character",
-  },
-  script: {
-    display: { family: "Permanent Marker", weight: 400, file: "permanent-marker.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "0.01em",
-    textCase: "style",
-    strokeScale: 0.5,
-    description: "Permanent Marker + Source Sans 3 — hand-painted marker lettering",
-  },
-
-  // --- cartographic serif --------------------------------------------------
-  clarendon: {
-    display: { family: "Bevan", weight: 400, file: "bevan.ttf" },
-    sans: SOURCE_SANS,
-    tracking: "-0.008em",
-    textCase: "style",
-    strokeScale: 1,
-    description: "Bevan + Source Sans 3 — park-sign slab, editorial",
-  },
-  iowan: {
-    display: { family: "Lora", weight: 700, file: "lora.ttf" },
-    sans: { family: "Nunito Sans", weight: 700, file: "nunito-sans.ttf" },
-    tracking: "-0.005em",
-    textCase: "style",
-    strokeScale: 1,
-    description: "Lora Bold + Nunito Sans Bold — warmer, bookish oldstyle",
-  },
-  hoefler: {
-    display: { family: "Alegreya", weight: 900, file: "alegreya.ttf" },
-    sans: { family: "Marcellus", weight: 400, file: "marcellus.ttf" },
-    tracking: "0",
-    textCase: "style",
-    strokeScale: 1,
-    description: "Alegreya Black + Marcellus — engraved and literary; thins out small",
-  },
-  charter: {
-    display: { family: "Bitter", weight: 700, file: "bitter.ttf" },
-    sans: { family: "Montserrat", weight: 600, file: "montserrat.ttf" },
-    tracking: "-0.005em",
-    textCase: "style",
-    strokeScale: 1,
-    description: "Bitter Bold + Montserrat — sturdy, modern, lowest contrast",
-  },
-};
-
-export const DEFAULT_PAIRING = "condensed";
 
 /**
- * Every bundled face keyed by family — derived from PAIRINGS, the single home
- * of font facts. Scene text layers resolve their `font` family through this
- * registry, so a Scene can only ever name fonts the renderer ships bytes for.
+ * Every bundled face keyed by family — the single home of font facts. Scene
+ * text layers can only name fonts whose bytes the renderer ships.
  */
-export const BUNDLED_FACES: ReadonlyMap<string, FontFace> = (() => {
-  const faces = new Map<string, FontFace>();
-  for (const p of Object.values(PAIRINGS))
-    for (const f of [p.display, p.sans])
-      if (!faces.has(f.family)) faces.set(f.family, f);
-  return faces;
-})();
+export const BUNDLED_FACES: ReadonlyMap<string, FontFace> = new Map(
+  [
+    { family: "Source Sans 3", weight: 600, file: "source-sans-3.ttf" },
+    { family: "Anton", weight: 400, file: "anton.ttf" },
+    { family: "Archivo Black", weight: 400, file: "archivo-black.ttf" },
+    { family: "Oswald", weight: 700, file: "oswald.ttf" },
+    { family: "Passion One", weight: 900, file: "passion-one.ttf" },
+    { family: "Permanent Marker", weight: 400, file: "permanent-marker.ttf" },
+    { family: "Bevan", weight: 400, file: "bevan.ttf" },
+    { family: "Lora", weight: 700, file: "lora.ttf" },
+    { family: "Nunito Sans", weight: 700, file: "nunito-sans.ttf" },
+    { family: "Alegreya", weight: 900, file: "alegreya.ttf" },
+    { family: "Marcellus", weight: 400, file: "marcellus.ttf" },
+    { family: "Bitter", weight: 700, file: "bitter.ttf" },
+    { family: "Montserrat", weight: 600, file: "montserrat.ttf" },
+  ].map((face) => [face.family, face]),
+);
 
 /**
  * Resolve a text layer's font family to its bundled face. Throws naming the
@@ -144,16 +50,6 @@ export function resolveFace(family: string): FontFace {
   throw new Error(
     `unknown font family "${family}" — bundled families: ${[...BUNDLED_FACES.keys()].join(", ")}`,
   );
-}
-
-export function resolvePairing(name: string): Pairing {
-  const p = PAIRINGS[name];
-  if (!p) {
-    throw new Error(
-      `Unknown --type "${name}". Options: ${Object.keys(PAIRINGS).join(", ")}`,
-    );
-  }
-  return p;
 }
 
 export function fontAssetPath(face: FontFace): string {
@@ -204,11 +100,6 @@ export function fontFaceCss(...faces: FontFace[]): string {
       return `@font-face { font-family: "${family}"; font-weight: ${weight}; src: url(${dataUri}) format("truetype"); }`;
     })
     .join("\n");
-}
-
-/** Startup validation: every face of the pairing must be bundled. */
-export function assertFontAssets(p: Pairing): void {
-  for (const face of [p.display, p.sans]) requireFontAsset(face);
 }
 
 /**

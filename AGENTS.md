@@ -38,35 +38,33 @@ Single-context repo: `CONTEXT.md` and `docs/adr/` at the root. See `docs/agents/
   sha-256 in `src/segment.ts`, and never loaded by the unit suite — tests
   inject a fake `MatteEngine`, and the live check in `test/segment.test.ts`
   skips when the weights are absent.
-- Core design decision (model paints background only, text is local CSS —
-  ADR-0001): do not move text rendering onto the model.
+- Core design decision (models produce source Assets, while text and final
+  composition render locally — ADR-0001/0004): do not move final text or the
+  final composite onto the model.
 
 ## Rendering gotchas
 
-If you change `src/compose.ts` rendering, **look at the output image** — the
-following bugs were invisible in logs:
+If you change `src/scene-render.ts`, **look at the output image** — these bugs
+can be invisible in logs:
 
 - Nested double quotes inside an HTML `style="..."` attribute truncate
-  silently — emit a `<style>` block (compose.ts does).
+  silently. Prefer stylesheet rules or carefully escaped attributes.
 - A block element's `getBoundingClientRect().width` is the container width;
   to detect font fallback, measure an inline element.
-- CSS selectors aimed at one path group can hit SVG marker paths too (the
-  dashed-arrowhead bug). Scope selectors precisely.
-- `vector-effect: non-scaling-stroke` makes `stroke-width` mean CSS pixels —
+- CSS selectors aimed at one path group can hit SVG marker paths too. Scope
+  selectors precisely.
+- `vector-effect: non-scaling-stroke` makes `stroke-width` mean CSS pixels;
   fractional widths go sub-pixel and vanish. Connectors use pixel-space SVG.
-- A background-clip gradient on `.headline.fill` overrides child `.accent`
-  colours unless `-webkit-text-fill-color` is restated on the child.
-- In batch sweeps, check the output file list, not just timing — a silenced
-  stdout once hid 3 of 4 variants failing to render.
-- An `@font-face` rule inside a `:root {}` block is invalid CSS and ignored
-  silently — every text element then renders in the default serif while
-  layouts and logs look normal. Font-face rules go at the stylesheet's top
-  level (compose.ts), and the render probe re-verifies each family resolves.
+- In batch renders, check the output file list, not just timing.
+- An `@font-face` rule inside a `:root {}` block is invalid CSS and ignored.
+  Font-face rules go at the stylesheet's top level, and the render probe must
+  re-verify that each requested family resolves.
 
 ## Assets and provenance
 
-- Asset requirements for logos, plates, and cutouts (including Kenny's
-  likeness rules): `docs/asset-requirements.md` — canonical.
-- Creator cutouts must be composited or derived via a single edit pass from
-  the identity kit; **never generate his likeness from text alone**.
+- Generation references are arbitrary local image files supplied by the
+  caller. Preserve their order, derive their sha-256 identities once at Job
+  creation, and verify/read their bytes once at generation.
+- Creator generation requires at least one caller-supplied `identity`
+  reference; never generate a likeness from text alone.
 - Design decisions and their rationale: `docs/adr/`.

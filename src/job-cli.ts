@@ -112,13 +112,13 @@ creators options
   a likeness is never generated from text alone. Accepted reference roles:
   identity (repeatable anchors), pose, expression, outfit, style, and edit
   (source-to-edit). Defaults to ${CREATOR_DEFAULT_MODEL}, the measured likeness workhorse.
-  References are attached identity-anchors-first and pose-last; the run's
-  fullPrompt role-assigns every reference, so the provenance preserves each
-  declared role. Every candidate then goes through the matting pass — a local
+  References reach the model in the caller's order; the run's fullPrompt
+  role-assigns every reference, so provenance preserves each declared role.
+  Every candidate then goes through the matting pass — a local
   BiRefNet segmenter predicts the subject mask and it becomes the candidate's
   alpha channel, since the models return opaque RGB (ADR-0006) — and
-  "jobs adopt" writes that matte, always as a trial Cutout Asset; approval is
-  Kenneth's alone (DEC-004). The pass is local and unbilled: run cost is
+  "jobs adopt" writes that matte, always as a trial Cutout Asset; only an
+  explicit human decision can approve it (DEC-004). The pass is local and unbilled: run cost is
   generation only. First use needs the pinned weights cached under models/ —
   a missing file fails loudly with the exact fetch command, before any
   generation is paid for. A candidate the pass could not isolate is refused

@@ -127,8 +127,7 @@ export const DEFAULT_MODEL = "gpt-image";
 
 /**
  * The creator-job default — a kind-specific likeness preference, not a
- * capability derivation: the measured likeness workhorse
- * (docs/asset-requirements.md). It flows through the same
+ * capability derivation: the measured likeness workhorse. It flows through the same
  * reference-capability gate as every other selection, so a drift in its
  * qualification fails loudly instead of spending on a refused call.
  */

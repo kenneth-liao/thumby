@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { buildCreatorPrompt, creatorRefOrder, loadVerifiedRefs } from "../src/generate.js";
+import { buildCreatorPrompt, loadVerifiedRefs } from "../src/generate.js";
 import type { TypedRef } from "../src/jobs.js";
 
 const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -14,67 +14,22 @@ const ref = (role: string, p: string): TypedRef => ({
   contentHash: "0".repeat(64),
 });
 
-describe("creatorRefOrder", () => {
-  test("orders identity anchors first and the pose reference last — the tested recipe", () => {
-    const ordered = creatorRefOrder([
-      ref("pose", "pose.png"),
-      ref("identity", "anchor-a.png"),
-      ref("style", "style.png"),
-      ref("identity", "anchor-b.png"),
-      ref("expression", "expr.png"),
-    ]);
-    expect(ordered.map((r) => r.role)).toEqual([
-      "identity",
-      "identity",
-      "style",
-      "expression",
-      "pose",
-    ]);
-    // Anchors keep their declared order among themselves.
-    expect(ordered.map((r) => r.path)).toEqual([
-      "anchor-a.png",
-      "anchor-b.png",
-      "style.png",
-      "expr.png",
-      "pose.png",
-    ]);
-  });
-
-  test("keeps middle roles (including edit) in declared order between anchors and pose", () => {
-    const ordered = creatorRefOrder([
-      ref("edit", "src.png"),
-      ref("identity", "a.png"),
-      ref("outfit", "o.png"),
-      ref("pose", "p.png"),
-    ]);
-    expect(ordered.map((r) => r.path)).toEqual(["a.png", "src.png", "o.png", "p.png"]);
-  });
-
-  test("handles anchors-only and pose-only-middle edge orders", () => {
-    expect(creatorRefOrder([ref("pose", "p.png"), ref("identity", "a.png")]).map((r) => r.path)).toEqual([
-      "a.png",
-      "p.png",
-    ]);
-    expect(creatorRefOrder([ref("identity", "a.png")]).map((r) => r.path)).toEqual(["a.png"]);
-  });
-});
-
 describe("buildCreatorPrompt", () => {
-  const ordered = creatorRefOrder([
+  const ordered = [
     ref("pose", "pose.png"),
     ref("identity", "anchor-a.png"),
     ref("identity", "anchor-b.png"),
     ref("style", "style.png"),
-  ]);
+  ];
 
   test("role-assigns every reference without sending local paths off-box", () => {
     const prompt = buildCreatorPrompt("arms crossed, explaining to camera", ordered);
     // Each reference is numbered and role-labeled so the model can assign roles
     // by ordinal alone — no local path leaves the machine.
-    expect(prompt).toContain("image 1 — identity");
+    expect(prompt).toContain("image 1 — pose");
     expect(prompt).toContain("image 2 — identity");
-    expect(prompt).toContain("image 3 — style");
-    expect(prompt).toContain("image 4 — pose");
+    expect(prompt).toContain("image 3 — identity");
+    expect(prompt).toContain("image 4 — style");
     for (const ref of ordered) {
       expect(prompt).not.toContain(ref.path);
       expect(prompt).not.toContain(path.basename(ref.path));
