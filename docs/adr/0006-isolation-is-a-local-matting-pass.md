@@ -70,9 +70,9 @@ Local inference is the right home for it, and not only on cost:
   offline, and a likeness never crosses the network for isolation.
 
 The cost is a large third-party artefact and a native dependency
-(`onnxruntime-node`). Both are acceptable here: the target machine is a
-MacBook Pro M4 Pro, this repo is Kenneth's own tooling and is not distributed,
-and the weights are cached once and pinned by hash.
+(`onnxruntime-node`). Both are acceptable here: isolation stays local, the
+weights are cached once under `models/` and pinned by sha-256, and a missing
+or wrong-bytes file fails before any generation is billed.
 
 Keeping the matte **beside** the candidate rather than replacing it preserves
 best-of-N lineage: the candidate is still the likeness evidence the review

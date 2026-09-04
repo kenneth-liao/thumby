@@ -3,13 +3,12 @@ node_modules
 test-plate.png
 .env
 .env.local
-# Personal + third-party-licensed assets stay local (creator cutouts, brand
-# logos) — deny-by-default so nothing private is ever tracked by accident.
+# Caller-supplied library Assets stay local (cutouts, logos, plates, objects,
+# masks) — deny-by-default so nothing private is ever tracked by accident.
 # Bundled OFL fonts are the one carve-out: repo content that must ship
 # (see assets/fonts/LICENSE.md).
 assets/*
 !assets/fonts/
-overlays/*.local.json
 .worktrees/
 # Local matting weights: pinned by sha-256 in src/segment.ts, fetched on
 # demand, never committed (half a gigabyte of third-party model bytes).

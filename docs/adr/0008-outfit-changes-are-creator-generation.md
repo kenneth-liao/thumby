@@ -17,8 +17,8 @@ What a creator change touches decides its path:
   these are **intrinsic edits to the person**. They go through **Creator
   generation** (`jobs creators` with typed `outfit`/`style`/`pose`
   references, nano-2 on the Gateway) plus the **local matting pass**
-  (ADR-0006), producing a new trial Creator Asset. Adopt, obtain Kenneth's
-  approval, then swap the Creator layer's `asset` reference. No masked
+  (ADR-0006), producing a new trial Creator Asset. Adopt, obtain human
+  approval (`library approve`), then swap the Creator layer's `asset` reference. No masked
   recolor is attempted for these, and nothing else in the Scene (plate,
   text, logos, other objects) is regenerated.
 
